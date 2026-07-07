@@ -257,6 +257,22 @@ func TestAdminAPI_MutatingAcceptsSessionCSRF(t *testing.T) {
 	}
 }
 
+func TestAdminAPI_ErrorShape(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c := loginSession(t, app, initToken(t, auth))
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/gateway-keys", strings.NewReader(`{`))
+	req.AddCookie(c)
+	req.Header.Set("X-CSRF-Token", csrfForTest(t, app, c))
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"error"`) || !strings.Contains(rec.Body.String(), `"code"`) {
+		t.Fatalf("missing standard error shape: %s", rec.Body.String())
+	}
+}
+
 func TestGatewayKeys_CreateReturnsRawOnce(t *testing.T) {
 	app, auth, _, _, _, _ := openAdminApp(t)
 	c := loginSession(t, app, initToken(t, auth))

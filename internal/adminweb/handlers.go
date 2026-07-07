@@ -364,7 +364,7 @@ func (h *Handler) handleGatewayKeysCreate(w http.ResponseWriter, r *http.Request
 		Name string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
 		return
 	}
 	raw, display, err := h.deps.GatewayKeys.Create(body.Name)
