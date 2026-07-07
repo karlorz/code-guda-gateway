@@ -28,8 +28,16 @@ Admin UI: `http://127.0.0.1:8080/admin` (login with the admin token from CLI).
 ## Bootstrap configuration (process only)
 
 Gateway keys, provider API keys, and upstream base URLs live in **SQLite**, not
-in environment variables. The service only needs these bootstrap settings (env
-or `/etc/code-guda-gateway/bootstrap.env`):
+in environment variables. The service only needs these bootstrap settings as
+**process environment variables** (the Go binary calls `os.LookupEnv` only; it
+does not read files):
+
+| Source | Notes |
+|---|---|
+| Export in your shell | Typical for local dev (see below). |
+| `/etc/code-guda-gateway/bootstrap.env` | Convenience template — must be loaded into the environment before start (e.g. systemd `EnvironmentFile=` on the unit, or `set -a; source …; set +a` for manual runs). |
+
+Variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
