@@ -273,7 +273,22 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, cookie)
+	if wantsHTMLResponse(r) {
+		http.Redirect(w, r, "/admin", http.StatusFound)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func wantsHTMLResponse(r *http.Request) bool {
+	if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
+		return true
+	}
+	accept := r.Header.Get("Accept")
+	if accept == "" {
+		return false
+	}
+	return strings.Contains(accept, "text/html")
 }
 
 func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -283,7 +298,7 @@ func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "session_id": sid})
+	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
 }
 
 func (h *Handler) handleDashboardJSON(w http.ResponseWriter, r *http.Request) {

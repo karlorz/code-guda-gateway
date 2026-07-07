@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -341,6 +342,15 @@ func TestAuditEvents_List(t *testing.T) {
 	req.AddCookie(c)
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create status = %d", rec.Code)
+	}
+	var created struct {
+		RawKey string `json:"raw_key"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("json create: %v", err)
+	}
 	req2 := httptest.NewRequest(http.MethodGet, "/admin/api/audit-events", nil)
 	req2.AddCookie(c)
 	rec2 := httptest.NewRecorder()
@@ -349,11 +359,46 @@ func TestAuditEvents_List(t *testing.T) {
 		t.Fatalf("status = %d", rec2.Code)
 	}
 	body := rec2.Body.String()
-	if strings.Contains(body, "gsk_") && strings.Contains(body, `"raw`) {
-		t.Fatal("audit list may contain secrets")
-	}
 	if !strings.Contains(body, "gateway_key.create") && !strings.Contains(body, "admin.login") {
 		t.Fatalf("expected audit actions in %s", body)
+	}
+	var events []map[string]any
+	if err := json.Unmarshal(rec2.Body.Bytes(), &events); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	forbiddenKeys := map[string]bool{
+		"raw_key": true, "key_hash": true, "encrypted_key": true, "api_key": true,
+	}
+	var walk func(any) error
+	walk = func(v any) error {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, val := range x {
+				if forbiddenKeys[k] {
+					return fmt.Errorf("forbidden field %q in audit JSON", k)
+				}
+				if err := walk(val); err != nil {
+					return err
+				}
+			}
+		case []any:
+			for _, item := range x {
+				if err := walk(item); err != nil {
+					return err
+				}
+			}
+		case string:
+			if created.RawKey != "" && strings.Contains(x, created.RawKey) {
+				return fmt.Errorf("audit value contains raw gateway key")
+			}
+			if strings.Contains(x, "gsk_") {
+				return fmt.Errorf("audit value contains gateway key prefix")
+			}
+		}
+		return nil
+	}
+	if err := walk(events); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -390,10 +435,14 @@ func TestUsageDaily_List(t *testing.T) {
 }
 
 func TestAdmin_NoRawSecretsInRenderedHTML(t *testing.T) {
-	app, auth, gk, keyRepo, _, _ := openAdminApp(t)
+	app, auth, gk, keyRepo, st, _ := openAdminApp(t)
 	gwRaw, _, _ := gk.Create("html-test")
 	provRaw := "xai-html-leak-key-abcdefghijklmnop"
 	_, _ = keyRepo.Add(providers.ProviderGrok, "h", provRaw)
+	var enc []byte
+	if err := st.DB().QueryRow(`SELECT encrypted_key FROM provider_keys LIMIT 1`).Scan(&enc); err != nil {
+		t.Fatalf("query enc: %v", err)
+	}
 	c := loginSession(t, app, initToken(t, auth))
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
 	req.AddCookie(c)
@@ -405,8 +454,69 @@ func TestAdmin_NoRawSecretsInRenderedHTML(t *testing.T) {
 	html := rec.Body.String()
 	sum := sha256.Sum256([]byte(gwRaw))
 	hash := hex.EncodeToString(sum[:])
-	if strings.Contains(html, gwRaw) || strings.Contains(html, provRaw) || strings.Contains(html, hash) {
-		t.Fatal("dashboard HTML contains raw secrets or gateway hash")
+	if strings.Contains(html, gwRaw) || strings.Contains(html, provRaw) || strings.Contains(html, hash) || strings.Contains(html, string(enc)) {
+		t.Fatal("dashboard HTML contains raw secrets, gateway hash, or provider ciphertext")
+	}
+}
+
+func TestAdminLogout_JSONReturnsOK(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c := loginSession(t, app, initToken(t, auth))
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/logout", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if resp["status"] != "ok" {
+		t.Fatalf("resp = %#v", resp)
+	}
+}
+
+func TestAdminLogout_HTMLFormRedirectsToLogin(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c := loginSession(t, app, initToken(t, auth))
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/logout", strings.NewReader(""))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "text/html")
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if loc != "/admin" {
+		t.Fatalf("Location = %q", loc)
+	}
+}
+
+func TestAdminSession_AuthenticatedWithoutSessionID(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c := loginSession(t, app, initToken(t, auth))
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/session", nil)
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if authVal, ok := resp["authenticated"].(bool); !ok || !authVal {
+		t.Fatalf("authenticated = %#v", resp)
+	}
+	if _, ok := resp["session_id"]; ok {
+		t.Fatalf("session_id must not be exposed: %#v", resp)
 	}
 }
 
