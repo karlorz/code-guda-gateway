@@ -209,8 +209,20 @@ func (r *KeyRepo) MarkSuccess(keyID int64) error {
 
 // MarkFailure records a failed upstream use with a redacted message only.
 func (r *KeyRepo) MarkFailure(keyID int64, status int, redactedMsg string) error {
+	return r.MarkFailureWithCooldown(keyID, status, redactedMsg, nil, nil)
+}
+
+// MarkFailureWithCooldown records failure and optionally sets cooldown_until/reason.
+func (r *KeyRepo) MarkFailureWithCooldown(keyID int64, status int, redactedMsg string, until *time.Time, reason *string) error {
 	msg := Redact(redactedMsg)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var untilStr, reasonStr interface{}
+	if until != nil {
+		untilStr = until.UTC().Format(time.RFC3339Nano)
+	}
+	if reason != nil {
+		reasonStr = *reason
+	}
 	_, err := r.db.Exec(`
 		UPDATE provider_keys SET
 			last_error_at = ?,
@@ -218,8 +230,10 @@ func (r *KeyRepo) MarkFailure(keyID int64, status int, redactedMsg string) error
 			last_error_message_redacted = ?,
 			consecutive_failures = consecutive_failures + 1,
 			total_failures = total_failures + 1,
+			cooldown_until = ?,
+			cooldown_reason = ?,
 			updated_at = ?
-		WHERE id = ?`, now, status, msg, now, keyID)
+		WHERE id = ?`, now, status, msg, untilStr, reasonStr, now, keyID)
 	if err != nil {
 		return fmt.Errorf("mark failure: %w", err)
 	}

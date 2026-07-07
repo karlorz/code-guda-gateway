@@ -1,14 +1,46 @@
-package proxy
+package proxy_test
 
 import (
+	"database/sql"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"code-guda-gateway/internal/keypool"
+	"code-guda-gateway/internal/cooldown"
+	"code-guda-gateway/internal/proxy"
+	"code-guda-gateway/internal/providers"
+	"code-guda-gateway/internal/secrets"
+	"code-guda-gateway/internal/store"
 )
+
+func openProxyTarget(t *testing.T, provider string, keys ...string) (*proxy.Proxy, *providers.KeyRepo, *store.Store) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	mkPath := filepath.Join(t.TempDir(), "master.key")
+	mk, err := secrets.LoadOrCreate(mkPath)
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	repo := providers.NewKeyRepo(st.DB(), mk)
+	for i, k := range keys {
+		name := string(rune('a' + i))
+		if _, err := repo.Add(provider, name, k); err != nil {
+			t.Fatalf("Add key %s: %v", name, err)
+		}
+	}
+	px := proxy.New(proxy.Options{Client: http.DefaultClient})
+	px.SetCooldownSettings(cooldown.DefaultSettings())
+	return px, repo, st
+}
 
 func TestForwardMapsPathAndReplacesAuthorization(t *testing.T) {
 	var gotPath string
@@ -25,21 +57,18 @@ func TestForwardMapsPathAndReplacesAuthorization(t *testing.T) {
 	}))
 	defer upstream.Close()
 
+	px, repo, _ := openProxyTarget(t, providers.ProviderTavily, "upstream-key")
+
 	req := httptest.NewRequest(http.MethodPost, "/tavily/search?debug=1", strings.NewReader(`{"query":"go"}`))
 	req.Header.Set("Authorization", "Bearer inbound")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
-	handler := New(Options{
-		Client: http.DefaultClient,
-		RetryStatuses: map[int]bool{
-			http.StatusTooManyRequests: true,
-		},
-	})
-	result := handler.Forward(rec, req, Target{
-		BaseURL: upstream.URL,
-		Path:    "/search",
-		Keys:    keypool.New([]string{"upstream-key"}),
+	result := px.Forward(rec, req, proxy.Target{
+		BaseURL:  upstream.URL,
+		Path:     "/search",
+		Provider: providers.ProviderTavily,
+		Keys:     repo,
 	})
 
 	if result.Err != nil {
@@ -62,7 +91,7 @@ func TestForwardMapsPathAndReplacesAuthorization(t *testing.T) {
 	}
 }
 
-func TestForwardRetriesNextKeyOnRetryableStatus(t *testing.T) {
+func TestProxy_RetriesAcrossKeysOn429(t *testing.T) {
 	var attempts []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts = append(attempts, r.Header.Get("Authorization"))
@@ -76,14 +105,15 @@ func TestForwardRetriesNextKeyOnRetryableStatus(t *testing.T) {
 	}))
 	defer upstream.Close()
 
+	px, repo, st := openProxyTarget(t, providers.ProviderFirecrawl, "first", "second")
+
 	req := httptest.NewRequest(http.MethodPost, "/firecrawl/scrape", strings.NewReader(`{"url":"https://example.com"}`))
 	rec := httptest.NewRecorder()
-	handler := New(Options{Client: http.DefaultClient, RetryStatuses: DefaultRetryStatuses()})
-
-	result := handler.Forward(rec, req, Target{
-		BaseURL: upstream.URL,
-		Path:    "/scrape",
-		Keys:    keypool.New([]string{"first", "second"}),
+	result := px.Forward(rec, req, proxy.Target{
+		BaseURL:  upstream.URL,
+		Path:     "/scrape",
+		Provider: providers.ProviderFirecrawl,
+		Keys:     repo,
 	})
 
 	if result.Err != nil {
@@ -100,5 +130,183 @@ func TestForwardRetriesNextKeyOnRetryableStatus(t *testing.T) {
 		if attempts[i] != want[i] {
 			t.Fatalf("attempt %d auth = %q, want %q", i, attempts[i], want[i])
 		}
+	}
+	var cooldownUntil sql.NullString
+	_ = st.DB().QueryRow(`SELECT cooldown_until FROM provider_keys WHERE name = 'a'`).Scan(&cooldownUntil)
+	if !cooldownUntil.Valid || cooldownUntil.String == "" {
+		t.Fatal("expected key a to have cooldown_until set after 429")
+	}
+}
+
+func TestProxy_RetriesOn503(t *testing.T) {
+	var attempts int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	px, repo, _ := openProxyTarget(t, providers.ProviderGrok, "k1", "k2")
+	req := httptest.NewRequest(http.MethodGet, "/models", nil)
+	rec := httptest.NewRecorder()
+	_ = px.Forward(rec, req, proxy.Target{
+		BaseURL:  upstream.URL,
+		Path:     "/models",
+		Provider: providers.ProviderGrok,
+		Keys:     repo,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestProxy_CredentialErrorCoolsLongRetriesOtherKey(t *testing.T) {
+	var attempts []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts = append(attempts, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("bad key"))
+	}))
+	defer upstream.Close()
+
+	px, repo, st := openProxyTarget(t, providers.ProviderGrok, "bad-a", "bad-b")
+	s := cooldown.DefaultSettings()
+	s.MaxRetries = 2
+	px.SetCooldownSettings(s)
+	req := httptest.NewRequest(http.MethodGet, "/models", nil)
+	rec := httptest.NewRecorder()
+	_ = px.Forward(rec, req, proxy.Target{
+		BaseURL:  upstream.URL,
+		Path:     "/models",
+		Provider: providers.ProviderGrok,
+		Keys:     repo,
+	})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if len(attempts) != 2 {
+		t.Fatalf("attempts = %d, want 2 (retry different key after credential cooldown on first)", len(attempts))
+	}
+	var reason sql.NullString
+	_ = st.DB().QueryRow(`SELECT cooldown_reason FROM provider_keys WHERE name = 'a'`).Scan(&reason)
+	if !reason.Valid || reason.String != "credential_error" {
+		t.Fatalf("cooldown_reason = %v, want credential_error", reason)
+	}
+}
+
+func TestProxy_RespectsRetryAfter(t *testing.T) {
+	before := time.Now()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer upstream.Close()
+
+	px, repo, st := openProxyTarget(t, providers.ProviderTavily, "only")
+	req := httptest.NewRequest(http.MethodPost, "/search", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	_ = px.Forward(rec, req, proxy.Target{
+		BaseURL:  upstream.URL,
+		Path:     "/search",
+		Provider: providers.ProviderTavily,
+		Keys:     repo,
+	})
+	var untilStr string
+	_ = st.DB().QueryRow(`SELECT cooldown_until FROM provider_keys WHERE name = 'a'`).Scan(&untilStr)
+	until, err := time.Parse(time.RFC3339Nano, untilStr)
+	if err != nil {
+		t.Fatalf("parse cooldown_until: %v", err)
+	}
+	delta := until.Sub(before)
+	if delta < 4*time.Second || delta > 7*time.Second {
+		t.Fatalf("cooldown delta = %v, want ~5s from Retry-After", delta)
+	}
+}
+
+func TestProxy_MaxRetriesExhausted(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("limited"))
+	}))
+	defer upstream.Close()
+
+	px, repo, st := openProxyTarget(t, providers.ProviderGrok, "k1", "k2", "k3", "k4")
+	s := cooldown.DefaultSettings()
+	s.MaxRetries = 3
+	px.SetCooldownSettings(s)
+
+	req := httptest.NewRequest(http.MethodGet, "/models", nil)
+	rec := httptest.NewRecorder()
+	_ = px.Forward(rec, req, proxy.Target{
+		BaseURL:  upstream.URL,
+		Path:     "/models",
+		Provider: providers.ProviderGrok,
+		Keys:     repo,
+	})
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	var cooled int
+	_ = st.DB().QueryRow(`SELECT COUNT(*) FROM provider_keys WHERE cooldown_until IS NOT NULL`).Scan(&cooled)
+	if cooled != 3 {
+		t.Fatalf("cooled keys = %d, want 3", cooled)
+	}
+}
+
+func TestProxy_NoKeysConfigured(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	px, repo, _ := openProxyTarget(t, providers.ProviderGrok)
+	req := httptest.NewRequest(http.MethodGet, "/models", nil)
+	rec := httptest.NewRecorder()
+	result := px.Forward(rec, req, proxy.Target{
+		BaseURL:  upstream.URL,
+		Path:     "/models",
+		Provider: providers.ProviderGrok,
+		Keys:     repo,
+	})
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if result.Err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestProxy_MarkSuccessOn2xx(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	px, repo, st := openProxyTarget(t, providers.ProviderGrok, "good")
+	req := httptest.NewRequest(http.MethodGet, "/models", nil)
+	rec := httptest.NewRecorder()
+	_ = px.Forward(rec, req, proxy.Target{
+		BaseURL:  upstream.URL,
+		Path:     "/models",
+		Provider: providers.ProviderGrok,
+		Keys:     repo,
+	})
+	var successAt sql.NullString
+	var consec int
+	_ = st.DB().QueryRow(`SELECT last_success_at, consecutive_failures FROM provider_keys WHERE name = 'a'`).Scan(&successAt, &consec)
+	if !successAt.Valid {
+		t.Fatal("expected last_success_at set")
+	}
+	if consec != 0 {
+		t.Fatalf("consecutive_failures = %d, want 0", consec)
 	}
 }

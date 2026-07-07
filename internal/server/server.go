@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -8,28 +9,32 @@ import (
 
 	"code-guda-gateway/internal/config"
 	"code-guda-gateway/internal/gatewaykeys"
-	"code-guda-gateway/internal/keypool"
 	"code-guda-gateway/internal/proxy"
+	"code-guda-gateway/internal/providers"
 )
 
 type Server struct {
-	cfg           config.Config
-	proxy         *proxy.Proxy
-	gatewayKeys   *gatewaykeys.Service
-	grokKeys      *keypool.Pool
-	tavilyKeys    *keypool.Pool
-	firecrawlKeys *keypool.Pool
+	cfg         config.Config
+	proxy       *proxy.Proxy
+	gatewayKeys *gatewaykeys.Service
+	providerKeys *providers.KeyRepo
+	settings    *providers.SettingsRepo
 }
 
 // New builds the HTTP handler. Runtime routes require a valid DB-backed gateway key via gatewayKeys.
-func New(cfg config.Config, gatewayKeys *gatewaykeys.Service) http.Handler {
+func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, masterKey []byte) http.Handler {
+	keyRepo := providers.NewKeyRepo(db, masterKey)
+	settingsRepo := providers.NewSettingsRepo(db)
+	px := proxy.New(proxy.Options{})
+	if cs, err := settingsRepo.GetCooldownSettings(); err == nil {
+		px.SetCooldownSettings(cs)
+	}
 	return &Server{
-		cfg:           cfg,
-		proxy:         proxy.New(proxy.Options{}),
-		gatewayKeys:   gatewayKeys,
-		grokKeys:      keypool.New(cfg.GrokKeys),
-		tavilyKeys:    keypool.New(cfg.TavilyKeys),
-		firecrawlKeys: keypool.New(cfg.FirecrawlKeys),
+		cfg:          cfg,
+		proxy:        px,
+		gatewayKeys:  gatewayKeys,
+		providerKeys: keyRepo,
+		settings:     settingsRepo,
 	}
 }
 
@@ -50,13 +55,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/grok/v1/models":
-		s.forward(w, r, s.cfg.GrokBaseURL, "/models", s.grokKeys)
+		s.forward(w, r, providers.ProviderGrok, "/models")
 	case r.Method == http.MethodPost && r.URL.Path == "/grok/v1/chat/completions":
-		s.forward(w, r, s.cfg.GrokBaseURL, "/chat/completions", s.grokKeys)
+		s.forward(w, r, providers.ProviderGrok, "/chat/completions")
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/tavily/"):
-		s.forward(w, r, s.cfg.TavilyBaseURL, strings.TrimPrefix(r.URL.Path, "/tavily"), s.tavilyKeys)
+		s.forward(w, r, providers.ProviderTavily, strings.TrimPrefix(r.URL.Path, "/tavily"))
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/firecrawl/"):
-		s.forward(w, r, s.cfg.FirecrawlBaseURL, strings.TrimPrefix(r.URL.Path, "/firecrawl"), s.firecrawlKeys)
+		s.forward(w, r, providers.ProviderFirecrawl, strings.TrimPrefix(r.URL.Path, "/firecrawl"))
 	default:
 		http.NotFound(w, r)
 	}
@@ -90,10 +95,38 @@ func (s *Server) authorized(r *http.Request) (ok bool, serverErr error) {
 	return rec != nil, nil
 }
 
-func (s *Server) forward(w http.ResponseWriter, r *http.Request, baseURL, path string, keys *keypool.Pool) {
+func (s *Server) forward(w http.ResponseWriter, r *http.Request, provider, path string) {
+	baseURL, err := s.settings.GetBaseURL(provider)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if baseURL == "" {
+		baseURL = s.cfgFallbackBaseURL(provider)
+	}
 	s.proxy.Forward(w, r, proxy.Target{
-		BaseURL: baseURL,
-		Path:    path,
-		Keys:    keys,
+		BaseURL:  baseURL,
+		Path:     path,
+		Provider: provider,
+		Keys:     s.providerKeys,
 	})
+}
+
+func (s *Server) cfgFallbackBaseURL(provider string) string {
+	switch provider {
+	case providers.ProviderGrok:
+		return s.cfg.GrokBaseURL
+	case providers.ProviderTavily:
+		if s.cfg.TavilyBaseURL != "" {
+			return s.cfg.TavilyBaseURL
+		}
+		return providers.DefaultTavilyBaseURL
+	case providers.ProviderFirecrawl:
+		if s.cfg.FirecrawlBaseURL != "" {
+			return s.cfg.FirecrawlBaseURL
+		}
+		return providers.DefaultFirecrawlBaseURL
+	default:
+		return ""
+	}
 }
