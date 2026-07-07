@@ -88,6 +88,14 @@ func TestOpen_SetsPragmas(t *testing.T) {
 	if !strings.EqualFold(journalMode, "wal") {
 		t.Fatalf("journal_mode = %q, want wal", journalMode)
 	}
+
+	var busyTimeout int
+	if err := s.DB().QueryRow(`PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatalf("PRAGMA busy_timeout: %v", err)
+	}
+	if busyTimeout != 5000 {
+		t.Fatalf("busy_timeout = %d, want 5000", busyTimeout)
+	}
 }
 
 func TestOpen_InvalidPath(t *testing.T) {
@@ -110,31 +118,55 @@ func TestMigrate_DoesNotStoreSecrets(t *testing.T) {
 	}
 	defer s.Close()
 
-	rows, err := s.DB().Query(`SELECT sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL`)
+	forbiddenColumns := []string{"secret", "plaintext", "raw_token", "raw_key", "api_key"}
+
+	type secretTableSpec struct {
+		table        string
+		requiredHash string
+	}
+	specs := []secretTableSpec{
+		{table: "gateway_keys", requiredHash: "key_hash"},
+		{table: "admin_tokens", requiredHash: "token_hash"},
+		{table: "provider_keys", requiredHash: "encrypted_key"},
+	}
+
+	for _, spec := range specs {
+		cols, err := tableColumnNames(s.DB(), spec.table)
+		if err != nil {
+			t.Fatalf("%s: tableColumnNames: %v", spec.table, err)
+		}
+		if !contains(cols, spec.requiredHash) {
+			t.Fatalf("%s: missing required column %q; got %v", spec.table, spec.requiredHash, cols)
+		}
+		for _, col := range cols {
+			for _, forbidden := range forbiddenColumns {
+				if strings.EqualFold(col, forbidden) {
+					t.Fatalf("%s: forbidden plaintext-style column %q", spec.table, col)
+				}
+			}
+		}
+	}
+}
+
+func tableColumnNames(db *sql.DB, table string) ([]string, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
-		t.Fatalf("query sqlite_master: %v", err)
+		return nil, err
 	}
 	defer rows.Close()
-
-	var combined strings.Builder
+	var names []string
 	for rows.Next() {
-		var sqlText string
-		if err := rows.Scan(&sqlText); err != nil {
-			t.Fatalf("scan: %v", err)
+		var cid int
+		var name, colType string
+		var notnull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notnull, &dfltValue, &pk); err != nil {
+			return nil, err
 		}
-		combined.WriteString(strings.ToLower(sqlText))
-		combined.WriteString("\n")
+		names = append(names, name)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("rows: %v", err)
-	}
-
-	schema := combined.String()
-	for _, forbidden := range []string{"api_key_plaintext", "raw_secret"} {
-		if strings.Contains(schema, forbidden) {
-			t.Fatalf("schema must not contain %q", forbidden)
-		}
-	}
+	return names, rows.Err()
 }
 
 func tableNames(db *sql.DB) ([]string, error) {
