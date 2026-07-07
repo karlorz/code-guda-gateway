@@ -108,6 +108,38 @@ func TestServer_RuntimeRouteRejectsRevokedGatewayKey(t *testing.T) {
 	}
 }
 
+func TestServer_RuntimeRouteReturns500OnDBError(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	gk := gatewaykeys.NewService(st.DB())
+	raw, _, err := gk.Create("test-gateway-key")
+	if err != nil {
+		t.Fatalf("Create gateway key: %v", err)
+	}
+	app := New(config.Config{GatewayKeys: []string{"unused"}}, gk)
+
+	if err := st.DB().Close(); err != nil {
+		t.Fatalf("db.Close: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/grok/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "internal error") {
+		t.Fatalf("body = %q, want internal error", body)
+	}
+}
+
 func TestServer_HealthzStillOpen(t *testing.T) {
 	TestHealthDoesNotRequireAuth(t)
 }
