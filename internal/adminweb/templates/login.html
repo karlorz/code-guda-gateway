@@ -1,0 +1,25 @@
+{{define "login"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>GuDa Gateway Admin</title>
+  <link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body class="login-page">
+  <main>
+    <h1>GuDa Gateway Admin</h1>
+    {{if .TokenNotInitialized}}
+    <p class="notice">Admin token not initialized. Use the CLI: <code>guda-gateway-admin token init</code></p>
+    {{else}}
+    <form method="post" action="/admin/api/login" id="login-form">
+      <label for="token">Admin token</label>
+      <input type="password" id="token" name="token" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+    </form>
+    <p class="hint">Or POST JSON <code>{"token":"..."}</code> to <code>/admin/api/login</code></p>
+    {{end}}
+  </main>
+</body>
+</html>
+{{end}}

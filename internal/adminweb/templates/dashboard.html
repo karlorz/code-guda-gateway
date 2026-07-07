@@ -1,0 +1,102 @@
+{{define "dashboard"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Dashboard — GuDa Admin</title>
+  <link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body>
+  <header>
+    <h1>GuDa Gateway Admin</h1>
+    <nav>
+      <a href="/admin">Dashboard</a>
+      <form method="post" action="/admin/api/logout" style="display:inline"><button type="submit">Logout</button></form>
+    </nav>
+  </header>
+  <main>
+    <section>
+      <h2>Providers</h2>
+      <table>
+        <thead><tr><th>Provider</th><th>Base URL</th><th>Keys</th><th>In cooldown</th></tr></thead>
+        <tbody>
+        {{range .Providers}}
+          <tr>
+            <td>{{.Name}}</td>
+            <td>{{.BaseURL}}</td>
+            <td>{{.KeyCount}}</td>
+            <td>{{.CooldownCount}}</td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </section>
+    <section>
+      <h2>Gateway keys</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Prefix</th><th>Fingerprint</th><th>Enabled</th></tr></thead>
+        <tbody>
+        {{range .GatewayKeys}}
+          <tr>
+            <td>{{.Name}}</td>
+            <td>{{.Prefix}}</td>
+            <td>{{.Fingerprint}}</td>
+            <td>{{if .Enabled}}yes{{else}}no{{end}}</td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </section>
+    <section>
+      <h2>Provider keys (masked)</h2>
+      <table>
+        <thead><tr><th>Provider</th><th>Name</th><th>Prefix</th><th>Enabled</th><th>Cooldown</th></tr></thead>
+        <tbody>
+        {{range .ProviderKeys}}
+          <tr>
+            <td>{{.Provider}}</td>
+            <td>{{.Name}}</td>
+            <td>{{.KeyPrefix}}</td>
+            <td>{{if .Enabled}}yes{{else}}no{{end}}</td>
+            <td>{{if .CooldownUntil}}yes{{else}}no{{end}}</td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </section>
+    <section>
+      <h2>Recent audit events</h2>
+      <table>
+        <thead><tr><th>Time</th><th>Action</th><th>Detail</th></tr></thead>
+        <tbody>
+        {{range .AuditEvents}}
+          <tr>
+            <td>{{.OccurredAt}}</td>
+            <td>{{.Action}}</td>
+            <td>{{.DetailRedacted}}</td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </section>
+    <section>
+      <h2>Usage (daily)</h2>
+      <table>
+        <thead><tr><th>Day</th><th>Provider</th><th>Route</th><th>Class</th><th>Count</th></tr></thead>
+        <tbody>
+        {{range .Usage}}
+          <tr>
+            <td>{{.Day}}</td>
+            <td>{{.Provider}}</td>
+            <td>{{.RouteFamily}}</td>
+            <td>{{.StatusClass}}</td>
+            <td>{{.RequestCount}}</td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>
+{{end}}

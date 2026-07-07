@@ -1,58 +1,90 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
+	"code-guda-gateway/internal/adminauth"
+	"code-guda-gateway/internal/adminweb"
+	"code-guda-gateway/internal/audit"
 	"code-guda-gateway/internal/config"
-	"code-guda-gateway/internal/keypool"
+	"code-guda-gateway/internal/gatewaykeys"
+	"code-guda-gateway/internal/providers"
 	"code-guda-gateway/internal/proxy"
+	"code-guda-gateway/internal/usage"
 )
 
 type Server struct {
-	cfg           config.Config
-	proxy         *proxy.Proxy
-	acceptedKeys  map[string]bool
-	grokKeys      *keypool.Pool
-	tavilyKeys    *keypool.Pool
-	firecrawlKeys *keypool.Pool
+	proxy        *proxy.Proxy
+	gatewayKeys  *gatewaykeys.Service
+	providerKeys *providers.KeyRepo
+	settings     *providers.SettingsRepo
+	usage        *usage.UsageRepo
+	admin        http.Handler
 }
 
-func New(cfg config.Config) http.Handler {
-	accepted := make(map[string]bool, len(cfg.GatewayKeys))
-	for _, key := range cfg.GatewayKeys {
-		accepted[key] = true
+// New builds the HTTP handler. Runtime routes require a valid DB-backed gateway key via gatewayKeys.
+func New(_ config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, masterKey []byte) http.Handler {
+	keyRepo := providers.NewKeyRepo(db, masterKey)
+	settingsRepo := providers.NewSettingsRepo(db)
+	px := proxy.New(proxy.Options{})
+	if cs, err := settingsRepo.GetCooldownSettings(); err != nil {
+		log.Printf("failed to load cooldown settings from DB, using defaults: %v", err)
+	} else {
+		px.SetCooldownSettings(cs)
 	}
+	auth := adminauth.NewService(db, 24*time.Hour)
+	adminH := adminweb.New(adminweb.Deps{
+		Auth:         auth,
+		GatewayKeys:  gatewayKeys,
+		ProviderKeys: keyRepo,
+		Settings:     settingsRepo,
+		Audit:        audit.NewAuditRepo(db),
+		Usage:        usage.NewUsageRepo(db),
+	})
 	return &Server{
-		cfg:           cfg,
-		proxy:         proxy.New(proxy.Options{}),
-		acceptedKeys:  accepted,
-		grokKeys:      keypool.New(cfg.GrokKeys),
-		tavilyKeys:    keypool.New(cfg.TavilyKeys),
-		firecrawlKeys: keypool.New(cfg.FirecrawlKeys),
+		proxy:        px,
+		gatewayKeys:  gatewayKeys,
+		providerKeys: keyRepo,
+		settings:     settingsRepo,
+		usage:        usage.NewUsageRepo(db),
+		admin:        adminH,
 	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/admin") {
+		s.admin.ServeHTTP(w, r)
+		return
+	}
 	if r.URL.Path == "/healthz" {
 		s.handleHealth(w, r)
 		return
 	}
-	if !s.authorized(r) {
+	gwKey, serverErr := s.authorized(r)
+	if serverErr != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if gwKey == nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/grok/v1/models":
-		s.forward(w, r, s.cfg.GrokBaseURL, "/models", s.grokKeys)
+		s.forward(w, r, gwKey, providers.ProviderGrok, "/models")
 	case r.Method == http.MethodPost && r.URL.Path == "/grok/v1/chat/completions":
-		s.forward(w, r, s.cfg.GrokBaseURL, "/chat/completions", s.grokKeys)
+		s.forward(w, r, gwKey, providers.ProviderGrok, "/chat/completions")
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/tavily/"):
-		s.forward(w, r, s.cfg.TavilyBaseURL, strings.TrimPrefix(r.URL.Path, "/tavily"), s.tavilyKeys)
+		s.forward(w, r, gwKey, providers.ProviderTavily, strings.TrimPrefix(r.URL.Path, "/tavily"))
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/firecrawl/"):
-		s.forward(w, r, s.cfg.FirecrawlBaseURL, strings.TrimPrefix(r.URL.Path, "/firecrawl"), s.firecrawlKeys)
+		s.forward(w, r, gwKey, providers.ProviderFirecrawl, strings.TrimPrefix(r.URL.Path, "/firecrawl"))
 	default:
 		http.NotFound(w, r)
 	}
@@ -67,19 +99,63 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-func (s *Server) authorized(r *http.Request) bool {
+func (s *Server) authorized(r *http.Request) (*gatewaykeys.DisplayKey, error) {
+	if s.gatewayKeys == nil {
+		return nil, nil
+	}
 	header := r.Header.Get("Authorization")
 	if !strings.HasPrefix(header, "Bearer ") {
-		return false
+		return nil, nil
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
-	return s.acceptedKeys[token]
+	rec, err := s.gatewayKeys.Verify(token)
+	if err != nil {
+		if errors.Is(err, gatewaykeys.ErrNotAuthorized) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return rec, nil
 }
 
-func (s *Server) forward(w http.ResponseWriter, r *http.Request, baseURL, path string, keys *keypool.Pool) {
-	s.proxy.Forward(w, r, proxy.Target{
-		BaseURL: baseURL,
-		Path:    path,
-		Keys:    keys,
+func (s *Server) forward(w http.ResponseWriter, r *http.Request, gwKey *gatewaykeys.DisplayKey, provider, path string) {
+	baseURL, err := s.settings.GetBaseURL(provider)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	res := s.proxy.Forward(w, r, proxy.Target{
+		BaseURL:  baseURL,
+		Path:     path,
+		Provider: provider,
+		Keys:     s.providerKeys,
 	})
+	s.recordUsage(gwKey, provider, r.URL.Path, res)
+}
+
+func (s *Server) recordUsage(gwKey *gatewaykeys.DisplayKey, provider, path string, res proxy.Result) {
+	if s.usage == nil || gwKey == nil {
+		return
+	}
+	var statusClass string
+	if res.NetworkError {
+		statusClass = usage.StatusClassFromNetworkError()
+	} else if res.StatusCode != 0 {
+		statusClass = usage.StatusClassFromHTTP(res.StatusCode)
+	} else {
+		return
+	}
+	keyID := gwKey.ID
+	routeFamily := usage.RouteFamilyFromPath(path)
+	inc := usage.UsageIncrement{
+		Day:          usage.DayUTC(time.Now()),
+		GatewayKeyID: &keyID,
+		Provider:     provider,
+		RouteFamily:  routeFamily,
+		StatusClass:  statusClass,
+	}
+	if err := s.usage.Increment(inc); err != nil {
+		log.Printf("usage increment failed: provider=%s route=%s class=%s err=%v",
+			provider, routeFamily, statusClass, err)
+	}
 }

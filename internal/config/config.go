@@ -1,26 +1,22 @@
 package config
 
 import (
-	"errors"
 	"os"
 	"strings"
 )
 
 const (
-	defaultAddr             = ":8080"
-	defaultTavilyBaseURL    = "https://api.tavily.com"
-	defaultFirecrawlBaseURL = "https://api.firecrawl.dev/v2"
+	defaultAddr          = "127.0.0.1:8080"
+	defaultDBPath        = "/var/lib/code-guda-gateway/gateway.db"
+	defaultMasterKeyPath = "/etc/code-guda-gateway/master.key"
 )
 
+// Config holds bootstrap-only process settings (env or bootstrap.env).
+// Gateway keys and provider credentials live in SQLite, not here.
 type Config struct {
-	Addr             string
-	GatewayKeys      []string
-	GrokBaseURL      string
-	GrokKeys         []string
-	TavilyBaseURL    string
-	TavilyKeys       []string
-	FirecrawlBaseURL string
-	FirecrawlKeys    []string
+	Addr          string
+	DBPath        string
+	MasterKeyPath string
 }
 
 func Load() (Config, error) {
@@ -29,24 +25,11 @@ func Load() (Config, error) {
 
 func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	cfg := Config{
-		Addr:             lookupDefault(lookup, "ADDR", defaultAddr),
-		GatewayKeys:      splitCSV(lookupValue(lookup, "GUDA_GATEWAY_KEYS")),
-		GrokBaseURL:      trimRightSlash(lookupValue(lookup, "GROK_UPSTREAM_BASE_URL")),
-		GrokKeys:         splitCSV(lookupValue(lookup, "GROK_UPSTREAM_API_KEYS")),
-		TavilyBaseURL:    trimRightSlash(lookupDefault(lookup, "TAVILY_BASE_URL", defaultTavilyBaseURL)),
-		TavilyKeys:       splitCSV(lookupValue(lookup, "TAVILY_API_KEYS")),
-		FirecrawlBaseURL: trimRightSlash(lookupDefault(lookup, "FIRECRAWL_BASE_URL", defaultFirecrawlBaseURL)),
-		FirecrawlKeys:    splitCSV(lookupValue(lookup, "FIRECRAWL_API_KEYS")),
-	}
-	if len(cfg.GatewayKeys) == 0 {
-		return Config{}, errors.New("GUDA_GATEWAY_KEYS is required")
+		Addr:          lookupDefault(lookup, "ADDR", defaultAddr),
+		DBPath:        lookupDefault(lookup, "DB_PATH", defaultDBPath),
+		MasterKeyPath: lookupDefault(lookup, "GUDA_MASTER_KEY_PATH", defaultMasterKeyPath),
 	}
 	return cfg, nil
-}
-
-func lookupValue(lookup func(string) (string, bool), key string) string {
-	value, _ := lookup(key)
-	return value
 }
 
 func lookupDefault(lookup func(string) (string, bool), key, fallback string) string {
@@ -54,21 +37,5 @@ func lookupDefault(lookup func(string) (string, bool), key, fallback string) str
 	if !ok || strings.TrimSpace(value) == "" {
 		return fallback
 	}
-	return value
-}
-
-func splitCSV(value string) []string {
-	parts := strings.Split(value, ",")
-	keys := make([]string, 0, len(parts))
-	for _, part := range parts {
-		key := strings.TrimSpace(part)
-		if key != "" {
-			keys = append(keys, key)
-		}
-	}
-	return keys
-}
-
-func trimRightSlash(value string) string {
-	return strings.TrimRight(strings.TrimSpace(value), "/")
+	return strings.TrimSpace(value)
 }
