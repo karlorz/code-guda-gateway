@@ -102,12 +102,7 @@ func (h *Handler) servePage(w http.ResponseWriter, r *http.Request) {
 		h.renderLogin(w, r)
 		return
 	}
-	if r.URL.Path != "/admin" && r.URL.Path != "/admin/" {
-		// Single dashboard covers operational views for this task.
-		http.Redirect(w, r, "/admin", http.StatusFound)
-		return
-	}
-	h.renderDashboard(w, r)
+	serveSPA(w, r)
 }
 
 func (h *Handler) renderLogin(w http.ResponseWriter, r *http.Request) {

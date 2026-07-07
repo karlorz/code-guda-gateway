@@ -176,6 +176,31 @@ func TestAdminDashboard_WithSessionReturnsStatus(t *testing.T) {
 	}
 }
 
+func TestAdminStatic_APINeverFallsBackToSPA(t *testing.T) {
+	app, _, _, _, _, _ := openAdminApp(t)
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/does-not-exist", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code == http.StatusOK && strings.Contains(rec.Body.String(), "<!doctype html") {
+		t.Fatal("admin API path fell back to SPA HTML")
+	}
+}
+
+func TestAdminStatic_MissingAssetsFallbackPage(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c := loginSession(t, app, initToken(t, auth))
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Admin UI assets not built") {
+		t.Fatalf("expected missing-assets fallback, got %s", truncate(rec.Body.String(), 200))
+	}
+}
+
 func TestGatewayKeys_CreateReturnsRawOnce(t *testing.T) {
 	app, auth, _, _, _, _ := openAdminApp(t)
 	c := loginSession(t, app, initToken(t, auth))
