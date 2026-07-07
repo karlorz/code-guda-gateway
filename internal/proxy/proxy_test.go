@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"code-guda-gateway/internal/cooldown"
-	"code-guda-gateway/internal/proxy"
 	"code-guda-gateway/internal/providers"
+	"code-guda-gateway/internal/proxy"
 	"code-guda-gateway/internal/secrets"
 	"code-guda-gateway/internal/store"
 )

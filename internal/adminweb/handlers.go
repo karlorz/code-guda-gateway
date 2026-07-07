@@ -119,10 +119,10 @@ func (h *Handler) renderLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 type providerRow struct {
-	Name           string
-	BaseURL        string
-	KeyCount       int
-	CooldownCount  int
+	Name          string
+	BaseURL       string
+	KeyCount      int
+	CooldownCount int
 }
 
 func (h *Handler) renderDashboard(w http.ResponseWriter, r *http.Request) {
@@ -340,7 +340,7 @@ func (h *Handler) handleGatewayKeysCreate(w http.ResponseWriter, r *http.Request
 		Detail:     "name=" + body.Name,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{
-		"key":    display,
+		"key":     display,
 		"raw_key": raw,
 	})
 }

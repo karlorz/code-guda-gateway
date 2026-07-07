@@ -3,7 +3,6 @@ package main
 import (
 	"log"
 	"net/http"
-	"os"
 
 	"code-guda-gateway/internal/config"
 	"code-guda-gateway/internal/gatewaykeys"
@@ -18,21 +17,13 @@ func main() {
 		log.Fatal(err)
 	}
 
-	dbPath := os.Getenv("GUDA_DB_PATH")
-	if dbPath == "" {
-		dbPath = "guda-gateway.db"
-	}
-	st, err := store.Open(dbPath)
+	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer st.Close()
 
-	mkPath := os.Getenv("GUDA_MASTER_KEY_PATH")
-	if mkPath == "" {
-		mkPath = "/etc/code-guda-gateway/master.key"
-	}
-	mk, err := secrets.LoadOrCreate(mkPath)
+	mk, err := secrets.LoadOrCreate(cfg.MasterKeyPath)
 	if err != nil {
 		log.Fatal(err)
 	}

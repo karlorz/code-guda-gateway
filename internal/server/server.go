@@ -14,13 +14,12 @@ import (
 	"code-guda-gateway/internal/audit"
 	"code-guda-gateway/internal/config"
 	"code-guda-gateway/internal/gatewaykeys"
-	"code-guda-gateway/internal/proxy"
 	"code-guda-gateway/internal/providers"
+	"code-guda-gateway/internal/proxy"
 	"code-guda-gateway/internal/usage"
 )
 
 type Server struct {
-	cfg          config.Config
 	proxy        *proxy.Proxy
 	gatewayKeys  *gatewaykeys.Service
 	providerKeys *providers.KeyRepo
@@ -30,7 +29,7 @@ type Server struct {
 }
 
 // New builds the HTTP handler. Runtime routes require a valid DB-backed gateway key via gatewayKeys.
-func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, masterKey []byte) http.Handler {
+func New(_ config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, masterKey []byte) http.Handler {
 	keyRepo := providers.NewKeyRepo(db, masterKey)
 	settingsRepo := providers.NewSettingsRepo(db)
 	px := proxy.New(proxy.Options{})
@@ -49,7 +48,6 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 		Usage:        usage.NewUsageRepo(db),
 	})
 	return &Server{
-		cfg:          cfg,
 		proxy:        px,
 		gatewayKeys:  gatewayKeys,
 		providerKeys: keyRepo,
@@ -126,9 +124,6 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, gwKey *gatewayk
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if baseURL == "" {
-		baseURL = s.cfgFallbackBaseURL(provider)
-	}
 	res := s.proxy.Forward(w, r, proxy.Target{
 		BaseURL:  baseURL,
 		Path:     path,
@@ -162,24 +157,5 @@ func (s *Server) recordUsage(gwKey *gatewaykeys.DisplayKey, provider, path strin
 	if err := s.usage.Increment(inc); err != nil {
 		log.Printf("usage increment failed: provider=%s route=%s class=%s err=%v",
 			provider, routeFamily, statusClass, err)
-	}
-}
-
-func (s *Server) cfgFallbackBaseURL(provider string) string {
-	switch provider {
-	case providers.ProviderGrok:
-		return s.cfg.GrokBaseURL
-	case providers.ProviderTavily:
-		if s.cfg.TavilyBaseURL != "" {
-			return s.cfg.TavilyBaseURL
-		}
-		return providers.DefaultTavilyBaseURL
-	case providers.ProviderFirecrawl:
-		if s.cfg.FirecrawlBaseURL != "" {
-			return s.cfg.FirecrawlBaseURL
-		}
-		return providers.DefaultFirecrawlBaseURL
-	default:
-		return ""
 	}
 }

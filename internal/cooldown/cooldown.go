@@ -8,11 +8,11 @@ import (
 )
 
 const (
-	DefaultRateLimitCooldown   = 60 * time.Second
-	DefaultTransientCooldown   = 30 * time.Second
-	DefaultCredentialCooldown  = time.Hour
-	DefaultMaxRetries          = 3
-	MaxRetryAfter              = 10 * time.Minute
+	DefaultRateLimitCooldown  = 60 * time.Second
+	DefaultTransientCooldown  = 30 * time.Second
+	DefaultCredentialCooldown = time.Hour
+	DefaultMaxRetries         = 3
+	MaxRetryAfter             = 10 * time.Minute
 )
 
 // Settings holds service-wide cooldown and retry configuration.

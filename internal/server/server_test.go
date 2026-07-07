@@ -39,7 +39,7 @@ func openTestApp(t *testing.T, cfg config.Config) (http.Handler, *gatewaykeys.Se
 }
 
 func TestHealthDoesNotRequireAuth(t *testing.T) {
-	app, _, _, _, _ := openTestApp(t, config.Config{GatewayKeys: []string{"unused"}})
+	app, _, _, _, _ := openTestApp(t, config.Config{})
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 
@@ -51,7 +51,7 @@ func TestHealthDoesNotRequireAuth(t *testing.T) {
 }
 
 func TestServer_RuntimeRouteRequiresGatewayKey(t *testing.T) {
-	app, _, _, _, _ := openTestApp(t, config.Config{GatewayKeys: []string{"unused"}})
+	app, _, _, _, _ := openTestApp(t, config.Config{})
 	req := httptest.NewRequest(http.MethodGet, "/grok/v1/models", nil)
 	rec := httptest.NewRecorder()
 
@@ -73,10 +73,7 @@ func TestServer_RuntimeRequestIncrementsUsage(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	app, gk, keyRepo, st, raw := openTestApp(t, config.Config{
-		GatewayKeys: []string{"unused"},
-		GrokBaseURL: upstream.URL + "/grok/v1",
-	})
+	app, gk, keyRepo, st, raw := openTestApp(t, config.Config{})
 	if _, err := keyRepo.Add(providers.ProviderGrok, "primary", "grok-key"); err != nil {
 		t.Fatalf("Add grok key: %v", err)
 	}
@@ -123,10 +120,7 @@ func TestServer_RuntimeRouteAcceptsValidGatewayKey(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	app, _, keyRepo, st, raw := openTestApp(t, config.Config{
-		GatewayKeys: []string{"unused"},
-		GrokBaseURL: upstream.URL + "/grok/v1",
-	})
+	app, _, keyRepo, st, raw := openTestApp(t, config.Config{})
 	if _, err := keyRepo.Add(providers.ProviderGrok, "primary", "grok-key"); err != nil {
 		t.Fatalf("Add grok key: %v", err)
 	}
@@ -150,10 +144,7 @@ func TestServer_RuntimeRouteRejectsRevokedGatewayKey(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	app, gk, keyRepo, _, raw := openTestApp(t, config.Config{
-		GatewayKeys: []string{"unused"},
-		GrokBaseURL: upstream.URL + "/grok/v1",
-	})
+	app, gk, keyRepo, _, raw := openTestApp(t, config.Config{})
 	_, _ = keyRepo.Add(providers.ProviderGrok, "primary", "grok-key")
 	list, _ := gk.List()
 	if len(list) == 0 {
@@ -192,7 +183,7 @@ func TestServer_RuntimeRouteReturns500OnDBError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create gateway key: %v", err)
 	}
-	app := New(config.Config{GatewayKeys: []string{"unused"}}, gk, st.DB(), mk)
+	app := New(config.Config{}, gk, st.DB(), mk)
 
 	if err := st.DB().Close(); err != nil {
 		t.Fatalf("db.Close: %v", err)
@@ -224,12 +215,7 @@ func TestRoutesForwardToExpectedUpstreams(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	app, _, keyRepo, st, raw := openTestApp(t, config.Config{
-		GatewayKeys:      []string{"unused"},
-		GrokBaseURL:      upstream.URL + "/grok/v1",
-		TavilyBaseURL:    upstream.URL + "/tavily",
-		FirecrawlBaseURL: upstream.URL + "/firecrawl",
-	})
+	app, _, keyRepo, st, raw := openTestApp(t, config.Config{})
 	settings := providers.NewSettingsRepo(st.DB())
 	_ = settings.SetBaseURL(providers.ProviderGrok, upstream.URL+"/grok/v1")
 	_ = settings.SetBaseURL(providers.ProviderTavily, upstream.URL+"/tavily")

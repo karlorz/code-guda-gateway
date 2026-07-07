@@ -43,14 +43,14 @@ func NewService(db *sql.DB) *Service {
 
 // DisplayKey is the public view of a gateway key (no raw key or full hash).
 type DisplayKey struct {
-	ID         int64
-	Name       string
-	Prefix     string
+	ID          int64
+	Name        string
+	Prefix      string
 	Fingerprint string
-	Enabled    bool
-	CreatedAt  string
-	LastUsedAt *string
-	RevokedAt  *string
+	Enabled     bool
+	CreatedAt   string
+	LastUsedAt  *string
+	RevokedAt   *string
 }
 
 // Create generates a new enabled key. raw is returned once; only hash is stored.

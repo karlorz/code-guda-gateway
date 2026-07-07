@@ -20,8 +20,8 @@ const (
 var (
 	rawTokenRe = regexp.MustCompile(`^gat_[A-Za-z0-9]{32}$`)
 
-	ErrNoAdminToken   = errors.New("adminauth: no admin token configured")
-	ErrInvalidToken   = errors.New("adminauth: invalid admin token")
+	ErrNoAdminToken    = errors.New("adminauth: no admin token configured")
+	ErrInvalidToken    = errors.New("adminauth: invalid admin token")
 	ErrTokenAlreadySet = errors.New("adminauth: admin token already initialized")
 )
 

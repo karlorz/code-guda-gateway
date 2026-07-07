@@ -18,23 +18,23 @@ const redactMaxLen = 256
 
 // DisplayProviderKey is the public view of a provider key (no raw or ciphertext).
 type DisplayProviderKey struct {
-	ID                        int64
-	Provider                  string
-	Name                      string
-	KeyPrefix                 string
-	Fingerprint               string
-	Enabled                   bool
-	CooldownUntil             *string
-	CooldownReason            *string
-	LastUsedAt                *string
-	LastSuccessAt             *string
-	LastErrorAt               *string
-	LastErrorStatus           *int
-	LastErrorMessageRedacted  *string
-	ConsecutiveFailures       int
-	TotalFailures             int
-	CreatedAt                 string
-	UpdatedAt                 string
+	ID                       int64
+	Provider                 string
+	Name                     string
+	KeyPrefix                string
+	Fingerprint              string
+	Enabled                  bool
+	CooldownUntil            *string
+	CooldownReason           *string
+	LastUsedAt               *string
+	LastSuccessAt            *string
+	LastErrorAt              *string
+	LastErrorStatus          *int
+	LastErrorMessageRedacted *string
+	ConsecutiveFailures      int
+	TotalFailures            int
+	CreatedAt                string
+	UpdatedAt                string
 }
 
 // KeyRepo manages encrypted upstream provider keys in SQLite.

@@ -25,11 +25,11 @@ func TestUsageIncrement_CreatesRow(t *testing.T) {
 	day := "2026-07-07"
 	keyID := int64(42)
 	err := repo.Increment(usage.UsageIncrement{
-		Day:           day,
-		GatewayKeyID:  &keyID,
-		Provider:      "grok",
-		RouteFamily:   "grok",
-		StatusClass:   "2xx",
+		Day:          day,
+		GatewayKeyID: &keyID,
+		Provider:     "grok",
+		RouteFamily:  "grok",
+		StatusClass:  "2xx",
 	})
 	if err != nil {
 		t.Fatalf("Increment: %v", err)

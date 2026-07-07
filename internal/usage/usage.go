@@ -19,12 +19,12 @@ type UsageIncrement struct {
 
 // UsageDaily is an aggregate usage row.
 type UsageDaily struct {
-	Day           string
-	GatewayKeyID  *int64
-	Provider      string
-	RouteFamily   string
-	StatusClass   string
-	RequestCount  int
+	Day          string
+	GatewayKeyID *int64
+	Provider     string
+	RouteFamily  string
+	StatusClass  string
+	RequestCount int
 }
 
 // ListFilter narrows ListDaily results.

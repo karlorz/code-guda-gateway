@@ -13,15 +13,15 @@ type migration struct {
 
 var migrations = []migration{
 	{
-		id: "0001",
+		id:  "0001",
 		sql: migration0001,
 	},
 	{
-		id: "0002",
+		id:  "0002",
 		sql: migration0002,
 	},
 	{
-		id: "0003",
+		id:  "0003",
 		sql: migration0003,
 	},
 }
