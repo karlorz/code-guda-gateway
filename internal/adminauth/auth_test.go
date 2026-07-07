@@ -150,8 +150,21 @@ func TestSessionLogin_ValidTokenCreatesSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session row: %v", err)
 	}
-	if res.Cookie.Name != adminauth.SessionCookieName {
-		t.Fatalf("cookie name %q", res.Cookie.Name)
+	c := res.Cookie
+	if c.Name != adminauth.SessionCookieName {
+		t.Fatalf("cookie name %q", c.Name)
+	}
+	if !c.HttpOnly {
+		t.Fatal("cookie HttpOnly want true")
+	}
+	if !c.Secure {
+		t.Fatal("cookie Secure want true")
+	}
+	if c.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("cookie SameSite = %v, want Lax", c.SameSite)
+	}
+	if c.Path != "/admin" {
+		t.Fatalf("cookie Path = %q, want /admin", c.Path)
 	}
 }
 
@@ -186,6 +199,24 @@ func TestSessionValidate_ValidSidTrue(t *testing.T) {
 	}
 }
 
+func TestSessionValidate_PastExpiryFalse(t *testing.T) {
+	t.Parallel()
+	svc, st := openTestService(t)
+	raw, _ := svc.Init()
+	res, err := svc.Login(raw)
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
+	if _, err := st.DB().Exec(`UPDATE admin_sessions SET expires_at = ? WHERE id = ?`, past, res.SessionID); err != nil {
+		t.Fatalf("update expires_at: %v", err)
+	}
+	ok, err := svc.ValidateSession(res.SessionID)
+	if err != nil || ok {
+		t.Fatalf("ValidateSession past expiry: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestSessionValidate_ExpiredOrRevokedFalse(t *testing.T) {
 	t.Parallel()
 	svc, _ := openTestService(t)
@@ -205,8 +236,15 @@ func TestSessionLogout_ClearsSession(t *testing.T) {
 	svc, st := openTestService(t)
 	raw, _ := svc.Init()
 	res, _ := svc.Login(raw)
-	if _, err := svc.Logout(res.SessionID); err != nil {
+	clearCookie, err := svc.Logout(res.SessionID)
+	if err != nil {
 		t.Fatalf("Logout: %v", err)
+	}
+	if clearCookie.Name != adminauth.SessionCookieName {
+		t.Fatalf("clear cookie name %q", clearCookie.Name)
+	}
+	if clearCookie.MaxAge != -1 {
+		t.Fatalf("clear cookie MaxAge = %d, want -1", clearCookie.MaxAge)
 	}
 	var n int
 	_ = st.DB().QueryRow(`SELECT COUNT(*) FROM admin_sessions WHERE id = ?`, res.SessionID).Scan(&n)
