@@ -1,9 +1,6 @@
 package adminweb
 
-import (
-	"encoding/json"
-	"net/http"
-)
+import "net/http"
 
 type apiError struct {
 	Code    string `json:"code"`
@@ -18,12 +15,4 @@ type listResponse[T any] struct {
 	Items  []T               `json:"items"`
 	Page   map[string]int    `json:"page,omitempty"`
 	Filter map[string]string `json:"filter,omitempty"`
-}
-
-func decodeJSONBody[T any](r *http.Request) (T, bool) {
-	var body T
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		return body, false
-	}
-	return body, true
 }

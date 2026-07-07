@@ -141,7 +141,7 @@ func (r *KeyRepo) Get(id int64) (DisplayProviderKey, error) {
 			last_event_http_status, last_event_message_redacted,
 			consecutive_failures, total_failures, created_at, updated_at
 		FROM provider_keys WHERE id = ?`, id)
-	d, err := scanDisplayKeyRow(row)
+	d, err := scanDisplayKey(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DisplayProviderKey{}, fmt.Errorf("provider key %d: not found", id)
 	}
@@ -381,49 +381,11 @@ func fingerprint(raw string) string {
 	return hex.EncodeToString(sum[:])[:6]
 }
 
-func scanDisplayKey(rows *sql.Rows) (DisplayProviderKey, error) {
-	var d DisplayProviderKey
-	var enabled int
-	var cooldownUntil, cooldownReason sql.NullString
-	var lastUsed, lastSuccess, lastError sql.NullString
-	var lastStatus sql.NullInt64
-	var lastMsg sql.NullString
-	var archivedAt, lastEventAt, lastEventSource, lastEventStatusClass, lastEventMsg sql.NullString
-	var lastEventHTTPStatus sql.NullInt64
-	if err := rows.Scan(
-		&d.ID, &d.Provider, &d.Name, &d.KeyPrefix, &d.Fingerprint, &enabled,
-		&cooldownUntil, &cooldownReason, &lastUsed, &lastSuccess,
-		&lastError, &lastStatus, &lastMsg,
-		&archivedAt, &lastEventAt, &lastEventSource, &lastEventStatusClass,
-		&lastEventHTTPStatus, &lastEventMsg,
-		&d.ConsecutiveFailures, &d.TotalFailures, &d.CreatedAt, &d.UpdatedAt,
-	); err != nil {
-		return DisplayProviderKey{}, err
-	}
-	d.Enabled = enabled != 0
-	d.CooldownUntil = nullStrPtr(cooldownUntil)
-	d.CooldownReason = nullStrPtr(cooldownReason)
-	d.LastUsedAt = nullStrPtr(lastUsed)
-	d.LastSuccessAt = nullStrPtr(lastSuccess)
-	d.LastErrorAt = nullStrPtr(lastError)
-	d.LastErrorMessageRedacted = nullStrPtr(lastMsg)
-	d.ArchivedAt = nullStrPtr(archivedAt)
-	d.LastEventAt = nullStrPtr(lastEventAt)
-	d.LastEventSource = nullStrPtr(lastEventSource)
-	d.LastEventStatusClass = nullStrPtr(lastEventStatusClass)
-	d.LastEventMessageRedacted = nullStrPtr(lastEventMsg)
-	if lastStatus.Valid {
-		v := int(lastStatus.Int64)
-		d.LastErrorStatus = &v
-	}
-	if lastEventHTTPStatus.Valid {
-		v := int(lastEventHTTPStatus.Int64)
-		d.LastEventHTTPStatus = &v
-	}
-	return d, nil
+type displayKeyScanner interface {
+	Scan(dest ...any) error
 }
 
-func scanDisplayKeyRow(row *sql.Row) (DisplayProviderKey, error) {
+func scanDisplayKey(row displayKeyScanner) (DisplayProviderKey, error) {
 	var d DisplayProviderKey
 	var enabled int
 	var cooldownUntil, cooldownReason sql.NullString

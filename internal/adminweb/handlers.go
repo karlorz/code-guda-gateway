@@ -539,29 +539,11 @@ func (h *Handler) handleProviderKeysPatch(w http.ResponseWriter, r *http.Request
 }
 
 func (h *Handler) handleProviderKeysArchive(w http.ResponseWriter, r *http.Request) {
-	id, err := parseActionID(r.URL.Path, "/admin/api/provider-keys/", "/archive")
-	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
-		return
-	}
-	if err := h.deps.ProviderKeys.Archive(id); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	h.handleProviderKeyAction(w, r, "/archive", h.deps.ProviderKeys.Archive)
 }
 
 func (h *Handler) handleProviderKeysRestore(w http.ResponseWriter, r *http.Request) {
-	id, err := parseActionID(r.URL.Path, "/admin/api/provider-keys/", "/restore")
-	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
-		return
-	}
-	if err := h.deps.ProviderKeys.RestoreArchived(id); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	h.handleProviderKeyAction(w, r, "/restore", h.deps.ProviderKeys.RestoreArchived)
 }
 
 func (h *Handler) handleProviderKeysDelete(w http.ResponseWriter, r *http.Request) {
@@ -578,12 +560,16 @@ func (h *Handler) handleProviderKeysDelete(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *Handler) handleProviderKeysResetCooldown(w http.ResponseWriter, r *http.Request) {
-	id, err := parseProviderKeyID(strings.TrimSuffix(r.URL.Path, "/reset-cooldown"))
+	h.handleProviderKeyAction(w, r, "/reset-cooldown", h.deps.ProviderKeys.ResetCooldown)
+}
+
+func (h *Handler) handleProviderKeyAction(w http.ResponseWriter, r *http.Request, suffix string, action func(int64) error) {
+	id, err := parseActionID(r.URL.Path, "/admin/api/provider-keys/", suffix)
 	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
 		return
 	}
-	if err := h.deps.ProviderKeys.ResetCooldown(id); err != nil {
+	if err := action(id); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -705,21 +691,23 @@ func (h *Handler) handleProviderQuotaRefresh(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *Handler) providerQuotaItems() ([]providers.QuotaCache, error) {
+	cached := map[string]providers.QuotaCache{}
+	if h.deps.Quotas != nil {
+		rows, err := h.deps.Quotas.List()
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			cached[row.Provider] = row
+		}
+	}
 	var items []providers.QuotaCache
 	for _, provider := range adminProviders() {
-		var q *providers.QuotaCache
-		var err error
-		if h.deps.Quotas != nil {
-			q, err = h.deps.Quotas.Get(provider)
-			if err != nil {
-				return nil, err
-			}
+		q, ok := cached[provider]
+		if !ok {
+			q = unsupportedQuota(provider)
 		}
-		if q == nil {
-			unsupported := unsupportedQuota(provider)
-			q = &unsupported
-		}
-		items = append(items, *q)
+		items = append(items, q)
 	}
 	return items, nil
 }
