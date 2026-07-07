@@ -29,7 +29,12 @@ type UsageDaily struct {
 
 // ListFilter narrows ListDaily results.
 type ListFilter struct {
-	Day string
+	Day         string
+	From        string
+	To          string
+	Provider    string
+	RouteFamily string
+	StatusClass string
 }
 
 // UsageRepo maintains daily aggregate usage counters.
@@ -73,9 +78,33 @@ func (r *UsageRepo) ListDaily(f ListFilter) ([]UsageDaily, error) {
 		SELECT day, gateway_key_id, provider, route_family, status_class, request_count
 		FROM usage_daily`
 	var args []any
+	var where []string
 	if f.Day != "" {
-		q += ` WHERE day = ?`
+		where = append(where, `day = ?`)
 		args = append(args, f.Day)
+	}
+	if f.From != "" {
+		where = append(where, `day >= ?`)
+		args = append(args, f.From)
+	}
+	if f.To != "" {
+		where = append(where, `day <= ?`)
+		args = append(args, f.To)
+	}
+	if f.Provider != "" {
+		where = append(where, `provider = ?`)
+		args = append(args, f.Provider)
+	}
+	if f.RouteFamily != "" {
+		where = append(where, `route_family = ?`)
+		args = append(args, f.RouteFamily)
+	}
+	if f.StatusClass != "" {
+		where = append(where, `status_class = ?`)
+		args = append(args, f.StatusClass)
+	}
+	if len(where) > 0 {
+		q += ` WHERE ` + strings.Join(where, ` AND `)
 	}
 	q += ` ORDER BY day, gateway_key_id, provider, route_family, status_class`
 	rows, err := r.db.Query(q, args...)

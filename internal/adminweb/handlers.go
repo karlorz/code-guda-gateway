@@ -32,6 +32,7 @@ type Deps struct {
 	Settings     *providers.SettingsRepo
 	Audit        *audit.AuditRepo
 	Usage        *usage.UsageRepo
+	Quotas       *providers.QuotaRepo
 }
 
 // Handler serves /admin pages and /admin/api/* JSON.
@@ -216,6 +217,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 		h.handleGatewayKeysCreate(w, r)
 	case strings.HasPrefix(path, "/admin/api/gateway-keys/") && r.Method == http.MethodPatch:
 		h.handleGatewayKeysPatch(w, r)
+	case strings.HasPrefix(path, "/admin/api/gateway-keys/") && strings.HasSuffix(path, "/revoke") && r.Method == http.MethodPost:
+		h.handleGatewayKeysRevoke(w, r)
 	case strings.HasPrefix(path, "/admin/api/gateway-keys/") && r.Method == http.MethodDelete:
 		h.handleGatewayKeysDelete(w, r)
 	case path == "/admin/api/provider-keys" && r.Method == http.MethodGet:
@@ -224,6 +227,10 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 		h.handleProviderKeysCreate(w, r)
 	case strings.HasPrefix(path, "/admin/api/provider-keys/") && strings.HasSuffix(path, "/reset-cooldown") && r.Method == http.MethodPost:
 		h.handleProviderKeysResetCooldown(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-keys/") && strings.HasSuffix(path, "/archive") && r.Method == http.MethodPost:
+		h.handleProviderKeysArchive(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-keys/") && strings.HasSuffix(path, "/restore") && r.Method == http.MethodPost:
+		h.handleProviderKeysRestore(w, r)
 	case strings.HasPrefix(path, "/admin/api/provider-keys/") && r.Method == http.MethodPatch:
 		h.handleProviderKeysPatch(w, r)
 	case strings.HasPrefix(path, "/admin/api/provider-keys/") && r.Method == http.MethodDelete:
@@ -232,6 +239,18 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 		h.handleGrokGet(w, r)
 	case path == "/admin/api/providers/grok" && r.Method == http.MethodPatch:
 		h.handleGrokPatch(w, r)
+	case path == "/admin/api/provider-settings" && r.Method == http.MethodGet:
+		h.handleProviderSettingsList(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-settings/") && r.Method == http.MethodPatch:
+		h.handleProviderSettingsPatch(w, r)
+	case path == "/admin/api/provider-health" && r.Method == http.MethodGet:
+		h.handleProviderHealth(w, r)
+	case strings.HasPrefix(path, "/admin/api/providers/") && strings.HasSuffix(path, "/test") && r.Method == http.MethodPost:
+		h.handleProviderManualTest(w, r)
+	case path == "/admin/api/provider-quotas" && r.Method == http.MethodGet:
+		h.handleProviderQuotas(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-quotas/") && strings.HasSuffix(path, "/refresh") && r.Method == http.MethodPost:
+		h.handleProviderQuotaRefresh(w, r)
 	case path == "/admin/api/audit-events" && r.Method == http.MethodGet:
 		h.handleAuditList(w, r)
 	case path == "/admin/api/usage-daily" && r.Method == http.MethodGet:
@@ -356,7 +375,8 @@ func (h *Handler) handleGatewayKeysList(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, list)
+	limit, offset := limitOffset(r)
+	writeJSON(w, http.StatusOK, listResponse[gatewaykeys.DisplayKey]{Items: list, Page: map[string]int{"limit": limit, "offset": offset}})
 }
 
 func (h *Handler) handleGatewayKeysCreate(w http.ResponseWriter, r *http.Request) {
@@ -417,6 +437,19 @@ func (h *Handler) handleGatewayKeysPatch(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (h *Handler) handleGatewayKeysRevoke(w http.ResponseWriter, r *http.Request) {
+	id, err := parseActionID(r.URL.Path, "/admin/api/gateway-keys/", "/revoke")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	if err := h.deps.GatewayKeys.Revoke(id); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (h *Handler) handleGatewayKeysDelete(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDSuffix(r.URL.Path, "/admin/api/gateway-keys/")
 	if err != nil {
@@ -447,7 +480,8 @@ func (h *Handler) handleProviderKeysList(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, list)
+	limit, offset := limitOffset(r)
+	writeJSON(w, http.StatusOK, listResponse[providers.DisplayProviderKey]{Items: list, Page: map[string]int{"limit": limit, "offset": offset}})
 }
 
 func (h *Handler) handleProviderKeysCreate(w http.ResponseWriter, r *http.Request) {
@@ -504,6 +538,32 @@ func (h *Handler) handleProviderKeysPatch(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (h *Handler) handleProviderKeysArchive(w http.ResponseWriter, r *http.Request) {
+	id, err := parseActionID(r.URL.Path, "/admin/api/provider-keys/", "/archive")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	if err := h.deps.ProviderKeys.Archive(id); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) handleProviderKeysRestore(w http.ResponseWriter, r *http.Request) {
+	id, err := parseActionID(r.URL.Path, "/admin/api/provider-keys/", "/restore")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	if err := h.deps.ProviderKeys.RestoreArchived(id); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (h *Handler) handleProviderKeysDelete(w http.ResponseWriter, r *http.Request) {
 	id, err := parseProviderKeyID(r.URL.Path)
 	if err != nil {
@@ -554,23 +614,155 @@ func (h *Handler) handleGrokPatch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"base_url": body.BaseURL})
 }
 
-func (h *Handler) handleAuditList(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.deps.Audit.List(audit.ListFilter{})
+func (h *Handler) handleProviderSettingsList(w http.ResponseWriter, r *http.Request) {
+	type item struct {
+		Provider string `json:"provider"`
+		BaseURL  string `json:"base_url"`
+	}
+	var items []item
+	for _, provider := range adminProviders() {
+		baseURL, err := h.deps.Settings.GetBaseURL(provider)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		items = append(items, item{Provider: provider, BaseURL: baseURL})
+	}
+	writeJSON(w, http.StatusOK, listResponse[item]{Items: items})
+}
+
+func (h *Handler) handleProviderSettingsPatch(w http.ResponseWriter, r *http.Request) {
+	provider := strings.TrimPrefix(r.URL.Path, "/admin/api/provider-settings/")
+	var body struct {
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.BaseURL == "" {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	if err := h.deps.Settings.SetBaseURL(provider, body.BaseURL); err != nil {
+		if errors.Is(err, providers.ErrUnknownProvider) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", "unknown provider")
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"provider": provider, "base_url": body.BaseURL})
+}
+
+func (h *Handler) handleProviderHealth(w http.ResponseWriter, r *http.Request) {
+	items, err := providers.BuildHealth(h.deps.Settings, h.deps.ProviderKeys)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, rows)
+	writeJSON(w, http.StatusOK, listResponse[providers.HealthItem]{Items: items})
+}
+
+func (h *Handler) handleProviderManualTest(w http.ResponseWriter, r *http.Request) {
+	provider, err := providerFromActionPath(r.URL.Path, "/admin/api/providers/", "/test")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	id, _, err := h.deps.ProviderKeys.SelectKey(provider)
+	if err != nil {
+		if errors.Is(err, providers.ErrNoEnabledKey) {
+			writeJSON(w, http.StatusOK, map[string]string{"provider": provider, "status": "missing_key"})
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	_ = h.deps.ProviderKeys.MarkLastEvent(id, providers.LastEvent{Source: "manual_test", StatusClass: "2xx", Message: "manual test selected key"})
+	writeJSON(w, http.StatusOK, map[string]string{"provider": provider, "status": "ok"})
+}
+
+func (h *Handler) handleProviderQuotas(w http.ResponseWriter, r *http.Request) {
+	items, err := h.providerQuotaItems()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, listResponse[providers.QuotaCache]{Items: items})
+}
+
+func (h *Handler) handleProviderQuotaRefresh(w http.ResponseWriter, r *http.Request) {
+	provider, err := providerFromActionPath(r.URL.Path, "/admin/api/provider-quotas/", "/refresh")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	q := unsupportedQuota(provider)
+	if h.deps.Quotas != nil {
+		if err := h.deps.Quotas.Upsert(q); err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, q)
+}
+
+func (h *Handler) providerQuotaItems() ([]providers.QuotaCache, error) {
+	var items []providers.QuotaCache
+	for _, provider := range adminProviders() {
+		var q *providers.QuotaCache
+		var err error
+		if h.deps.Quotas != nil {
+			q, err = h.deps.Quotas.Get(provider)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if q == nil {
+			unsupported := unsupportedQuota(provider)
+			q = &unsupported
+		}
+		items = append(items, *q)
+	}
+	return items, nil
+}
+
+func unsupportedQuota(provider string) providers.QuotaCache {
+	now := time.Now().UTC()
+	msg := "upstream quota not available"
+	return providers.QuotaCache{
+		Provider:        provider,
+		Source:          "unsupported",
+		Available:       false,
+		CheckedAt:       now.Format(time.RFC3339Nano),
+		ExpiresAt:       now.Add(5 * time.Minute).Format(time.RFC3339Nano),
+		MessageRedacted: &msg,
+	}
+}
+
+func (h *Handler) handleAuditList(w http.ResponseWriter, r *http.Request) {
+	limit, offset := limitOffset(r)
+	rows, err := h.deps.Audit.List(audit.ListFilter{Action: r.URL.Query().Get("action"), ActorKind: r.URL.Query().Get("actor_kind"), Limit: limit, Offset: offset})
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, listResponse[audit.StoredAuditEvent]{Items: rows, Page: map[string]int{"limit": limit, "offset": offset}})
 }
 
 func (h *Handler) handleUsageDaily(w http.ResponseWriter, r *http.Request) {
-	day := r.URL.Query().Get("day")
-	rows, err := h.deps.Usage.ListDaily(usage.ListFilter{Day: day})
+	limit, offset := limitOffset(r)
+	q := r.URL.Query()
+	rows, err := h.deps.Usage.ListDaily(usage.ListFilter{
+		Day:         q.Get("day"),
+		From:        q.Get("from"),
+		To:          q.Get("to"),
+		Provider:    q.Get("provider"),
+		RouteFamily: q.Get("route_family"),
+		StatusClass: q.Get("status_class"),
+	})
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, rows)
+	writeJSON(w, http.StatusOK, listResponse[usage.UsageDaily]{Items: rows, Page: map[string]int{"limit": limit, "offset": offset}})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -592,6 +784,41 @@ func parseProviderKeyID(path string) (int64, error) {
 		path = path[:i]
 	}
 	return strconv.ParseInt(path, 10, 64)
+}
+
+func parseActionID(path, prefix, suffix string) (int64, error) {
+	path = strings.TrimPrefix(path, prefix)
+	path = strings.TrimSuffix(path, suffix)
+	path = strings.TrimSuffix(path, "/")
+	return strconv.ParseInt(path, 10, 64)
+}
+
+func providerFromActionPath(path, prefix, suffix string) (string, error) {
+	provider := strings.TrimPrefix(path, prefix)
+	provider = strings.TrimSuffix(provider, suffix)
+	provider = strings.Trim(provider, "/")
+	switch provider {
+	case providers.ProviderGrok, providers.ProviderTavily, providers.ProviderFirecrawl:
+		return provider, nil
+	default:
+		return "", providers.ErrUnknownProvider
+	}
+}
+
+func adminProviders() []string {
+	return []string{providers.ProviderGrok, providers.ProviderTavily, providers.ProviderFirecrawl}
+}
+
+func limitOffset(r *http.Request) (int, int) {
+	limit := 100
+	offset := 0
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v <= 500 {
+		limit = v
+	}
+	if v, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && v >= 0 {
+		offset = v
+	}
+	return limit, offset
 }
 
 // RenderDashboardHTML exposes dashboard HTML for tests (session must be valid on request).

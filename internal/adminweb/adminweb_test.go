@@ -49,6 +49,7 @@ func openAdminApp(t *testing.T) (http.Handler, *adminauth.Service, *gatewaykeys.
 		Settings:     providers.NewSettingsRepo(st.DB()),
 		Audit:        audit.NewAuditRepo(st.DB()),
 		Usage:        usage.NewUsageRepo(st.DB()),
+		Quotas:       providers.NewQuotaRepo(st.DB()),
 	})
 	return app, auth, gk, keyRepo, st, mk
 }
@@ -433,6 +434,66 @@ func TestGrokBaseURL_GetAndPatch(t *testing.T) {
 	}
 }
 
+func TestAdminResourceEndpoints(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	c := loginSession(t, app, initToken(t, auth))
+	csrf := csrfForTest(t, app, c)
+	key, err := keyRepo.Add(providers.ProviderGrok, "resource", "xai-resource-key-123456789")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	checks := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{method: http.MethodGet, path: "/admin/api/provider-settings"},
+		{method: http.MethodPatch, path: "/admin/api/provider-settings/grok", body: `{"base_url":"https://resource.example/v1"}`},
+		{method: http.MethodGet, path: "/admin/api/provider-health"},
+		{method: http.MethodPost, path: "/admin/api/providers/grok/test"},
+		{method: http.MethodGet, path: "/admin/api/provider-quotas"},
+		{method: http.MethodPost, path: "/admin/api/provider-quotas/grok/refresh"},
+		{method: http.MethodPost, path: "/admin/api/provider-keys/" + strconv.FormatInt(key.ID, 10) + "/archive"},
+		{method: http.MethodPost, path: "/admin/api/provider-keys/" + strconv.FormatInt(key.ID, 10) + "/restore"},
+		{method: http.MethodPost, path: "/admin/api/gateway-keys/999/revoke"},
+		{method: http.MethodGet, path: "/admin/api/audit-events?action=&actor_kind=&from=&to=&limit=10&offset=0"},
+		{method: http.MethodGet, path: "/admin/api/usage-daily?from=&to=&provider=&route_family=&status_class="},
+	}
+	for _, tc := range checks {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		req.AddCookie(c)
+		if tc.body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if tc.method == http.MethodPost || tc.method == http.MethodPatch || tc.method == http.MethodDelete {
+			req.Header.Set("X-CSRF-Token", csrf)
+		}
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		if rec.Code >= 500 || rec.Code == http.StatusNotFound {
+			t.Fatalf("%s %s status=%d body=%s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestProviderQuotaUnsupportedShape(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c := loginSession(t, app, initToken(t, auth))
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/provider-quotas", nil)
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"provider":"grok"`) ||
+		!strings.Contains(rec.Body.String(), `"available":false`) ||
+		!strings.Contains(rec.Body.String(), `"source":"unsupported"`) {
+		t.Fatalf("unsupported quota shape missing: %s", rec.Body.String())
+	}
+}
+
 func TestAuditEvents_List(t *testing.T) {
 	app, auth, _, _, _, _ := openAdminApp(t)
 	c := loginSession(t, app, initToken(t, auth))
@@ -464,8 +525,10 @@ func TestAuditEvents_List(t *testing.T) {
 	if !strings.Contains(body, "gateway_key.create") && !strings.Contains(body, "admin.login") {
 		t.Fatalf("expected audit actions in %s", body)
 	}
-	var events []map[string]any
-	if err := json.Unmarshal(rec2.Body.Bytes(), &events); err != nil {
+	var payload struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("json: %v", err)
 	}
 	forbiddenKeys := map[string]bool{
@@ -499,7 +562,7 @@ func TestAuditEvents_List(t *testing.T) {
 		}
 		return nil
 	}
-	if err := walk(events); err != nil {
+	if err := walk(payload.Items); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -527,12 +590,14 @@ func TestUsageDaily_List(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
-	var rows []usage.UsageDaily
-	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+	var payload struct {
+		Items []usage.UsageDaily `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("json: %v", err)
 	}
-	if len(rows) == 0 || rows[0].RequestCount < 1 {
-		t.Fatalf("rows = %#v", rows)
+	if len(payload.Items) == 0 || payload.Items[0].RequestCount < 1 {
+		t.Fatalf("rows = %#v", payload.Items)
 	}
 }
 

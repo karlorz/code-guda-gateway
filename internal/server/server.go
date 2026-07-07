@@ -46,6 +46,7 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 		Settings:     settingsRepo,
 		Audit:        audit.NewAuditRepo(db),
 		Usage:        usage.NewUsageRepo(db),
+		Quotas:       providers.NewQuotaRepo(db),
 	})
 	return &Server{
 		proxy:        px,

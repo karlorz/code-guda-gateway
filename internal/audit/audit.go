@@ -45,7 +45,12 @@ type StoredAuditEvent struct {
 
 // ListFilter narrows List results.
 type ListFilter struct {
-	Action string
+	Action    string
+	ActorKind string
+	From      string
+	To        string
+	Limit     int
+	Offset    int
 }
 
 // AuditRepo writes and lists redacted audit events.
@@ -101,11 +106,35 @@ func (r *AuditRepo) List(f ListFilter) ([]StoredAuditEvent, error) {
 		SELECT id, occurred_at, actor_kind, actor_id, action, target_kind, target_id, detail_redacted, client_ip_redacted
 		FROM audit_events`
 	var args []any
+	var where []string
 	if f.Action != "" {
-		q += ` WHERE action = ?`
+		where = append(where, `action = ?`)
 		args = append(args, f.Action)
 	}
+	if f.ActorKind != "" {
+		where = append(where, `actor_kind = ?`)
+		args = append(args, f.ActorKind)
+	}
+	if f.From != "" {
+		where = append(where, `occurred_at >= ?`)
+		args = append(args, f.From)
+	}
+	if f.To != "" {
+		where = append(where, `occurred_at <= ?`)
+		args = append(args, f.To)
+	}
+	if len(where) > 0 {
+		q += ` WHERE ` + strings.Join(where, ` AND `)
+	}
 	q += ` ORDER BY id`
+	if f.Limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, f.Limit)
+		if f.Offset > 0 {
+			q += ` OFFSET ?`
+			args = append(args, f.Offset)
+		}
+	}
 	rows, err := r.db.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list audit_events: %w", err)
