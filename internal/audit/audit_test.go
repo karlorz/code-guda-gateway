@@ -2,6 +2,7 @@ package audit_test
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -77,6 +78,33 @@ func TestAuditRecord_StoresActorActionTarget(t *testing.T) {
 	}
 	if r.OccurredAt == "" {
 		t.Fatal("occurred_at empty")
+	}
+}
+
+func TestAuditListRecent_Limit(t *testing.T) {
+	repo := openAuditDB(t)
+	for i := 1; i <= 5; i++ {
+		action := "action." + strconv.Itoa(i)
+		if err := repo.Record(audit.AuditEvent{ActorKind: "cli", Action: action, Detail: "seq=" + strconv.Itoa(i)}); err != nil {
+			t.Fatalf("Record %d: %v", i, err)
+		}
+	}
+	recent, err := repo.ListRecent(3)
+	if err != nil {
+		t.Fatalf("ListRecent: %v", err)
+	}
+	if len(recent) != 3 {
+		t.Fatalf("len = %d, want 3", len(recent))
+	}
+	if recent[0].Action != "action.3" || recent[1].Action != "action.4" || recent[2].Action != "action.5" {
+		t.Fatalf("chronological window want 3,4,5 got %q %q %q", recent[0].Action, recent[1].Action, recent[2].Action)
+	}
+	all, err := repo.List(audit.ListFilter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(all) != 5 {
+		t.Fatalf("full list len = %d", len(all))
 	}
 }
 

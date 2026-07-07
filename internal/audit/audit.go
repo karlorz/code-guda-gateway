@@ -130,6 +130,49 @@ func (r *AuditRepo) List(f ListFilter) ([]StoredAuditEvent, error) {
 	return out, rows.Err()
 }
 
+// ListRecent returns up to limit most recent audit events in chronological order
+// (oldest first within the window). Use this for bounded reads (e.g. CLI tail);
+// List with filters remains for full filtered history (e.g. admin web UI).
+func (r *AuditRepo) ListRecent(limit int) ([]StoredAuditEvent, error) {
+	if limit < 1 {
+		return nil, fmt.Errorf("audit: limit must be >= 1")
+	}
+	q := `
+		SELECT id, occurred_at, actor_kind, actor_id, action, target_kind, target_id, detail_redacted, client_ip_redacted
+		FROM audit_events
+		ORDER BY id DESC
+		LIMIT ?`
+	rows, err := r.db.Query(q, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list recent audit_events: %w", err)
+	}
+	defer rows.Close()
+	var out []StoredAuditEvent
+	for rows.Next() {
+		var s StoredAuditEvent
+		var actorID, targetKind, targetID, clientIP sql.NullString
+		if err := rows.Scan(
+			&s.ID, &s.OccurredAt, &s.ActorKind, &actorID, &s.Action,
+			&targetKind, &targetID, &s.DetailRedacted, &clientIP,
+		); err != nil {
+			return nil, err
+		}
+		s.ActorID = nullStrPtr(actorID)
+		s.TargetKind = nullStrPtr(targetKind)
+		s.TargetID = nullStrPtr(targetID)
+		s.ClientIPRedacted = nullStrPtr(clientIP)
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Reverse so tail displays chronological (oldest → newest).
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
 func sanitizeAuditDetail(detail, action string) string {
 	if detail == "" {
 		return ""

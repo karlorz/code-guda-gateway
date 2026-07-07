@@ -252,6 +252,10 @@ func (a *app) cmdProviderKey(args []string) int {
 		}
 		rawKey, err := readLine(a.stdin)
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				fmt.Fprintln(a.stderr, "empty provider key")
+				return exitUsage
+			}
 			fmt.Fprintf(a.stderr, "read provider key from stdin: %v\n", err)
 			return exitError
 		}
@@ -377,13 +381,10 @@ func (a *app) cmdAudit(args []string) int {
 	}
 	defer st.Close()
 	repo := audit.NewAuditRepo(st.DB())
-	events, err := repo.List(audit.ListFilter{})
+	events, err := repo.ListRecent(limit)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "audit tail: %v\n", err)
 		return exitError
-	}
-	if len(events) > limit {
-		events = events[len(events)-limit:]
 	}
 	w := tabwriter.NewWriter(a.stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tOCCURRED_AT\tACTOR\tACTION\tTARGET\tDETAIL")
@@ -431,7 +432,7 @@ Global flags (before subcommand):
 Commands:
   token init|rotate|verify
   gateway-key create --name NAME | list | disable|enable|revoke|delete --id ID
-  provider-key add --provider grok|tavily|firecrawl --name NAME (key on stdin)
+  provider-key add --provider grok|tavily|firecrawl --name NAME (key on stdin only; never pass secrets as argv)
   provider-key list | disable|enable|reset-cooldown|delete --id ID
   grok set-base-url URL | get-base-url
   audit tail [--limit N]

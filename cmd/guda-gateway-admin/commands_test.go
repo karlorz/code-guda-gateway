@@ -94,6 +94,33 @@ func TestTokenRotate_PrintsNewRawInvalidatesOld(t *testing.T) {
 	}
 }
 
+func TestTokenInit_RefusesDoubleInit(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	stdout1, stderr1, code1 := runCLI(t, dbPath, masterPath, "", "token", "init")
+	if code1 != 0 {
+		t.Fatalf("first init exit %d stderr=%s", code1, stderr1)
+	}
+	firstRaw := strings.TrimSpace(stdout1)
+	if !reGAT.MatchString(firstRaw) {
+		t.Fatalf("first token %q", firstRaw)
+	}
+	_, stderr2, code2 := runCLI(t, dbPath, masterPath, "", "token", "init")
+	if code2 == 0 {
+		t.Fatal("second init should fail")
+	}
+	if !strings.Contains(stderr2, "already initialized") {
+		t.Fatalf("stderr want already initialized: %q", stderr2)
+	}
+	auth := adminauth.NewService(openDB(t, dbPath), 0)
+	ok, err := auth.Verify(firstRaw)
+	if err != nil {
+		t.Fatalf("verify first: %v", err)
+	}
+	if !ok {
+		t.Fatal("first token no longer valid after refused second init")
+	}
+}
+
 func TestTokenVerify_ValidAndInvalid(t *testing.T) {
 	dbPath, masterPath := testEnv(t)
 	stdout, _, _ := runCLI(t, dbPath, masterPath, "", "token", "init")
@@ -182,6 +209,48 @@ func TestGatewayKeyDisableEnableRevokeDelete(t *testing.T) {
 	keys, _ = gk.List()
 	if len(keys) != 0 {
 		t.Fatalf("after delete len=%d", len(keys))
+	}
+}
+
+func TestProviderKeyAdd_EmptyStdinFails(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	_, stderr, code := runCLI(t, dbPath, masterPath, "", "provider-key", "add", "--provider", "grok", "--name", "primary")
+	if code == 0 {
+		t.Fatal("empty stdin should fail")
+	}
+	if !strings.Contains(stderr, "empty provider key") {
+		t.Fatalf("stderr: %q", stderr)
+	}
+}
+
+func TestProviderKeyAdd_RejectsOrIgnoresArgvKey(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	argvSecret := "argv-secret-should-not-be-used"
+	stdinSecret := "stdin-secret-correct-key\n"
+	stdout, _, code := runCLI(t, dbPath, masterPath, stdinSecret,
+		"provider-key", "add", "--provider", "grok", "--name", "from-stdin", argvSecret)
+	if code != 0 {
+		t.Fatalf("add with stdin exit %d stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, argvSecret) {
+		t.Fatal("stdout leaked argv secret")
+	}
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	_, rawStored, err := repo.SelectKey("grok")
+	if err != nil {
+		t.Fatalf("SelectKey: %v", err)
+	}
+	if rawStored != strings.TrimSpace(stdinSecret) {
+		t.Fatalf("stored key from stdin want %q got %q", strings.TrimSpace(stdinSecret), rawStored)
+	}
+	if rawStored == argvSecret {
+		t.Fatal("stored argv secret instead of stdin")
 	}
 }
 
