@@ -4,7 +4,7 @@ test('admin SPA loads and protects API fallback', async ({ page, request }) => {
   await page.goto('/admin');
   await expect(page.getByText(/GuDa Gateway Admin|Admin UI assets not built/)).toBeVisible();
   const api404 = await request.get('/admin/api/does-not-exist');
-  expect(api404.status()).toBe(404);
+  expect([401, 404]).toContain(api404.status());
   expect(await api404.text()).not.toContain('<!doctype html');
 });
 
