@@ -1,7 +1,6 @@
 package adminauth
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -9,6 +8,8 @@ import (
 	"fmt"
 	"regexp"
 	"time"
+
+	"code-guda-gateway/internal/idgen"
 )
 
 const (
@@ -17,8 +18,7 @@ const (
 )
 
 var (
-	base62Alphabet = []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
-	rawTokenRe     = regexp.MustCompile(`^gat_[A-Za-z0-9]{32}$`)
+	rawTokenRe = regexp.MustCompile(`^gat_[A-Za-z0-9]{32}$`)
 
 	ErrNoAdminToken   = errors.New("adminauth: no admin token configured")
 	ErrInvalidToken   = errors.New("adminauth: invalid admin token")
@@ -122,7 +122,7 @@ func (s *Service) CurrentPrefix() (string, error) {
 }
 
 func generateTokenMaterial() (raw, hashHex, displayPrefix string, err error) {
-	suffix, err := randomBase62(tokenRandomLen)
+	suffix, err := idgen.RandomBase62(tokenRandomLen)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -138,24 +138,4 @@ func generateTokenMaterial() (raw, hashHex, displayPrefix string, err error) {
 func hashToken(raw string) string {
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
-}
-
-func randomBase62(n int) (string, error) {
-	alphabetLen := len(base62Alphabet)
-	const maxByte = 256
-	limit := (maxByte / alphabetLen) * alphabetLen
-	out := make([]byte, n)
-	for i := 0; i < n; i++ {
-		for {
-			var b [1]byte
-			if _, err := rand.Read(b[:]); err != nil {
-				return "", fmt.Errorf("rand: %w", err)
-			}
-			if int(b[0]) < limit {
-				out[i] = base62Alphabet[int(b[0])%alphabetLen]
-				break
-			}
-		}
-	}
-	return string(out), nil
 }

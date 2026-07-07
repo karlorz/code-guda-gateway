@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -37,7 +38,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleHealth(w, r)
 		return
 	}
-	if !s.authorized(r) {
+	ok, serverErr := s.authorized(r)
+	if serverErr != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -65,17 +71,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-func (s *Server) authorized(r *http.Request) bool {
+func (s *Server) authorized(r *http.Request) (ok bool, serverErr error) {
 	if s.gatewayKeys == nil {
-		return false
+		return false, nil
 	}
 	header := r.Header.Get("Authorization")
 	if !strings.HasPrefix(header, "Bearer ") {
-		return false
+		return false, nil
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
 	rec, err := s.gatewayKeys.Verify(token)
-	return err == nil && rec != nil
+	if err != nil {
+		if errors.Is(err, gatewaykeys.ErrNotAuthorized) {
+			return false, nil
+		}
+		return false, err
+	}
+	return rec != nil, nil
 }
 
 func (s *Server) forward(w http.ResponseWriter, r *http.Request, baseURL, path string, keys *keypool.Pool) {
