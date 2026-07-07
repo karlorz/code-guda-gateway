@@ -205,6 +205,65 @@ func TestSelectKey_NoEnabledKeysReturnsError(t *testing.T) {
 	}
 }
 
+func TestProviderKeyArchiveRestoreDisabled(t *testing.T) {
+	t.Parallel()
+	repo, _, _ := openKeyRepo(t)
+	key, err := repo.Add(providers.ProviderGrok, "primary", "sk-test-provider-key-123456789")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := repo.Archive(key.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+	if _, _, err := repo.SelectKey(providers.ProviderGrok); !errors.Is(err, providers.ErrNoEnabledKey) {
+		t.Fatalf("SelectKey after archive err = %v, want ErrNoEnabledKey", err)
+	}
+	if err := repo.RestoreArchived(key.ID); err != nil {
+		t.Fatalf("RestoreArchived: %v", err)
+	}
+	got, err := repo.Get(key.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Enabled {
+		t.Fatal("restored provider key enabled = true, want false")
+	}
+	if got.ArchivedAt != nil {
+		t.Fatalf("archived_at after restore = %v, want nil", *got.ArchivedAt)
+	}
+}
+
+func TestProviderKeyLastEventRedactsMessage(t *testing.T) {
+	t.Parallel()
+	repo, _, _ := openKeyRepo(t)
+	key, err := repo.Add(providers.ProviderGrok, "event", "xai-event-key-123456789")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	status := 429
+	if err := repo.MarkLastEvent(key.ID, providers.LastEvent{
+		Source:      "manual_test",
+		StatusClass: "4xx",
+		HTTPStatus:  &status,
+		Message:     "Authorization: Bearer sk-secret-value",
+	}); err != nil {
+		t.Fatalf("MarkLastEvent: %v", err)
+	}
+	got, err := repo.Get(key.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.LastEventAt == nil || got.LastEventSource == nil || *got.LastEventSource != "manual_test" {
+		t.Fatalf("last event fields not set: %+v", got)
+	}
+	if got.LastEventHTTPStatus == nil || *got.LastEventHTTPStatus != status {
+		t.Fatalf("last status = %v, want %d", got.LastEventHTTPStatus, status)
+	}
+	if got.LastEventMessageRedacted == nil || strings.Contains(*got.LastEventMessageRedacted, "sk-secret") {
+		t.Fatalf("last event message leaked: %v", got.LastEventMessageRedacted)
+	}
+}
+
 func TestAdd_RejectsDuplicateName(t *testing.T) {
 	t.Parallel()
 	repo, _, _ := openKeyRepo(t)

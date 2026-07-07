@@ -18,6 +18,7 @@ var expectedTables = []string{
 	"admin_sessions",
 	"gateway_keys",
 	"provider_keys",
+	"provider_quota_cache",
 	"provider_settings",
 	"audit_events",
 	"usage_daily",
@@ -144,6 +145,39 @@ func TestMigrate_DoesNotStoreSecrets(t *testing.T) {
 					t.Fatalf("%s: forbidden plaintext-style column %q", spec.table, col)
 				}
 			}
+		}
+	}
+}
+
+func TestMigrate_AdminUIV2Columns(t *testing.T) {
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "gateway.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	required := []struct {
+		table  string
+		column string
+	}{
+		{table: "admin_sessions", column: "csrf_token_hash"},
+		{table: "provider_keys", column: "archived_at"},
+		{table: "provider_keys", column: "last_event_at"},
+		{table: "provider_keys", column: "last_event_source"},
+		{table: "provider_keys", column: "last_event_status_class"},
+		{table: "provider_keys", column: "last_event_http_status"},
+		{table: "provider_keys", column: "last_event_message_redacted"},
+		{table: "provider_quota_cache", column: "provider"},
+	}
+	for _, req := range required {
+		cols, err := tableColumnNames(s.DB(), req.table)
+		if err != nil {
+			t.Fatalf("%s: tableColumnNames: %v", req.table, err)
+		}
+		if !contains(cols, req.column) {
+			t.Fatalf("%s missing column %q; got %v", req.table, req.column, cols)
 		}
 	}
 }

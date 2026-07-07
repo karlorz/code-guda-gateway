@@ -31,6 +31,12 @@ type DisplayProviderKey struct {
 	LastErrorAt              *string
 	LastErrorStatus          *int
 	LastErrorMessageRedacted *string
+	ArchivedAt               *string
+	LastEventAt              *string
+	LastEventSource          *string
+	LastEventStatusClass     *string
+	LastEventHTTPStatus      *int
+	LastEventMessageRedacted *string
 	ConsecutiveFailures      int
 	TotalFailures            int
 	CreatedAt                string
@@ -106,6 +112,8 @@ func (r *KeyRepo) List(provider string) ([]DisplayProviderKey, error) {
 		SELECT id, provider, name, key_prefix, fingerprint, enabled,
 			cooldown_until, cooldown_reason, last_used_at, last_success_at,
 			last_error_at, last_error_status, last_error_message_redacted,
+			archived_at, last_event_at, last_event_source, last_event_status_class,
+			last_event_http_status, last_event_message_redacted,
 			consecutive_failures, total_failures, created_at, updated_at
 		FROM provider_keys WHERE provider = ? ORDER BY id`, provider)
 	if err != nil {
@@ -129,6 +137,8 @@ func (r *KeyRepo) Get(id int64) (DisplayProviderKey, error) {
 		SELECT id, provider, name, key_prefix, fingerprint, enabled,
 			cooldown_until, cooldown_reason, last_used_at, last_success_at,
 			last_error_at, last_error_status, last_error_message_redacted,
+			archived_at, last_event_at, last_event_source, last_event_status_class,
+			last_event_http_status, last_event_message_redacted,
 			consecutive_failures, total_failures, created_at, updated_at
 		FROM provider_keys WHERE id = ?`, id)
 	d, err := scanDisplayKeyRow(row)
@@ -157,6 +167,34 @@ func (r *KeyRepo) ResetCooldown(id int64) error {
 	)
 	if err != nil {
 		return fmt.Errorf("reset cooldown: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("provider key %d: not found", id)
+	}
+	return nil
+}
+
+// Archive disables a provider key and removes it from default selection.
+func (r *KeyRepo) Archive(id int64) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := r.db.Exec(`UPDATE provider_keys SET enabled = 0, archived_at = ?, updated_at = ? WHERE id = ?`, now, now, id)
+	if err != nil {
+		return fmt.Errorf("archive provider key: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("provider key %d: not found", id)
+	}
+	return nil
+}
+
+// RestoreArchived restores an archived provider key as disabled.
+func (r *KeyRepo) RestoreArchived(id int64) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := r.db.Exec(`UPDATE provider_keys SET enabled = 0, archived_at = NULL, updated_at = ? WHERE id = ?`, now, id)
+	if err != nil {
+		return fmt.Errorf("restore provider key: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
@@ -200,6 +238,7 @@ func (r *KeyRepo) SelectKey(provider string) (keyID int64, rawKey string, err er
 		SELECT id, encrypted_key FROM provider_keys
 		WHERE provider = ? AND enabled = 1
 		  AND (cooldown_until IS NULL OR cooldown_until < ?)
+		  AND archived_at IS NULL
 		ORDER BY id ASC LIMIT 1`,
 		provider, now,
 	).Scan(&id, &enc)
@@ -220,6 +259,29 @@ func (r *KeyRepo) SelectKey(provider string) (keyID int64, rawKey string, err er
 		return 0, "", fmt.Errorf("update last_used_at: %w", err)
 	}
 	return id, string(plain), nil
+}
+
+// LastEvent is the latest control-plane or runtime event summary for a key.
+type LastEvent struct {
+	Source      string
+	StatusClass string
+	HTTPStatus  *int
+	Message     string
+}
+
+// MarkLastEvent stores a redacted latest event summary for a provider key.
+func (r *KeyRepo) MarkLastEvent(keyID int64, ev LastEvent) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := r.db.Exec(`
+		UPDATE provider_keys SET last_event_at = ?, last_event_source = ?,
+			last_event_status_class = ?, last_event_http_status = ?,
+			last_event_message_redacted = ?, updated_at = ?
+		WHERE id = ?`,
+		now, ev.Source, ev.StatusClass, ev.HTTPStatus, Redact(ev.Message), now, keyID)
+	if err != nil {
+		return fmt.Errorf("mark last event: %w", err)
+	}
+	return nil
 }
 
 // MarkSuccess records a successful upstream use for cooldown tracking (Task 6).
@@ -326,10 +388,14 @@ func scanDisplayKey(rows *sql.Rows) (DisplayProviderKey, error) {
 	var lastUsed, lastSuccess, lastError sql.NullString
 	var lastStatus sql.NullInt64
 	var lastMsg sql.NullString
+	var archivedAt, lastEventAt, lastEventSource, lastEventStatusClass, lastEventMsg sql.NullString
+	var lastEventHTTPStatus sql.NullInt64
 	if err := rows.Scan(
 		&d.ID, &d.Provider, &d.Name, &d.KeyPrefix, &d.Fingerprint, &enabled,
 		&cooldownUntil, &cooldownReason, &lastUsed, &lastSuccess,
 		&lastError, &lastStatus, &lastMsg,
+		&archivedAt, &lastEventAt, &lastEventSource, &lastEventStatusClass,
+		&lastEventHTTPStatus, &lastEventMsg,
 		&d.ConsecutiveFailures, &d.TotalFailures, &d.CreatedAt, &d.UpdatedAt,
 	); err != nil {
 		return DisplayProviderKey{}, err
@@ -341,9 +407,18 @@ func scanDisplayKey(rows *sql.Rows) (DisplayProviderKey, error) {
 	d.LastSuccessAt = nullStrPtr(lastSuccess)
 	d.LastErrorAt = nullStrPtr(lastError)
 	d.LastErrorMessageRedacted = nullStrPtr(lastMsg)
+	d.ArchivedAt = nullStrPtr(archivedAt)
+	d.LastEventAt = nullStrPtr(lastEventAt)
+	d.LastEventSource = nullStrPtr(lastEventSource)
+	d.LastEventStatusClass = nullStrPtr(lastEventStatusClass)
+	d.LastEventMessageRedacted = nullStrPtr(lastEventMsg)
 	if lastStatus.Valid {
 		v := int(lastStatus.Int64)
 		d.LastErrorStatus = &v
+	}
+	if lastEventHTTPStatus.Valid {
+		v := int(lastEventHTTPStatus.Int64)
+		d.LastEventHTTPStatus = &v
 	}
 	return d, nil
 }
@@ -355,10 +430,14 @@ func scanDisplayKeyRow(row *sql.Row) (DisplayProviderKey, error) {
 	var lastUsed, lastSuccess, lastError sql.NullString
 	var lastStatus sql.NullInt64
 	var lastMsg sql.NullString
+	var archivedAt, lastEventAt, lastEventSource, lastEventStatusClass, lastEventMsg sql.NullString
+	var lastEventHTTPStatus sql.NullInt64
 	if err := row.Scan(
 		&d.ID, &d.Provider, &d.Name, &d.KeyPrefix, &d.Fingerprint, &enabled,
 		&cooldownUntil, &cooldownReason, &lastUsed, &lastSuccess,
 		&lastError, &lastStatus, &lastMsg,
+		&archivedAt, &lastEventAt, &lastEventSource, &lastEventStatusClass,
+		&lastEventHTTPStatus, &lastEventMsg,
 		&d.ConsecutiveFailures, &d.TotalFailures, &d.CreatedAt, &d.UpdatedAt,
 	); err != nil {
 		return DisplayProviderKey{}, err
@@ -370,9 +449,18 @@ func scanDisplayKeyRow(row *sql.Row) (DisplayProviderKey, error) {
 	d.LastSuccessAt = nullStrPtr(lastSuccess)
 	d.LastErrorAt = nullStrPtr(lastError)
 	d.LastErrorMessageRedacted = nullStrPtr(lastMsg)
+	d.ArchivedAt = nullStrPtr(archivedAt)
+	d.LastEventAt = nullStrPtr(lastEventAt)
+	d.LastEventSource = nullStrPtr(lastEventSource)
+	d.LastEventStatusClass = nullStrPtr(lastEventStatusClass)
+	d.LastEventMessageRedacted = nullStrPtr(lastEventMsg)
 	if lastStatus.Valid {
 		v := int(lastStatus.Int64)
 		d.LastErrorStatus = &v
+	}
+	if lastEventHTTPStatus.Valid {
+		v := int(lastEventHTTPStatus.Int64)
+		d.LastEventHTTPStatus = &v
 	}
 	return d, nil
 }

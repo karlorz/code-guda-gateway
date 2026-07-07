@@ -28,6 +28,10 @@ var migrations = []migration{
 		id:  "0004",
 		sql: migration0004,
 	},
+	{
+		id:  "0005",
+		sql: migration0005,
+	},
 }
 
 const migration0002 = `
@@ -40,6 +44,30 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_keys_provider_name ON provider_ke
 
 const migration0004 = `
 ALTER TABLE admin_sessions ADD COLUMN csrf_token_hash TEXT NOT NULL DEFAULT '';
+`
+
+const migration0005 = `
+ALTER TABLE provider_keys ADD COLUMN archived_at TEXT;
+ALTER TABLE provider_keys ADD COLUMN last_event_at TEXT;
+ALTER TABLE provider_keys ADD COLUMN last_event_source TEXT;
+ALTER TABLE provider_keys ADD COLUMN last_event_status_class TEXT;
+ALTER TABLE provider_keys ADD COLUMN last_event_http_status INTEGER;
+ALTER TABLE provider_keys ADD COLUMN last_event_message_redacted TEXT;
+
+CREATE TABLE IF NOT EXISTS provider_quota_cache (
+  provider TEXT NOT NULL PRIMARY KEY,
+  provider_key_id INTEGER,
+  source TEXT NOT NULL,
+  available INTEGER NOT NULL,
+  used INTEGER,
+  limit_value INTEGER,
+  remaining INTEGER,
+  period_start TEXT,
+  period_end TEXT,
+  checked_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  message_redacted TEXT
+);
 `
 
 const migration0001 = `
