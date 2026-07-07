@@ -370,6 +370,50 @@ func TestAuditTail_PrintsRedacted(t *testing.T) {
 	}
 }
 
+func TestCLI_StateChangingCommandsAuditWithoutSecrets(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "db", "migrate"); c != 0 {
+		t.Fatal("migrate")
+	}
+	rawTokenOut, _, c := runCLI(t, dbPath, masterPath, "", "token", "init")
+	if c != 0 {
+		t.Fatal("token init")
+	}
+	rawGatewayOut, _, c := runCLI(t, dbPath, masterPath, "", "gateway-key", "create", "--name", "audited")
+	if c != 0 {
+		t.Fatal("gateway-key create")
+	}
+	rawProvider := "Bearer sk-provider-secret-123456789"
+	if _, _, c := runCLI(t, dbPath, masterPath, rawProvider+"\n", "provider-key", "add", "--provider", "grok", "--name", "audited"); c != 0 {
+		t.Fatal("provider-key add")
+	}
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "grok", "set-base-url", "https://audit.example/v1"); c != 0 {
+		t.Fatal("grok set-base-url")
+	}
+	events, err := audit.NewAuditRepo(openDB(t, dbPath)).List(audit.ListFilter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	actions := map[string]bool{}
+	var details strings.Builder
+	for _, ev := range events {
+		actions[ev.Action] = true
+		details.WriteString(ev.DetailRedacted)
+		details.WriteString("\n")
+	}
+	for _, want := range []string{"db.migrate", "admin_token.init", "gateway_key.create", "provider_key.add", "provider_setting.update"} {
+		if !actions[want] {
+			t.Fatalf("missing audit action %q in %#v", want, actions)
+		}
+	}
+	detail := details.String()
+	for _, forbidden := range []string{strings.TrimSpace(rawTokenOut), strings.TrimSpace(rawGatewayOut), rawProvider, "Bearer ", "sk-provider-secret"} {
+		if forbidden != "" && strings.Contains(detail, forbidden) {
+			t.Fatalf("audit detail leaked %q in %q", forbidden, detail)
+		}
+	}
+}
+
 func TestDBMigrate_CreatesSchema(t *testing.T) {
 	dbPath, masterPath := testEnv(t)
 	out, _, code := runCLI(t, dbPath, masterPath, "", "db", "migrate")

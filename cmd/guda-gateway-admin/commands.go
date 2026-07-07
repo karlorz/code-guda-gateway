@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -79,6 +80,16 @@ func (a *app) masterKey() ([]byte, error) {
 	return secrets.LoadOrCreate(a.masterPath)
 }
 
+func recordCLIAudit(db *sql.DB, action, targetKind, targetID, detail string) {
+	_ = audit.NewAuditRepo(db).Record(audit.AuditEvent{
+		ActorKind:  "cli",
+		Action:     action,
+		TargetKind: targetKind,
+		TargetID:   targetID,
+		Detail:     detail,
+	})
+}
+
 func (a *app) cmdToken(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(a.stderr, "usage: token init|rotate|verify")
@@ -102,6 +113,7 @@ func (a *app) cmdToken(args []string) int {
 			}
 			return exitError
 		}
+		recordCLIAudit(st.DB(), "admin_token.init", "admin_token", "", "result=ok")
 		fmt.Fprintln(a.stdout, raw)
 		return exitOK
 	case "rotate":
@@ -110,6 +122,7 @@ func (a *app) cmdToken(args []string) int {
 			fmt.Fprintf(a.stderr, "token rotate: %v\n", err)
 			return exitError
 		}
+		recordCLIAudit(st.DB(), "admin_token.rotate", "admin_token", "", "result=ok")
 		fmt.Fprintln(a.stdout, raw)
 		return exitOK
 	case "verify":
@@ -172,11 +185,12 @@ func (a *app) cmdGatewayKey(args []string) int {
 			fmt.Fprintln(a.stderr, "gateway-key create requires --name")
 			return exitUsage
 		}
-		raw, _, err := gk.Create(name)
+		raw, display, err := gk.Create(name)
 		if err != nil {
 			fmt.Fprintf(a.stderr, "gateway-key create: %v\n", err)
 			return exitError
 		}
+		recordCLIAudit(st.DB(), "gateway_key.create", "gateway_key", strconv.FormatInt(display.ID, 10), "name="+name+";result=ok")
 		fmt.Fprintln(a.stdout, raw)
 		return exitOK
 	case "list":
@@ -218,6 +232,7 @@ func (a *app) cmdGatewayKey(args []string) int {
 			fmt.Fprintf(a.stderr, "gateway-key %s: %v\n", args[0], err)
 			return exitError
 		}
+		recordCLIAudit(st.DB(), "gateway_key."+args[0], "gateway_key", strconv.FormatInt(id, 10), "result=ok")
 		return exitOK
 	default:
 		fmt.Fprintf(a.stderr, "unknown gateway-key subcommand %q\n", args[0])
@@ -227,7 +242,7 @@ func (a *app) cmdGatewayKey(args []string) int {
 
 func (a *app) cmdProviderKey(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.stderr, "usage: provider-key add|list|disable|enable|reset-cooldown|delete")
+		fmt.Fprintln(a.stderr, "usage: provider-key add|list|disable|enable|archive|restore|reset-cooldown|delete")
 		return exitUsage
 	}
 	mk, err := a.masterKey()
@@ -271,6 +286,7 @@ func (a *app) cmdProviderKey(args []string) int {
 		}
 		fmt.Fprintf(a.stdout, "id=%d provider=%s name=%s prefix=%s fingerprint=%s\n",
 			d.ID, d.Provider, d.Name, d.KeyPrefix, d.Fingerprint)
+		recordCLIAudit(st.DB(), "provider_key.add", "provider_key", strconv.FormatInt(d.ID, 10), "provider="+provider+";name="+name+";result=ok")
 		return exitOK
 	case "list":
 		all, err := repo.ListAll()
@@ -290,7 +306,7 @@ func (a *app) cmdProviderKey(args []string) int {
 		}
 		_ = w.Flush()
 		return exitOK
-	case "disable", "enable", "reset-cooldown", "delete":
+	case "disable", "enable", "archive", "restore", "reset-cooldown", "delete":
 		id, ok := flagInt64(args[1:], "--id")
 		if !ok {
 			fmt.Fprintf(a.stderr, "provider-key %s requires --id\n", args[0])
@@ -302,6 +318,10 @@ func (a *app) cmdProviderKey(args []string) int {
 			err = repo.Disable(id)
 		case "enable":
 			err = repo.Enable(id)
+		case "archive":
+			err = repo.Archive(id)
+		case "restore":
+			err = repo.RestoreArchived(id)
 		case "reset-cooldown":
 			err = repo.ResetCooldown(id)
 		case "delete":
@@ -311,6 +331,8 @@ func (a *app) cmdProviderKey(args []string) int {
 			fmt.Fprintf(a.stderr, "provider-key %s: %v\n", args[0], err)
 			return exitError
 		}
+		action := strings.ReplaceAll(args[0], "-", "_")
+		recordCLIAudit(st.DB(), "provider_key."+action, "provider_key", strconv.FormatInt(id, 10), "result=ok")
 		return exitOK
 	default:
 		fmt.Fprintf(a.stderr, "unknown provider-key subcommand %q\n", args[0])
@@ -341,6 +363,7 @@ func (a *app) cmdGrok(args []string) int {
 			fmt.Fprintf(a.stderr, "grok set-base-url: %v\n", err)
 			return exitError
 		}
+		recordCLIAudit(st.DB(), "provider_setting.update", "provider_setting", providers.ProviderGrok, "provider=grok;result=ok")
 		return exitOK
 	case "get-base-url":
 		url, err := settings.GetBaseURL(providers.ProviderGrok)
@@ -418,6 +441,7 @@ func (a *app) cmdDB(args []string) int {
 		return exitError
 	}
 	defer st.Close()
+	recordCLIAudit(st.DB(), "db.migrate", "db", "", "result=ok")
 	fmt.Fprintln(a.stdout, "migrations applied")
 	return exitOK
 }
@@ -433,7 +457,7 @@ Commands:
   token init|rotate|verify
   gateway-key create --name NAME | list | disable|enable|revoke|delete --id ID
   provider-key add --provider grok|tavily|firecrawl --name NAME (key on stdin only; never pass secrets as argv)
-  provider-key list | disable|enable|reset-cooldown|delete --id ID
+  provider-key list | disable|enable|archive|restore|reset-cooldown|delete --id ID
   grok set-base-url URL | get-base-url
   audit tail [--limit N]
   db migrate`)
