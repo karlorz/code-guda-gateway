@@ -14,7 +14,7 @@ bun run build
 rm -rf "$EMBED_DIST"
 mkdir -p "$EMBED_DIST"
 cp -R "$ADMIN_SRC/dist/." "$EMBED_DIST/"
-touch "$EMBED_DIST/.keep"
+printf '%s\n' 'placeholder so go:embed has a stable directory on fresh checkout' > "$EMBED_DIST/.keep"
 
 cd "$ROOT"
 CGO_ENABLED="${CGO_ENABLED:-0}" go build -o guda-gateway ./cmd/guda-gateway

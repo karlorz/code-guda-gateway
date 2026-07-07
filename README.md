@@ -44,6 +44,7 @@ Variables:
 | `ADDR` | `127.0.0.1:8080` | Listen address (localhost by default). |
 | `DB_PATH` | `/var/lib/code-guda-gateway/gateway.db` | SQLite database path. |
 | `GUDA_MASTER_KEY_PATH` | `/etc/code-guda-gateway/master.key` | File used to load or create the encryption master key. |
+| `GUDA_ADMIN_COOKIE_SECURE` | `true` | Set to `false` for local plain-HTTP browser testing. |
 
 See `scripts/templates/bootstrap.env.example` for a secret-free template.
 
@@ -84,6 +85,25 @@ go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_P
 go run ./cmd/guda-gateway
 ```
 
+The React admin UI lives in `web/admin`. During local frontend work, run the Go
+server and Vite dev server separately:
+
+```bash
+GUDA_ADMIN_COOKIE_SECURE=false ADDR=127.0.0.1:8080 go run ./cmd/guda-gateway
+bun run --cwd web/admin dev
+```
+
+For release builds, keep production as one Go runtime by embedding the Vite
+output into the binary:
+
+```bash
+./scripts/build.sh
+```
+
+The build script runs `bun install --frozen-lockfile`, builds `web/admin`, copies
+the generated files into `internal/adminweb/assets/dist`, then builds
+`guda-gateway` and `guda-gateway-admin`.
+
 Smoke test (replace `<gateway-key>` with the value printed by `gateway-key create`):
 
 ```bash
@@ -105,6 +125,9 @@ Subcommands include `db migrate`, `token init|rotate|verify`, `gateway-key`,
 ```bash
 gofmt -l .
 go test ./...
+bun run --cwd web/admin test
+bun run --cwd web/admin build
+./scripts/build.sh
 go test -race ./...
 go build ./cmd/guda-gateway
 go build ./cmd/guda-gateway-admin
