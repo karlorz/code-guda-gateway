@@ -133,13 +133,18 @@ func (s *Server) recordUsage(gwKey *gatewaykeys.DisplayKey, provider, path strin
 		return
 	}
 	keyID := gwKey.ID
-	_ = s.usage.Increment(usage.UsageIncrement{
+	routeFamily := usage.RouteFamilyFromPath(path)
+	inc := usage.UsageIncrement{
 		Day:          usage.DayUTC(time.Now()),
 		GatewayKeyID: &keyID,
 		Provider:     provider,
-		RouteFamily:  usage.RouteFamilyFromPath(path),
+		RouteFamily:  routeFamily,
 		StatusClass:  statusClass,
-	})
+	}
+	if err := s.usage.Increment(inc); err != nil {
+		log.Printf("usage increment failed: provider=%s route=%s class=%s err=%v",
+			provider, routeFamily, statusClass, err)
+	}
 }
 
 func (s *Server) cfgFallbackBaseURL(provider string) string {

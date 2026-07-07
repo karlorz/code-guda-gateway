@@ -118,7 +118,8 @@ func RouteFamilyFromPath(path string) string {
 	}
 }
 
-// StatusClassFromHTTP maps an HTTP status to a usage bucket.
+// StatusClassFromHTTP maps an HTTP status to a usage bucket (2xx, 4xx, 5xx, 429).
+// 3xx is counted as 4xx: the spec has no redirect class; redirects are rare from upstreams.
 func StatusClassFromHTTP(status int) string {
 	if status == http.StatusTooManyRequests {
 		return "429"
@@ -126,6 +127,8 @@ func StatusClassFromHTTP(status int) string {
 	switch {
 	case status >= 200 && status < 300:
 		return "2xx"
+	case status >= 300 && status < 400:
+		return "4xx"
 	case status >= 400 && status < 500:
 		return "4xx"
 	case status >= 500:

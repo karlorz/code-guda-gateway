@@ -3,11 +3,21 @@ package audit
 import (
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"code-guda-gateway/internal/providers"
 )
+
+// Detail is short structured metadata only (e.g. name=primary;id=12), never free-form
+// narrative, request bodies, or prompts. Invalid shapes are replaced before storage.
+const (
+	auditDetailMaxLen   = 80
+	auditDetailFallback = "action_recorded"
+)
+
+var auditDetailSegment = regexp.MustCompile(`^[a-z][a-z0-9_]*=[^{}\n]{1,64}$`)
 
 // AuditEvent is an admin/key/config action to persist (detail is redacted before storage).
 type AuditEvent struct {
@@ -56,7 +66,7 @@ func (r *AuditRepo) Record(ev AuditEvent) error {
 	if ev.ActorKind == "" {
 		ev.ActorKind = "system"
 	}
-	detail := redactAuditDetail(ev.Detail)
+	detail := sanitizeAuditDetail(ev.Detail, ev.Action)
 	clientIP := redactClientIP(ev.ClientIP)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	var actorID, targetKind, targetID sql.NullString
@@ -120,16 +130,60 @@ func (r *AuditRepo) List(f ListFilter) ([]StoredAuditEvent, error) {
 	return out, rows.Err()
 }
 
-func redactAuditDetail(detail string) string {
+func sanitizeAuditDetail(detail, action string) string {
 	if detail == "" {
 		return ""
+	}
+	if !isCategoricalAuditDetail(detail) {
+		if action != "" {
+			return action
+		}
+		return auditDetailFallback
+	}
+	return providers.Redact(detail)
+}
+
+func isCategoricalAuditDetail(detail string) bool {
+	if len(detail) > auditDetailMaxLen {
+		return false
+	}
+	if strings.ContainsAny(detail, "{}\n\r") {
+		return false
 	}
 	lower := strings.ToLower(detail)
 	if strings.Contains(lower, "request body") || strings.Contains(lower, `"messages"`) ||
 		strings.Contains(lower, "prompt") || strings.Contains(lower, `"content"`) {
-		return "action_recorded"
+		return false
 	}
-	return providers.Redact(detail)
+	parts := splitAuditDetailParts(detail)
+	if len(parts) == 0 {
+		return false
+	}
+	for _, p := range parts {
+		if !auditDetailSegment.MatchString(p) {
+			return false
+		}
+	}
+	return true
+}
+
+func splitAuditDetailParts(detail string) []string {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return nil
+	}
+	var parts []string
+	for _, sep := range []string{";", ","} {
+		if strings.Contains(detail, sep) {
+			for _, chunk := range strings.Split(detail, sep) {
+				if s := strings.TrimSpace(chunk); s != "" {
+					parts = append(parts, s)
+				}
+			}
+			return parts
+		}
+	}
+	return []string{detail}
 }
 
 func redactClientIP(ip string) string {

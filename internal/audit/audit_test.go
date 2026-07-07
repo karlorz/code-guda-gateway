@@ -82,9 +82,9 @@ func TestAuditRecord_StoresActorActionTarget(t *testing.T) {
 
 func TestAuditList_FiltersByAction(t *testing.T) {
 	repo := openAuditDB(t)
-	_ = repo.Record(audit.AuditEvent{ActorKind: "cli", Action: "admin.login", Detail: "ok"})
-	_ = repo.Record(audit.AuditEvent{ActorKind: "cli", Action: "gateway_key.create", Detail: "ok"})
-	_ = repo.Record(audit.AuditEvent{ActorKind: "cli", Action: "gateway_key.create", Detail: "ok2"})
+	_ = repo.Record(audit.AuditEvent{ActorKind: "cli", Action: "admin.login", Detail: "result=ok"})
+	_ = repo.Record(audit.AuditEvent{ActorKind: "cli", Action: "gateway_key.create", Detail: "result=ok"})
+	_ = repo.Record(audit.AuditEvent{ActorKind: "cli", Action: "gateway_key.create", Detail: "result=ok2"})
 	rows, err := repo.List(audit.ListFilter{Action: "gateway_key.create"})
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -100,7 +100,7 @@ func TestAuditList_NeverReturnsRawSecrets(t *testing.T) {
 	_ = repo.Record(audit.AuditEvent{
 		ActorKind: "admin",
 		Action:    "provider_key.add",
-		Detail:    "added key " + raw,
+		Detail:    "prefix=" + raw[:8],
 	})
 	rows, err := repo.List(audit.ListFilter{})
 	if err != nil {
@@ -137,5 +137,38 @@ func TestAuditRecord_DoesNotStoreRequestBody(t *testing.T) {
 	}
 	if strings.Contains(rows[0].DetailRedacted, body) {
 		t.Fatalf("stored body in detail: %q", rows[0].DetailRedacted)
+	}
+}
+
+func TestAuditRecord_RejectsFreeFormPrompt(t *testing.T) {
+	repo := openAuditDB(t)
+	prompt := strings.Repeat(
+		"Please summarize the following article and explain the main themes in plain language for a general audience. ",
+		7,
+	)
+	if len(prompt) < 400 {
+		t.Fatalf("prompt too short: %d", len(prompt))
+	}
+	if err := repo.Record(audit.AuditEvent{
+		ActorKind: "admin",
+		Action:    "config.change",
+		Detail:    prompt,
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	rows, err := repo.List(audit.ListFilter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatal("no rows")
+	}
+	stored := rows[0].DetailRedacted
+	if stored != "config.change" {
+		t.Fatalf("detail_redacted = %q, want action label", stored)
+	}
+	snippet := prompt[:40]
+	if strings.Contains(stored, snippet) {
+		t.Fatalf("stored prompt fragment in detail: %q", stored)
 	}
 }

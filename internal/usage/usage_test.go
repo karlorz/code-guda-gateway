@@ -151,6 +151,9 @@ func TestStatusClassFromHTTP(t *testing.T) {
 	if usage.StatusClassFromHTTP(429) != "429" {
 		t.Fatal("429")
 	}
+	if usage.StatusClassFromHTTP(302) != "4xx" {
+		t.Fatal("302 should map to 4xx")
+	}
 	if usage.StatusClassFromNetworkError() != "network_error" {
 		t.Fatal("network")
 	}
