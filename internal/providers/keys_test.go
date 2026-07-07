@@ -1,6 +1,7 @@
 package providers_test
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -199,8 +200,33 @@ func TestSelectKey_NoEnabledKeysReturnsError(t *testing.T) {
 	_ = repo.Disable(d.ID)
 
 	_, _, err := repo.SelectKey(providers.ProviderGrok)
-	if err == nil {
-		t.Fatal("expected error when no enabled keys")
+	if !errors.Is(err, providers.ErrNoEnabledKey) {
+		t.Fatalf("SelectKey err = %v, want ErrNoEnabledKey", err)
+	}
+}
+
+func TestAdd_RejectsDuplicateName(t *testing.T) {
+	t.Parallel()
+	repo, _, _ := openKeyRepo(t)
+	if _, err := repo.Add(providers.ProviderGrok, "primary", "xai-dup-key-1111111111111111"); err != nil {
+		t.Fatalf("first Add: %v", err)
+	}
+	_, err := repo.Add(providers.ProviderGrok, "primary", "xai-dup-key-2222222222222222")
+	if !errors.Is(err, providers.ErrDuplicateName) {
+		t.Fatalf("second Add err = %v, want ErrDuplicateName", err)
+	}
+	// Same name on a different provider is allowed.
+	if _, err := repo.Add(providers.ProviderTavily, "primary", "tvly-dup-key-3333333333333333"); err != nil {
+		t.Fatalf("Add other provider same name: %v", err)
+	}
+}
+
+func TestAdd_RejectsUnknownProvider(t *testing.T) {
+	t.Parallel()
+	repo, _, _ := openKeyRepo(t)
+	_, err := repo.Add("bogus", "k", "some-raw-key-material-12345")
+	if !errors.Is(err, providers.ErrUnknownProvider) {
+		t.Fatalf("Add err = %v, want ErrUnknownProvider", err)
 	}
 }
 

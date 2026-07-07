@@ -15,6 +15,7 @@ const (
 var (
 	ErrUnknownProvider = errors.New("providers: unknown provider")
 	ErrNoEnabledKey    = errors.New("providers: no enabled provider key available")
+	ErrDuplicateName   = errors.New("providers: provider key name already exists for provider")
 )
 
 func validateProvider(p string) error {

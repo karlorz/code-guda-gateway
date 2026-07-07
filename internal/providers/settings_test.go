@@ -1,6 +1,7 @@
 package providers_test
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -70,5 +71,27 @@ func TestTavilyFirecrawl_Defaults(t *testing.T) {
 	}
 	if fc != providers.DefaultFirecrawlBaseURL {
 		t.Fatalf("firecrawl = %q, want %q", fc, providers.DefaultFirecrawlBaseURL)
+	}
+}
+
+func TestGetBaseURL_RejectsUnknownProvider(t *testing.T) {
+	t.Parallel()
+	st := openTestDB(t)
+	svc := providers.NewSettingsRepo(st.DB())
+
+	_, err := svc.GetBaseURL("bogus")
+	if !errors.Is(err, providers.ErrUnknownProvider) {
+		t.Fatalf("GetBaseURL err = %v, want ErrUnknownProvider", err)
+	}
+}
+
+func TestSetBaseURL_RejectsUnknownProvider(t *testing.T) {
+	t.Parallel()
+	st := openTestDB(t)
+	svc := providers.NewSettingsRepo(st.DB())
+
+	err := svc.SetBaseURL("bogus", "https://example.com")
+	if !errors.Is(err, providers.ErrUnknownProvider) {
+		t.Fatalf("SetBaseURL err = %v, want ErrUnknownProvider", err)
 	}
 }

@@ -20,10 +20,18 @@ var migrations = []migration{
 		id: "0002",
 		sql: migration0002,
 	},
+	{
+		id: "0003",
+		sql: migration0003,
+	},
 }
 
 const migration0002 = `
 ALTER TABLE admin_tokens ADD COLUMN key_prefix TEXT NOT NULL DEFAULT '';
+`
+
+const migration0003 = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_keys_provider_name ON provider_keys(provider, name);
 `
 
 const migration0001 = `

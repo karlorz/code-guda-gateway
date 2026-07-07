@@ -49,12 +49,23 @@ func NewKeyRepo(db *sql.DB, masterKey []byte) *KeyRepo {
 }
 
 // Add stores an encrypted provider key. name must be unique per provider.
+// Duplicate (provider, name) is rejected with ErrDuplicateName via check-before-insert
+// (enforced in DB by migration 0003 unique index idx_provider_keys_provider_name).
 func (r *KeyRepo) Add(provider, name, rawKey string) (DisplayProviderKey, error) {
 	if err := validateProvider(provider); err != nil {
 		return DisplayProviderKey{}, err
 	}
 	if name == "" || rawKey == "" {
 		return DisplayProviderKey{}, fmt.Errorf("add provider key: name and raw key required")
+	}
+	var existing int
+	if err := r.db.QueryRow(
+		`SELECT COUNT(*) FROM provider_keys WHERE provider = ? AND name = ?`, provider, name,
+	).Scan(&existing); err != nil {
+		return DisplayProviderKey{}, fmt.Errorf("check provider_keys name: %w", err)
+	}
+	if existing > 0 {
+		return DisplayProviderKey{}, ErrDuplicateName
 	}
 	prefix := keyPrefix(rawKey)
 	fp := fingerprint(rawKey)
