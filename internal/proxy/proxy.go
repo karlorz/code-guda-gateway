@@ -96,8 +96,13 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 
 		resp, err := p.do(r, target, key, body)
 		if err != nil {
-			redacted := providers.Redact(err.Error())
-			_ = target.Keys.MarkFailureWithCooldown(keyID, 0, redacted, nil, nil)
+			coolDur := p.settings.Transient
+			if coolDur <= 0 {
+				coolDur = cooldown.DefaultTransientCooldown
+			}
+			until := now.Add(coolDur)
+			reason := "network_error"
+			_ = target.Keys.MarkFailureWithCooldown(keyID, 0, "network_error", &until, &reason)
 			if attempt == maxAttempts-1 {
 				http.Error(w, "upstream request failed", http.StatusBadGateway)
 				return Result{Err: err}

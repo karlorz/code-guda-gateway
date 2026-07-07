@@ -30,7 +30,7 @@ func main() {
 
 	mkPath := os.Getenv("GUDA_MASTER_KEY_PATH")
 	if mkPath == "" {
-		mkPath = "master.key"
+		mkPath = "/etc/code-guda-gateway/master.key"
 	}
 	mk, err := secrets.LoadOrCreate(mkPath)
 	if err != nil {

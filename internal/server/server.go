@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -26,7 +27,9 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 	keyRepo := providers.NewKeyRepo(db, masterKey)
 	settingsRepo := providers.NewSettingsRepo(db)
 	px := proxy.New(proxy.Options{})
-	if cs, err := settingsRepo.GetCooldownSettings(); err == nil {
+	if cs, err := settingsRepo.GetCooldownSettings(); err != nil {
+		log.Printf("failed to load cooldown settings from DB, using defaults: %v", err)
+	} else {
 		px.SetCooldownSettings(cs)
 	}
 	return &Server{

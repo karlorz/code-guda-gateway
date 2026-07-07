@@ -196,9 +196,13 @@ func TestProxy_CredentialErrorCoolsLongRetriesOtherKey(t *testing.T) {
 		t.Fatalf("attempts = %d, want 2 (retry different key after credential cooldown on first)", len(attempts))
 	}
 	var reason sql.NullString
-	_ = st.DB().QueryRow(`SELECT cooldown_reason FROM provider_keys WHERE name = 'a'`).Scan(&reason)
+	var enabled int
+	_ = st.DB().QueryRow(`SELECT cooldown_reason, enabled FROM provider_keys WHERE name = 'a'`).Scan(&reason, &enabled)
 	if !reason.Valid || reason.String != "credential_error" {
 		t.Fatalf("cooldown_reason = %v, want credential_error", reason)
+	}
+	if enabled != 1 {
+		t.Fatalf("enabled = %d, want 1 (no auto-disable on credential error)", enabled)
 	}
 }
 
