@@ -1,0 +1,7 @@
+/guda-gateway
+*.test
+coverage.out
+logs/
+.env
+.env.local
+.mcp.json
