@@ -3,14 +3,33 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"code-guda-gateway/internal/config"
+	"code-guda-gateway/internal/gatewaykeys"
+	"code-guda-gateway/internal/store"
 )
 
+func openTestApp(t *testing.T, cfg config.Config) (http.Handler, *gatewaykeys.Service, string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	gk := gatewaykeys.NewService(st.DB())
+	raw, _, err := gk.Create("test-gateway-key")
+	if err != nil {
+		t.Fatalf("Create gateway key: %v", err)
+	}
+	return New(cfg, gk), gk, raw
+}
+
 func TestHealthDoesNotRequireAuth(t *testing.T) {
-	app := New(config.Config{GatewayKeys: []string{"dev"}})
+	app, _, _ := openTestApp(t, config.Config{GatewayKeys: []string{"unused"}})
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 
@@ -21,8 +40,8 @@ func TestHealthDoesNotRequireAuth(t *testing.T) {
 	}
 }
 
-func TestProtectedRoutesRequireBearerAuth(t *testing.T) {
-	app := New(config.Config{GatewayKeys: []string{"dev"}})
+func TestServer_RuntimeRouteRequiresGatewayKey(t *testing.T) {
+	app, _, _ := openTestApp(t, config.Config{GatewayKeys: []string{"unused"}})
 	req := httptest.NewRequest(http.MethodGet, "/grok/v1/models", nil)
 	rec := httptest.NewRecorder()
 
@@ -31,6 +50,66 @@ func TestProtectedRoutesRequireBearerAuth(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
+}
+
+func TestProtectedRoutesRequireBearerAuth(t *testing.T) {
+	TestServer_RuntimeRouteRequiresGatewayKey(t)
+}
+
+func TestServer_RuntimeRouteAcceptsValidGatewayKey(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	app, _, raw := openTestApp(t, config.Config{
+		GatewayKeys: []string{"unused"},
+		GrokBaseURL: upstream.URL + "/grok/v1",
+		GrokKeys:    []string{"grok-key"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/grok/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestServer_RuntimeRouteRejectsRevokedGatewayKey(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	app, gk, raw := openTestApp(t, config.Config{
+		GatewayKeys: []string{"unused"},
+		GrokBaseURL: upstream.URL + "/grok/v1",
+		GrokKeys:    []string{"grok-key"},
+	})
+	list, _ := gk.List()
+	if len(list) == 0 {
+		t.Fatal("no gateway keys")
+	}
+	if err := gk.Revoke(list[0].ID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/grok/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestServer_HealthzStillOpen(t *testing.T) {
+	TestHealthDoesNotRequireAuth(t)
 }
 
 func TestRoutesForwardToExpectedUpstreams(t *testing.T) {
@@ -42,8 +121,8 @@ func TestRoutesForwardToExpectedUpstreams(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	app := New(config.Config{
-		GatewayKeys:      []string{"dev"},
+	app, _, raw := openTestApp(t, config.Config{
+		GatewayKeys:      []string{"unused"},
 		GrokBaseURL:      upstream.URL + "/grok/v1",
 		GrokKeys:         []string{"grok-key"},
 		TavilyBaseURL:    upstream.URL + "/tavily",
@@ -69,7 +148,7 @@ func TestRoutesForwardToExpectedUpstreams(t *testing.T) {
 
 	for _, tc := range cases {
 		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
-		req.Header.Set("Authorization", "Bearer dev")
+		req.Header.Set("Authorization", "Bearer "+raw)
 		rec := httptest.NewRecorder()
 		app.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {

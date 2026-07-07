@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"code-guda-gateway/internal/config"
+	"code-guda-gateway/internal/gatewaykeys"
 	"code-guda-gateway/internal/keypool"
 	"code-guda-gateway/internal/proxy"
 )
@@ -13,21 +14,18 @@ import (
 type Server struct {
 	cfg           config.Config
 	proxy         *proxy.Proxy
-	acceptedKeys  map[string]bool
+	gatewayKeys   *gatewaykeys.Service
 	grokKeys      *keypool.Pool
 	tavilyKeys    *keypool.Pool
 	firecrawlKeys *keypool.Pool
 }
 
-func New(cfg config.Config) http.Handler {
-	accepted := make(map[string]bool, len(cfg.GatewayKeys))
-	for _, key := range cfg.GatewayKeys {
-		accepted[key] = true
-	}
+// New builds the HTTP handler. Runtime routes require a valid DB-backed gateway key via gatewayKeys.
+func New(cfg config.Config, gatewayKeys *gatewaykeys.Service) http.Handler {
 	return &Server{
 		cfg:           cfg,
 		proxy:         proxy.New(proxy.Options{}),
-		acceptedKeys:  accepted,
+		gatewayKeys:   gatewayKeys,
 		grokKeys:      keypool.New(cfg.GrokKeys),
 		tavilyKeys:    keypool.New(cfg.TavilyKeys),
 		firecrawlKeys: keypool.New(cfg.FirecrawlKeys),
@@ -68,12 +66,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authorized(r *http.Request) bool {
+	if s.gatewayKeys == nil {
+		return false
+	}
 	header := r.Header.Get("Authorization")
 	if !strings.HasPrefix(header, "Bearer ") {
 		return false
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
-	return s.acceptedKeys[token]
+	rec, err := s.gatewayKeys.Verify(token)
+	return err == nil && rec != nil
 }
 
 func (s *Server) forward(w http.ResponseWriter, r *http.Request, baseURL, path string, keys *keypool.Pool) {
