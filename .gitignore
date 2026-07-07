@@ -5,3 +5,7 @@ logs/
 .env
 .env.local
 .mcp.json
+web/admin/dist/
+web/admin/node_modules/
+internal/adminweb/assets/dist/*
+!internal/adminweb/assets/dist/.keep
