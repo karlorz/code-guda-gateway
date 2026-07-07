@@ -37,7 +37,9 @@ type Proxy struct {
 }
 
 type Result struct {
-	Err error
+	Err          error
+	StatusCode   int // final HTTP status written to client; 0 if none
+	NetworkError bool
 }
 
 func New(opts Options) *Proxy {
@@ -56,17 +58,17 @@ func (p *Proxy) SetCooldownSettings(s cooldown.Settings) {
 func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) Result {
 	if strings.TrimSpace(target.BaseURL) == "" {
 		http.Error(w, "upstream base URL is not configured", http.StatusBadGateway)
-		return Result{Err: fmt.Errorf("upstream base URL is not configured")}
+		return Result{Err: fmt.Errorf("upstream base URL is not configured"), StatusCode: http.StatusBadGateway}
 	}
 	if target.Keys == nil || strings.TrimSpace(target.Provider) == "" {
 		http.Error(w, "upstream API keys are not configured", http.StatusBadGateway)
-		return Result{Err: fmt.Errorf("upstream API keys are not configured")}
+		return Result{Err: fmt.Errorf("upstream API keys are not configured"), StatusCode: http.StatusBadGateway}
 	}
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
-		return Result{Err: err}
+		return Result{Err: err, StatusCode: http.StatusBadRequest}
 	}
 
 	maxAttempts := p.settings.MaxRetries
@@ -85,13 +87,13 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 			if errors.Is(selErr, providers.ErrNoEnabledKey) {
 				if lastStatus != 0 {
 					writeResponse(w, lastStatus, lastHeader, lastBody)
-					return Result{}
+					return Result{StatusCode: lastStatus}
 				}
 				http.Error(w, "upstream API keys are not configured", http.StatusBadGateway)
-				return Result{Err: selErr}
+				return Result{Err: selErr, StatusCode: http.StatusBadGateway}
 			}
 			http.Error(w, "internal error", http.StatusInternalServerError)
-			return Result{Err: selErr}
+			return Result{Err: selErr, StatusCode: http.StatusInternalServerError}
 		}
 
 		resp, err := p.do(r, target, key, body)
@@ -105,7 +107,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 			_ = target.Keys.MarkFailureWithCooldown(keyID, 0, "network_error", &until, &reason)
 			if attempt == maxAttempts-1 {
 				http.Error(w, "upstream request failed", http.StatusBadGateway)
-				return Result{Err: err}
+				return Result{Err: err, StatusCode: http.StatusBadGateway, NetworkError: true}
 			}
 			continue
 		}
@@ -114,7 +116,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 		_ = resp.Body.Close()
 		if readErr != nil {
 			http.Error(w, "failed to read upstream response", http.StatusBadGateway)
-			return Result{Err: readErr}
+			return Result{Err: readErr, StatusCode: http.StatusBadGateway}
 		}
 
 		lastStatus = resp.StatusCode
@@ -124,7 +126,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 		if cooldown.ShouldMarkSuccess(resp.StatusCode) {
 			_ = target.Keys.MarkSuccess(keyID)
 			writeResponse(w, resp.StatusCode, lastHeader, lastBody)
-			return Result{}
+			return Result{StatusCode: resp.StatusCode}
 		}
 
 		coolDur, reason, applyCooldown, retryAcrossKeys := cooldown.PolicyForStatus(resp.StatusCode, p.settings)
@@ -142,17 +144,17 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 
 		if !retryAcrossKeys || attempt >= maxAttempts-1 {
 			writeResponse(w, lastStatus, lastHeader, lastBody)
-			return Result{}
+			return Result{StatusCode: lastStatus}
 		}
 	}
 
 	if lastStatus != 0 {
 		writeResponse(w, lastStatus, lastHeader, lastBody)
-		return Result{}
+		return Result{StatusCode: lastStatus}
 	}
 
 	http.Error(w, "upstream request failed", http.StatusBadGateway)
-	return Result{Err: fmt.Errorf("upstream request failed")}
+	return Result{Err: fmt.Errorf("upstream request failed"), StatusCode: http.StatusBadGateway}
 }
 
 func (p *Proxy) do(r *http.Request, target Target, key string, body []byte) (*http.Response, error) {

@@ -7,19 +7,22 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"code-guda-gateway/internal/config"
 	"code-guda-gateway/internal/gatewaykeys"
 	"code-guda-gateway/internal/proxy"
 	"code-guda-gateway/internal/providers"
+	"code-guda-gateway/internal/usage"
 )
 
 type Server struct {
-	cfg         config.Config
-	proxy       *proxy.Proxy
-	gatewayKeys *gatewaykeys.Service
+	cfg          config.Config
+	proxy        *proxy.Proxy
+	gatewayKeys  *gatewaykeys.Service
 	providerKeys *providers.KeyRepo
-	settings    *providers.SettingsRepo
+	settings     *providers.SettingsRepo
+	usage        *usage.UsageRepo
 }
 
 // New builds the HTTP handler. Runtime routes require a valid DB-backed gateway key via gatewayKeys.
@@ -38,6 +41,7 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 		gatewayKeys:  gatewayKeys,
 		providerKeys: keyRepo,
 		settings:     settingsRepo,
+		usage:        usage.NewUsageRepo(db),
 	}
 }
 
@@ -46,25 +50,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleHealth(w, r)
 		return
 	}
-	ok, serverErr := s.authorized(r)
+	gwKey, serverErr := s.authorized(r)
 	if serverErr != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if !ok {
+	if gwKey == nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/grok/v1/models":
-		s.forward(w, r, providers.ProviderGrok, "/models")
+		s.forward(w, r, gwKey, providers.ProviderGrok, "/models")
 	case r.Method == http.MethodPost && r.URL.Path == "/grok/v1/chat/completions":
-		s.forward(w, r, providers.ProviderGrok, "/chat/completions")
+		s.forward(w, r, gwKey, providers.ProviderGrok, "/chat/completions")
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/tavily/"):
-		s.forward(w, r, providers.ProviderTavily, strings.TrimPrefix(r.URL.Path, "/tavily"))
+		s.forward(w, r, gwKey, providers.ProviderTavily, strings.TrimPrefix(r.URL.Path, "/tavily"))
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/firecrawl/"):
-		s.forward(w, r, providers.ProviderFirecrawl, strings.TrimPrefix(r.URL.Path, "/firecrawl"))
+		s.forward(w, r, gwKey, providers.ProviderFirecrawl, strings.TrimPrefix(r.URL.Path, "/firecrawl"))
 	default:
 		http.NotFound(w, r)
 	}
@@ -79,26 +83,26 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-func (s *Server) authorized(r *http.Request) (ok bool, serverErr error) {
+func (s *Server) authorized(r *http.Request) (*gatewaykeys.DisplayKey, error) {
 	if s.gatewayKeys == nil {
-		return false, nil
+		return nil, nil
 	}
 	header := r.Header.Get("Authorization")
 	if !strings.HasPrefix(header, "Bearer ") {
-		return false, nil
+		return nil, nil
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
 	rec, err := s.gatewayKeys.Verify(token)
 	if err != nil {
 		if errors.Is(err, gatewaykeys.ErrNotAuthorized) {
-			return false, nil
+			return nil, nil
 		}
-		return false, err
+		return nil, err
 	}
-	return rec != nil, nil
+	return rec, nil
 }
 
-func (s *Server) forward(w http.ResponseWriter, r *http.Request, provider, path string) {
+func (s *Server) forward(w http.ResponseWriter, r *http.Request, gwKey *gatewaykeys.DisplayKey, provider, path string) {
 	baseURL, err := s.settings.GetBaseURL(provider)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -107,11 +111,34 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, provider, path 
 	if baseURL == "" {
 		baseURL = s.cfgFallbackBaseURL(provider)
 	}
-	s.proxy.Forward(w, r, proxy.Target{
+	res := s.proxy.Forward(w, r, proxy.Target{
 		BaseURL:  baseURL,
 		Path:     path,
 		Provider: provider,
 		Keys:     s.providerKeys,
+	})
+	s.recordUsage(gwKey, provider, r.URL.Path, res)
+}
+
+func (s *Server) recordUsage(gwKey *gatewaykeys.DisplayKey, provider, path string, res proxy.Result) {
+	if s.usage == nil || gwKey == nil {
+		return
+	}
+	var statusClass string
+	if res.NetworkError {
+		statusClass = usage.StatusClassFromNetworkError()
+	} else if res.StatusCode != 0 {
+		statusClass = usage.StatusClassFromHTTP(res.StatusCode)
+	} else {
+		return
+	}
+	keyID := gwKey.ID
+	_ = s.usage.Increment(usage.UsageIncrement{
+		Day:          usage.DayUTC(time.Now()),
+		GatewayKeyID: &keyID,
+		Provider:     provider,
+		RouteFamily:  usage.RouteFamilyFromPath(path),
+		StatusClass:  statusClass,
 	})
 }
 

@@ -6,12 +6,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"code-guda-gateway/internal/config"
 	"code-guda-gateway/internal/gatewaykeys"
 	"code-guda-gateway/internal/providers"
 	"code-guda-gateway/internal/secrets"
 	"code-guda-gateway/internal/store"
+	"code-guda-gateway/internal/usage"
 )
 
 func openTestApp(t *testing.T, cfg config.Config) (http.Handler, *gatewaykeys.Service, *providers.KeyRepo, *store.Store, string) {
@@ -62,6 +64,56 @@ func TestServer_RuntimeRouteRequiresGatewayKey(t *testing.T) {
 
 func TestProtectedRoutesRequireBearerAuth(t *testing.T) {
 	TestServer_RuntimeRouteRequiresGatewayKey(t)
+}
+
+func TestServer_RuntimeRequestIncrementsUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	app, gk, keyRepo, st, raw := openTestApp(t, config.Config{
+		GatewayKeys: []string{"unused"},
+		GrokBaseURL: upstream.URL + "/grok/v1",
+	})
+	if _, err := keyRepo.Add(providers.ProviderGrok, "primary", "grok-key"); err != nil {
+		t.Fatalf("Add grok key: %v", err)
+	}
+	if err := providers.NewSettingsRepo(st.DB()).SetBaseURL(providers.ProviderGrok, upstream.URL+"/grok/v1"); err != nil {
+		t.Fatalf("SetBaseURL: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/grok/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	usageRepo := usage.NewUsageRepo(st.DB())
+	day := usage.DayUTC(time.Now())
+	rows, err := usageRepo.ListDaily(usage.ListFilter{Day: day})
+	if err != nil {
+		t.Fatalf("ListDaily: %v", err)
+	}
+	list, _ := gk.List()
+	if len(list) == 0 {
+		t.Fatal("no gateway keys")
+	}
+	wantKeyID := list[0].ID
+	var found bool
+	for _, row := range rows {
+		if row.RouteFamily == "grok" && row.StatusClass == "2xx" && row.Provider == providers.ProviderGrok &&
+			row.GatewayKeyID != nil && *row.GatewayKeyID == wantKeyID && row.RequestCount >= 1 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("usage rows = %#v, want grok/2xx for key %d", rows, wantKeyID)
+	}
 }
 
 func TestServer_RuntimeRouteAcceptsValidGatewayKey(t *testing.T) {
