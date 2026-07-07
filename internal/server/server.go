@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"code-guda-gateway/internal/adminauth"
+	"code-guda-gateway/internal/adminweb"
+	"code-guda-gateway/internal/audit"
 	"code-guda-gateway/internal/config"
 	"code-guda-gateway/internal/gatewaykeys"
 	"code-guda-gateway/internal/proxy"
@@ -23,6 +26,7 @@ type Server struct {
 	providerKeys *providers.KeyRepo
 	settings     *providers.SettingsRepo
 	usage        *usage.UsageRepo
+	admin        http.Handler
 }
 
 // New builds the HTTP handler. Runtime routes require a valid DB-backed gateway key via gatewayKeys.
@@ -35,6 +39,15 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 	} else {
 		px.SetCooldownSettings(cs)
 	}
+	auth := adminauth.NewService(db, 24*time.Hour)
+	adminH := adminweb.New(adminweb.Deps{
+		Auth:         auth,
+		GatewayKeys:  gatewayKeys,
+		ProviderKeys: keyRepo,
+		Settings:     settingsRepo,
+		Audit:        audit.NewAuditRepo(db),
+		Usage:        usage.NewUsageRepo(db),
+	})
 	return &Server{
 		cfg:          cfg,
 		proxy:        px,
@@ -42,10 +55,15 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 		providerKeys: keyRepo,
 		settings:     settingsRepo,
 		usage:        usage.NewUsageRepo(db),
+		admin:        adminH,
 	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/admin") {
+		s.admin.ServeHTTP(w, r)
+		return
+	}
 	if r.URL.Path == "/healthz" {
 		s.handleHealth(w, r)
 		return

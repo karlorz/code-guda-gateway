@@ -148,6 +148,36 @@ func (r *KeyRepo) Enable(id int64) error {
 	return r.setEnabled(id, true)
 }
 
+// ResetCooldown clears cooldown_until and cooldown_reason for a provider key.
+func (r *KeyRepo) ResetCooldown(id int64) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := r.db.Exec(`
+		UPDATE provider_keys SET cooldown_until = NULL, cooldown_reason = NULL, updated_at = ? WHERE id = ?`,
+		now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("reset cooldown: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("provider key %d: not found", id)
+	}
+	return nil
+}
+
+// ListAll returns display rows for every provider key across all providers.
+func (r *KeyRepo) ListAll() ([]DisplayProviderKey, error) {
+	var out []DisplayProviderKey
+	for _, p := range []string{ProviderGrok, ProviderTavily, ProviderFirecrawl} {
+		rows, err := r.List(p)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
+}
+
 // Delete removes a provider key row.
 func (r *KeyRepo) Delete(id int64) error {
 	_, err := r.db.Exec(`DELETE FROM provider_keys WHERE id = ?`, id)

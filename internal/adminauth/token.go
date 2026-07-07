@@ -106,6 +106,15 @@ func (s *Service) Verify(raw string) (bool, error) {
 	return stored == hash, nil
 }
 
+// HasToken reports whether an admin token row exists.
+func (s *Service) HasToken() (bool, error) {
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM admin_tokens`).Scan(&n); err != nil {
+		return false, fmt.Errorf("count admin_tokens: %w", err)
+	}
+	return n > 0, nil
+}
+
 // CurrentPrefix returns the display prefix of the active token (never the raw token).
 func (s *Service) CurrentPrefix() (string, error) {
 	var prefix string

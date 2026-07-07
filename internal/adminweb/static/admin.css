@@ -1,0 +1,7 @@
+body { font-family: system-ui, sans-serif; margin: 1rem 2rem; max-width: 960px; }
+header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #ccc; margin-bottom: 1.5rem; }
+table { border-collapse: collapse; width: 100%; margin-bottom: 1.5rem; }
+th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+th { background: #f4f4f4; }
+.login-page main { max-width: 24rem; margin: 4rem auto; }
+.notice { background: #fff3cd; padding: 0.75rem; border-radius: 4px; }
