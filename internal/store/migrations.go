@@ -16,7 +16,15 @@ var migrations = []migration{
 		id: "0001",
 		sql: migration0001,
 	},
+	{
+		id: "0002",
+		sql: migration0002,
+	},
 }
+
+const migration0002 = `
+ALTER TABLE admin_tokens ADD COLUMN key_prefix TEXT NOT NULL DEFAULT '';
+`
 
 const migration0001 = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
