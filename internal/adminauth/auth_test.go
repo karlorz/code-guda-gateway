@@ -1,6 +1,7 @@
 package adminauth_test
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -212,7 +213,7 @@ func TestSessionValidate_PastExpiryFalse(t *testing.T) {
 		t.Fatalf("update expires_at: %v", err)
 	}
 	ok, err := svc.ValidateSession(res.SessionID)
-	if err != nil || ok {
+	if ok || !errors.Is(err, adminauth.ErrSessionInvalid) {
 		t.Fatalf("ValidateSession past expiry: ok=%v err=%v", ok, err)
 	}
 }
@@ -226,7 +227,7 @@ func TestSessionValidate_ExpiredOrRevokedFalse(t *testing.T) {
 		t.Fatalf("Logout: %v", err)
 	}
 	ok, err := svc.ValidateSession(res.SessionID)
-	if err != nil || ok {
+	if ok || !errors.Is(err, adminauth.ErrSessionInvalid) {
 		t.Fatalf("ValidateSession after logout: ok=%v err=%v", ok, err)
 	}
 }
@@ -251,9 +252,9 @@ func TestSessionLogout_ClearsSession(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("session row still exists")
 	}
-	ok, _ := svc.ValidateSession(res.SessionID)
-	if ok {
-		t.Fatal("session still valid after logout")
+	ok, err := svc.ValidateSession(res.SessionID)
+	if ok || !errors.Is(err, adminauth.ErrSessionInvalid) {
+		t.Fatalf("session still valid after logout: ok=%v err=%v", ok, err)
 	}
 }
 
@@ -303,6 +304,83 @@ func TestMiddleware_WithInvalidCookieReturns401(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
+func TestTokenRotate_InvalidatesExistingSessions(t *testing.T) {
+	t.Parallel()
+	svc, st := openTestService(t)
+	raw, err := svc.Init()
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	login, err := svc.Login(raw)
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := svc.Middleware(adminauth.MiddlewareConfig{}, next)
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/dashboard", nil)
+	req.AddCookie(login.Cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("before rotate: status = %d", rec.Code)
+	}
+
+	newRaw, err := svc.Rotate()
+	if err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	var n int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM admin_sessions`).Scan(&n); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("admin_sessions count = %d after rotate, want 0", n)
+	}
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("old cookie after rotate: status = %d, want 401", rec2.Code)
+	}
+	ok, err := svc.ValidateSession(login.SessionID)
+	if ok || !errors.Is(err, adminauth.ErrSessionInvalid) {
+		t.Fatalf("ValidateSession after rotate: ok=%v err=%v", ok, err)
+	}
+
+	freshLogin, err := svc.Login(newRaw)
+	if err != nil {
+		t.Fatalf("Login with new token: %v", err)
+	}
+	req3 := httptest.NewRequest(http.MethodGet, "/admin/api/dashboard", nil)
+	req3.AddCookie(freshLogin.Cookie)
+	rec3 := httptest.NewRecorder()
+	h.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("fresh session after rotate: status = %d", rec3.Code)
+	}
+}
+
+func TestMiddleware_DBErrorReturns500(t *testing.T) {
+	t.Parallel()
+	svc, st := openTestService(t)
+	raw, _ := svc.Init()
+	login, _ := svc.Login(raw)
+	_ = st.Close()
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := svc.Middleware(adminauth.MiddlewareConfig{}, next)
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/dashboard", nil)
+	req.AddCookie(login.Cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("closed DB: status = %d, want 500", rec.Code)
 	}
 }
 

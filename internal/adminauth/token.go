@@ -23,6 +23,8 @@ var (
 	ErrNoAdminToken    = errors.New("adminauth: no admin token configured")
 	ErrInvalidToken    = errors.New("adminauth: invalid admin token")
 	ErrTokenAlreadySet = errors.New("adminauth: admin token already initialized")
+	// ErrSessionInvalid means the session id is missing, unknown, or expired (not a DB failure).
+	ErrSessionInvalid = errors.New("adminauth: session invalid")
 )
 
 // Service provides admin token and session operations against SQLite.
@@ -83,6 +85,9 @@ func (s *Service) Rotate() (raw string, err error) {
 		hash, prefix, now,
 	); err != nil {
 		return "", fmt.Errorf("update admin_tokens: %w", err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM admin_sessions`); err != nil {
+		return "", fmt.Errorf("clear admin_sessions: %w", err)
 	}
 	return raw, nil
 }

@@ -91,6 +91,10 @@ func (h *Handler) servePage(w http.ResponseWriter, r *http.Request) {
 	sid := adminauth.SessionIDFromRequest(r)
 	valid, err := h.deps.Auth.ValidateSession(sid)
 	if err != nil {
+		if errors.Is(err, adminauth.ErrSessionInvalid) {
+			h.renderLogin(w, r)
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -294,7 +298,15 @@ func wantsHTMLResponse(r *http.Request) bool {
 func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
 	sid := adminauth.SessionIDFromRequest(r)
 	valid, err := h.deps.Auth.ValidateSession(sid)
-	if err != nil || !valid {
+	if err != nil {
+		if errors.Is(err, adminauth.ErrSessionInvalid) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !valid {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

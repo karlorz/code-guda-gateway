@@ -61,9 +61,10 @@ func (s *Service) Login(rawToken string) (*LoginResult, error) {
 }
 
 // ValidateSession returns true if sid exists and is not expired.
+// Returns ErrSessionInvalid when the session is missing or expired; other errors indicate DB failures.
 func (s *Service) ValidateSession(sid string) (bool, error) {
 	if sid == "" {
-		return false, nil
+		return false, ErrSessionInvalid
 	}
 	var expiresStr string
 	err := s.db.QueryRow(
@@ -71,7 +72,7 @@ func (s *Service) ValidateSession(sid string) (bool, error) {
 		sid,
 	).Scan(&expiresStr)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return false, ErrSessionInvalid
 	}
 	if err != nil {
 		return false, fmt.Errorf("select session: %w", err)
@@ -81,7 +82,7 @@ func (s *Service) ValidateSession(sid string) (bool, error) {
 		return false, fmt.Errorf("parse expires_at: %w", err)
 	}
 	if time.Now().UTC().After(expires) {
-		return false, nil
+		return false, ErrSessionInvalid
 	}
 	return true, nil
 }

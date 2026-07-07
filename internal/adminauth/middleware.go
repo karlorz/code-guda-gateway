@@ -1,6 +1,7 @@
 package adminauth
 
 import (
+	"errors"
 	"net/http"
 )
 
@@ -24,7 +25,11 @@ func (s *Service) Middleware(cfg MiddlewareConfig, next http.Handler) http.Handl
 		sid := SessionIDFromRequest(r)
 		valid, err := s.ValidateSession(sid)
 		if err != nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			if errors.Is(err, ErrSessionInvalid) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		if !valid {
