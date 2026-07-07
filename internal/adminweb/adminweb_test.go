@@ -84,6 +84,27 @@ func loginSession(t *testing.T, app http.Handler, token string) *http.Cookie {
 	return c
 }
 
+func csrfForTest(t *testing.T, app http.Handler, c *http.Cookie) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/session", nil)
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("session status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("session json: %v", err)
+	}
+	if resp.CSRFToken == "" {
+		t.Fatal("empty csrf token")
+	}
+	return resp.CSRFToken
+}
+
 func TestAdminLogin_GETReturnsLoginPage(t *testing.T) {
 	app, auth, _, _, _, _ := openAdminApp(t)
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
@@ -127,6 +148,15 @@ func TestAdminLogin_POSTValidTokenSetsCookie(t *testing.T) {
 		if !strings.Contains(set, want) {
 			t.Fatalf("Set-Cookie missing %q: %q", want, set)
 		}
+	}
+	var resp struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if resp.CSRFToken == "" {
+		t.Fatal("empty csrf_token")
 	}
 }
 
@@ -201,11 +231,38 @@ func TestAdminStatic_MissingAssetsFallbackPage(t *testing.T) {
 	}
 }
 
+func TestAdminAPI_MutatingRequiresCSRF(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c := loginSession(t, app, initToken(t, auth))
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/gateway-keys", strings.NewReader(`{"name":"x"}`))
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+}
+
+func TestAdminAPI_MutatingAcceptsSessionCSRF(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c := loginSession(t, app, initToken(t, auth))
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/gateway-keys", strings.NewReader(`{"name":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrfForTest(t, app, c))
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGatewayKeys_CreateReturnsRawOnce(t *testing.T) {
 	app, auth, _, _, _, _ := openAdminApp(t)
 	c := loginSession(t, app, initToken(t, auth))
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/gateway-keys", strings.NewReader(`{"name":"ops"}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrfForTest(t, app, c))
 	req.AddCookie(c)
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, req)
@@ -258,6 +315,7 @@ func TestProviderKeys_CreateAcceptsRawReturnsMasked(t *testing.T) {
 		`{"provider":"grok","name":"primary","key":"`+rawProv+`"}`,
 	))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrfForTest(t, app, c))
 	req.AddCookie(c)
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, req)
@@ -314,6 +372,7 @@ func TestProviderKeys_ResetCooldown(t *testing.T) {
 	}
 	path := "/admin/api/provider-keys/" + strconv.FormatInt(d.ID, 10) + "/reset-cooldown"
 	req := httptest.NewRequest(http.MethodPost, path, nil)
+	req.Header.Set("X-CSRF-Token", csrfForTest(t, app, c))
 	req.AddCookie(c)
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, req)
@@ -342,6 +401,7 @@ func TestGrokBaseURL_GetAndPatch(t *testing.T) {
 	newURL := "https://custom.example/v1"
 	req2 := httptest.NewRequest(http.MethodPatch, "/admin/api/providers/grok", strings.NewReader(`{"base_url":"`+newURL+`"}`))
 	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("X-CSRF-Token", csrfForTest(t, app, c))
 	req2.AddCookie(c)
 	rec2 := httptest.NewRecorder()
 	app.ServeHTTP(rec2, req2)
@@ -364,6 +424,7 @@ func TestAuditEvents_List(t *testing.T) {
 	// Use server-mounted audit via login + gateway create
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/gateway-keys", strings.NewReader(`{"name":"audit"}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrfForTest(t, app, c))
 	req.AddCookie(c)
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, req)
@@ -490,6 +551,7 @@ func TestAdminLogout_JSONReturnsOK(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/logout", nil)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-CSRF-Token", csrfForTest(t, app, c))
 	req.AddCookie(c)
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, req)
@@ -511,6 +573,7 @@ func TestAdminLogout_HTMLFormRedirectsToLogin(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/logout", strings.NewReader(""))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "text/html")
+	req.Header.Set("X-CSRF-Token", csrfForTest(t, app, c))
 	req.AddCookie(c)
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, req)

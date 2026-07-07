@@ -29,7 +29,7 @@ type Server struct {
 }
 
 // New builds the HTTP handler. Runtime routes require a valid DB-backed gateway key via gatewayKeys.
-func New(_ config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, masterKey []byte) http.Handler {
+func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, masterKey []byte) http.Handler {
 	keyRepo := providers.NewKeyRepo(db, masterKey)
 	settingsRepo := providers.NewSettingsRepo(db)
 	px := proxy.New(proxy.Options{})
@@ -38,7 +38,7 @@ func New(_ config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, masterKe
 	} else {
 		px.SetCooldownSettings(cs)
 	}
-	auth := adminauth.NewService(db, 24*time.Hour)
+	auth := adminauth.NewServiceWithOptions(db, 24*time.Hour, adminauth.Options{CookieSecure: cfg.AdminCookieSecure})
 	adminH := adminweb.New(adminweb.Deps{
 		Auth:         auth,
 		GatewayKeys:  gatewayKeys,

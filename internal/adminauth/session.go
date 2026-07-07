@@ -20,6 +20,7 @@ const (
 // LoginResult holds the session id and Set-Cookie header value for a successful login.
 type LoginResult struct {
 	SessionID string
+	CSRFToken string
 	Cookie    *http.Cookie
 }
 
@@ -37,13 +38,15 @@ func (s *Service) Login(rawToken string) (*LoginResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	csrfToken := csrfTokenForSession(sid, hash)
+	csrfHash := hashToken(csrfToken)
 	now := time.Now().UTC()
 	expires := now.Add(s.sessionTTL)
 	created := now.Format(time.RFC3339Nano)
 	expiresStr := expires.Format(time.RFC3339Nano)
 	if _, err := s.db.Exec(
-		`INSERT INTO admin_sessions (id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)`,
-		sid, hash, created, expiresStr,
+		`INSERT INTO admin_sessions (id, token_hash, csrf_token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
+		sid, hash, csrfHash, created, expiresStr,
 	); err != nil {
 		return nil, fmt.Errorf("insert admin_sessions: %w", err)
 	}
@@ -52,12 +55,12 @@ func (s *Service) Login(rawToken string) (*LoginResult, error) {
 		Value:    sid,
 		Path:     sessionCookiePath,
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   s.cookieSecure,
 		SameSite: http.SameSiteLaxMode,
 		Expires:  expires,
 		MaxAge:   int(s.sessionTTL.Seconds()),
 	}
-	return &LoginResult{SessionID: sid, Cookie: cookie}, nil
+	return &LoginResult{SessionID: sid, CSRFToken: csrfToken, Cookie: cookie}, nil
 }
 
 // ValidateSession returns true if sid exists and is not expired.
@@ -87,6 +90,44 @@ func (s *Service) ValidateSession(sid string) (bool, error) {
 	return true, nil
 }
 
+// CSRFToken returns the raw CSRF token for a valid session.
+func (s *Service) CSRFToken(sid string) (string, error) {
+	if ok, err := s.ValidateSession(sid); err != nil || !ok {
+		return "", err
+	}
+	var tokenHash string
+	err := s.db.QueryRow(`SELECT token_hash FROM admin_sessions WHERE id = ?`, sid).Scan(&tokenHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrSessionInvalid
+	}
+	if err != nil {
+		return "", fmt.Errorf("select session token hash: %w", err)
+	}
+	return csrfTokenForSession(sid, tokenHash), nil
+}
+
+// ValidateCSRF returns true when token matches the CSRF hash bound to sid.
+func (s *Service) ValidateCSRF(sid, token string) (bool, error) {
+	if sid == "" || token == "" {
+		return false, ErrSessionInvalid
+	}
+	var stored string
+	err := s.db.QueryRow(
+		`SELECT csrf_token_hash FROM admin_sessions WHERE id = ?`,
+		sid,
+	).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrSessionInvalid
+	}
+	if err != nil {
+		return false, fmt.Errorf("select csrf token: %w", err)
+	}
+	if stored == "" {
+		return false, ErrSessionInvalid
+	}
+	return stored == hashToken(token), nil
+}
+
 // Logout removes the session and returns a cookie that clears the browser session.
 func (s *Service) Logout(sid string) (*http.Cookie, error) {
 	if sid != "" {
@@ -99,7 +140,7 @@ func (s *Service) Logout(sid string) (*http.Cookie, error) {
 		Value:    "",
 		Path:     sessionCookiePath,
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   s.cookieSecure,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0),
@@ -122,4 +163,8 @@ func newSessionID() (string, error) {
 		return "", fmt.Errorf("rand session id: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+func csrfTokenForSession(sid, tokenHash string) string {
+	return hashToken(sid + ":" + tokenHash)
 }

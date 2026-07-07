@@ -20,6 +20,9 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.MasterKeyPath != "/etc/code-guda-gateway/master.key" {
 		t.Fatalf("MasterKeyPath = %q", cfg.MasterKeyPath)
 	}
+	if !cfg.AdminCookieSecure {
+		t.Fatal("AdminCookieSecure default = false, want true")
+	}
 }
 
 func TestLoad_NoGatewayKeysRequired(t *testing.T) {
@@ -59,5 +62,24 @@ func TestLoad_OnlyBootstrapSettings(t *testing.T) {
 	}
 	if cfg.MasterKeyPath != "/tmp/master.key" {
 		t.Fatalf("MasterKeyPath = %q", cfg.MasterKeyPath)
+	}
+}
+
+func TestLoad_AdminCookieSecureDefaultAndOverride(t *testing.T) {
+	t.Setenv("GUDA_ADMIN_COOKIE_SECURE", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load default: %v", err)
+	}
+	if !cfg.AdminCookieSecure {
+		t.Fatal("AdminCookieSecure default = false, want true")
+	}
+	t.Setenv("GUDA_ADMIN_COOKIE_SECURE", "false")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load override: %v", err)
+	}
+	if cfg.AdminCookieSecure {
+		t.Fatal("AdminCookieSecure override = true, want false")
 	}
 }

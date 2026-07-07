@@ -146,10 +146,22 @@ func TestSessionLogin_ValidTokenCreatesSession(t *testing.T) {
 	if res.SessionID == "" {
 		t.Fatal("empty session id")
 	}
-	var id string
-	err = st.DB().QueryRow(`SELECT id FROM admin_sessions WHERE id = ?`, res.SessionID).Scan(&id)
+	if res.CSRFToken == "" {
+		t.Fatal("empty csrf token")
+	}
+	var id, csrfHash string
+	err = st.DB().QueryRow(`SELECT id, csrf_token_hash FROM admin_sessions WHERE id = ?`, res.SessionID).Scan(&id, &csrfHash)
 	if err != nil {
 		t.Fatalf("session row: %v", err)
+	}
+	if csrfHash == "" || csrfHash == res.CSRFToken {
+		t.Fatalf("csrf token hash not stored safely: hash=%q raw=%q", csrfHash, res.CSRFToken)
+	}
+	if ok, err := svc.ValidateCSRF(res.SessionID, res.CSRFToken); err != nil || !ok {
+		t.Fatalf("ValidateCSRF(raw): ok=%v err=%v", ok, err)
+	}
+	if ok, err := svc.ValidateCSRF(res.SessionID, "wrong"); err != nil || ok {
+		t.Fatalf("ValidateCSRF(wrong): ok=%v err=%v", ok, err)
 	}
 	c := res.Cookie
 	if c.Name != adminauth.SessionCookieName {
@@ -166,6 +178,28 @@ func TestSessionLogin_ValidTokenCreatesSession(t *testing.T) {
 	}
 	if c.Path != "/admin" {
 		t.Fatalf("cookie Path = %q, want /admin", c.Path)
+	}
+}
+
+func TestSessionLogin_CookieSecureCanBeDisabled(t *testing.T) {
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	svc := adminauth.NewServiceWithOptions(st.DB(), 24*time.Hour, adminauth.Options{CookieSecure: false})
+	raw, err := svc.Init()
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	res, err := svc.Login(raw)
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if res.Cookie.Secure {
+		t.Fatal("cookie Secure = true, want false")
 	}
 }
 

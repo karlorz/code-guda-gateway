@@ -186,6 +186,21 @@ func (h *Handler) buildDashboardData() (map[string]any, error) {
 
 func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
+	if requiresCSRF(r) {
+		ok, err := h.deps.Auth.ValidateCSRF(adminauth.SessionIDFromRequest(r), r.Header.Get("X-CSRF-Token"))
+		if err != nil {
+			if errors.Is(err, adminauth.ErrSessionInvalid) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
 	switch {
 	case path == "/admin/api/login" && r.Method == http.MethodPost:
 		h.handleLogin(w, r)
@@ -226,6 +241,15 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func requiresCSRF(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodPost, http.MethodPatch, http.MethodDelete:
+		return r.URL.Path != "/admin/api/login"
+	default:
+		return false
+	}
+}
+
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var token string
 	if ct := r.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
@@ -258,7 +282,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ClientIP:  r.RemoteAddr,
 	})
 	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "csrf_token": res.CSRFToken})
 		return
 	}
 	http.Redirect(w, r, "/admin", http.StatusFound)
@@ -305,7 +329,16 @@ func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
+	csrfToken, err := h.deps.Auth.CSRFToken(sid)
+	if err != nil {
+		if errors.Is(err, adminauth.ErrSessionInvalid) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": csrfToken})
 }
 
 func (h *Handler) handleDashboardJSON(w http.ResponseWriter, r *http.Request) {

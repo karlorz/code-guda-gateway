@@ -29,16 +29,27 @@ var (
 
 // Service provides admin token and session operations against SQLite.
 type Service struct {
-	db         *sql.DB
-	sessionTTL time.Duration
+	db           *sql.DB
+	sessionTTL   time.Duration
+	cookieSecure bool
+}
+
+// Options configures browser session behavior.
+type Options struct {
+	CookieSecure bool
 }
 
 // NewService creates an auth service. sessionTTL is how long browser sessions last (e.g. 24h).
 func NewService(db *sql.DB, sessionTTL time.Duration) *Service {
+	return NewServiceWithOptions(db, sessionTTL, Options{CookieSecure: true})
+}
+
+// NewServiceWithOptions creates an auth service with explicit session cookie options.
+func NewServiceWithOptions(db *sql.DB, sessionTTL time.Duration, opts Options) *Service {
 	if sessionTTL <= 0 {
 		sessionTTL = 24 * time.Hour
 	}
-	return &Service{db: db, sessionTTL: sessionTTL}
+	return &Service{db: db, sessionTTL: sessionTTL, cookieSecure: opts.CookieSecure}
 }
 
 // Init creates the sole admin token row. The raw token is returned once and never stored.
