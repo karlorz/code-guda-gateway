@@ -32,7 +32,8 @@ type Deps struct {
 	Settings     *providers.SettingsRepo
 	Audit        *audit.AuditRepo
 	Usage        *usage.UsageRepo
-	Quotas       *providers.QuotaRepo
+	Quotas         *providers.QuotaRepo
+	QuotaRefresher *providers.QuotaRefresher
 }
 
 // Handler serves /admin pages and /admin/api/* JSON.
@@ -680,7 +681,17 @@ func (h *Handler) handleProviderQuotaRefresh(w http.ResponseWriter, r *http.Requ
 		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
 		return
 	}
-	q := unsupportedQuota(provider)
+	var q providers.QuotaCache
+	if h.deps.QuotaRefresher == nil {
+		q = unsupportedQuota(provider)
+	} else {
+		var err error
+		q, err = h.deps.QuotaRefresher.Refresh(r.Context(), provider)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	}
 	if h.deps.Quotas != nil {
 		if err := h.deps.Quotas.Upsert(q); err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)

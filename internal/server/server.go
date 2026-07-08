@@ -39,6 +39,7 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 		px.SetCooldownSettings(cs)
 	}
 	auth := adminauth.NewServiceWithOptions(db, 24*time.Hour, adminauth.Options{CookieSecure: cfg.AdminCookieSecure})
+	quotaRepo := providers.NewQuotaRepo(db)
 	adminH := adminweb.New(adminweb.Deps{
 		Auth:         auth,
 		GatewayKeys:  gatewayKeys,
@@ -46,7 +47,12 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 		Settings:     settingsRepo,
 		Audit:        audit.NewAuditRepo(db),
 		Usage:        usage.NewUsageRepo(db),
-		Quotas:       providers.NewQuotaRepo(db),
+		Quotas:       quotaRepo,
+		QuotaRefresher: &providers.QuotaRefresher{
+			ProviderKeys: keyRepo,
+			Settings:     settingsRepo,
+			Quotas:       quotaRepo,
+		},
 	})
 	return &Server{
 		proxy:        px,

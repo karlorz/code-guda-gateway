@@ -67,6 +67,7 @@ export type ProviderQuota = {
   checked_at?: string;
   expires_at?: string;
   message_redacted?: string;
+  details?: Record<string, unknown>;
 };
 
 export type UsageDaily = {

@@ -54,6 +54,29 @@ func openAdminApp(t *testing.T) (http.Handler, *adminauth.Service, *gatewaykeys.
 	return app, auth, gk, keyRepo, st, mk
 }
 
+func openAdminAppWithRefresher(t *testing.T, refresher *providers.QuotaRefresher) (http.Handler, *adminauth.Service, *providers.KeyRepo, *store.Store) {
+	t.Helper()
+	_, auth, gk, keyRepo, st, _ := openAdminApp(t)
+	settingsRepo := providers.NewSettingsRepo(st.DB())
+	quotaRepo := providers.NewQuotaRepo(st.DB())
+	if refresher != nil {
+		refresher.ProviderKeys = keyRepo
+		refresher.Settings = settingsRepo
+		refresher.Quotas = quotaRepo
+	}
+	app := adminweb.New(adminweb.Deps{
+		Auth:           auth,
+		GatewayKeys:    gk,
+		ProviderKeys:   keyRepo,
+		Settings:       settingsRepo,
+		Audit:          audit.NewAuditRepo(st.DB()),
+		Usage:          usage.NewUsageRepo(st.DB()),
+		Quotas:         quotaRepo,
+		QuotaRefresher: refresher,
+	})
+	return app, auth, keyRepo, st
+}
+
 func initToken(t *testing.T, auth *adminauth.Service) string {
 	t.Helper()
 	raw, err := auth.Init()
@@ -492,6 +515,82 @@ func TestProviderQuotaUnsupportedShape(t *testing.T) {
 		!strings.Contains(rec.Body.String(), `"available":false`) ||
 		!strings.Contains(rec.Body.String(), `"source":"unsupported"`) {
 		t.Fatalf("unsupported quota shape missing: %s", rec.Body.String())
+	}
+}
+
+func TestProviderQuotaRefreshTavilyCachesSource(t *testing.T) {
+	const testKey = "tvly-test-key-abcdefghij"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"key":{"usage":150,"limit":1000},"account":{}}`))
+	}))
+	defer srv.Close()
+
+	ref := &providers.QuotaRefresher{HTTPClient: srv.Client()}
+	app, auth, keyRepo, st := openAdminAppWithRefresher(t, ref)
+	if err := providers.NewSettingsRepo(st.DB()).SetBaseURL(providers.ProviderTavily, srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	_, err := keyRepo.Add(providers.ProviderTavily, "t1", testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := loginSession(t, app, initToken(t, auth))
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/provider-quotas/tavily/refresh", nil)
+	req.Header.Set("X-CSRF-Token", csrfForTest(t, app, c))
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, testKey) || strings.Contains(body, "Bearer") {
+		t.Fatalf("response leaked secret: %s", body)
+	}
+	if !strings.Contains(body, `"source":"tavily_usage"`) || !strings.Contains(body, `"available":true`) {
+		t.Fatalf("unexpected refresh body: %s", body)
+	}
+	req2 := httptest.NewRequest(http.MethodGet, "/admin/api/provider-quotas", nil)
+	req2.AddCookie(c)
+	rec2 := httptest.NewRecorder()
+	app.ServeHTTP(rec2, req2)
+	if !strings.Contains(rec2.Body.String(), `"source":"tavily_usage"`) {
+		t.Fatalf("cached list missing source: %s", rec2.Body.String())
+	}
+}
+
+func TestProviderQuotaRefreshUpstreamFailureStillOK(t *testing.T) {
+	const testKey = "tvly-test-key-abcdefghij"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	ref := &providers.QuotaRefresher{HTTPClient: srv.Client()}
+	app, auth, keyRepo, st := openAdminAppWithRefresher(t, ref)
+	if err := providers.NewSettingsRepo(st.DB()).SetBaseURL(providers.ProviderTavily, srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	_, err := keyRepo.Add(providers.ProviderTavily, "t1", testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := loginSession(t, app, initToken(t, auth))
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/provider-quotas/tavily/refresh", nil)
+	req.Header.Set("X-CSRF-Token", csrfForTest(t, app, c))
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"available":false`) {
+		t.Fatalf("expected unavailable: %s", body)
+	}
+	if strings.Contains(body, testKey) {
+		t.Fatalf("leaked credential: %s", body)
 	}
 }
 

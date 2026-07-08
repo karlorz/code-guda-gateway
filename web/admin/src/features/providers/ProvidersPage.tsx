@@ -21,6 +21,7 @@ export function ProvidersPage() {
       void qc.invalidateQueries({ queryKey: ['provider-quotas'] });
     },
   });
+  const refreshingPath = postAction.isPending && postAction.variables ? postAction.variables : null;
 
   return (
     <div>
@@ -50,23 +51,64 @@ export function ProvidersPage() {
         </div>
       </Panel>
       <Panel title="Quotas">
-        <div className="grid gap-2">
+        <div className="grid gap-3 md:grid-cols-3">
           {(quotas.data?.items ?? []).map((quota) => (
-            <div className="flex items-center justify-between border-t border-zinc-200 py-3" key={quota.provider}>
-              <div>
-                <strong>{quota.provider}</strong>
-                <p className="text-sm text-zinc-600">{quota.available ? `${quota.remaining ?? '-'} remaining` : 'Not available'}</p>
-              </div>
-              <Button onClick={() => postAction.mutate(`/admin/api/provider-quotas/${quota.provider}/refresh`)} type="button" variant="secondary">
-                <RefreshCw size={16} />
-                Refresh
-              </Button>
-            </div>
+            <QuotaCard
+              key={quota.provider}
+              onRefresh={() => postAction.mutate(`/admin/api/provider-quotas/${quota.provider}/refresh`)}
+              quota={quota}
+              refreshing={refreshingPath === `/admin/api/provider-quotas/${quota.provider}/refresh`}
+            />
           ))}
         </div>
       </Panel>
     </div>
   );
+}
+
+function quotaRemainingLabel(quota: ProviderQuota): string | null {
+  if (!quota.available || quota.remaining == null) return null;
+  if (quota.limit_value != null) return `${quota.remaining} / ${quota.limit_value} remaining`;
+  return `${quota.remaining} remaining`;
+}
+
+function QuotaCard({ quota, onRefresh, refreshing }: { quota: ProviderQuota; onRefresh: () => void; refreshing: boolean }) {
+  const remainingLabel = quotaRemainingLabel(quota);
+
+  return (
+    <div className="border-t border-zinc-200 py-3">
+      <div className="flex items-center justify-between gap-2">
+        <strong className="capitalize">{quota.provider}</strong>
+        <Badge tone={quota.available ? 'good' : 'bad'}>{quota.available ? 'available' : 'not available'}</Badge>
+      </div>
+      {remainingLabel ? <p className="mt-2 text-sm font-medium text-zinc-800">{remainingLabel}</p> : null}
+      {quota.used != null ? <p className="text-sm text-zinc-600">Used: {quota.used}</p> : null}
+      <p className="mt-1 text-xs text-zinc-500">Source: {quota.source || '—'}</p>
+      {quota.checked_at ? <p className="text-xs text-zinc-500">Checked: {formatChecked(quota.checked_at)}</p> : null}
+      {!quota.available && quota.message_redacted ? (
+        <p className="mt-2 text-sm text-red-700">{quota.message_redacted}</p>
+      ) : null}
+      <Button
+        aria-label={`Refresh quota for ${quota.provider}`}
+        className="mt-3"
+        disabled={refreshing}
+        onClick={onRefresh}
+        type="button"
+        variant="secondary"
+      >
+        <RefreshCw className={refreshing ? 'animate-spin' : ''} size={16} />
+        {refreshing ? 'Refreshing…' : 'Refresh'}
+      </Button>
+    </div>
+  );
+}
+
+function formatChecked(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso;
+  }
 }
 
 function ProviderSettingRow({ setting, onSave }: { setting: ProviderSetting; onSave: (baseURL: string) => void }) {
