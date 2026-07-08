@@ -55,10 +55,15 @@ export type ProviderHealth = {
   enabled_key_count: number;
   cooldown_key_count: number;
   last_event_at?: string;
+  last_event_source?: string;
+  last_event_status_class?: string;
+  last_event_http_status?: number;
+  last_event_message_redacted?: string;
 };
 
 export type ProviderQuota = {
   provider: string;
+  provider_key_id?: number;
   available: boolean;
   source: string;
   used?: number;

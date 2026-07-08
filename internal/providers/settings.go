@@ -2,11 +2,13 @@ package providers
 
 import (
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"time"
 
 	"code-guda-gateway/internal/cooldown"
+	"code-guda-gateway/internal/secrets"
 )
 
 // SettingsRepo reads and writes provider_settings (e.g. Grok base URL).
@@ -107,13 +109,12 @@ func (r *SettingsRepo) SetCooldownSetting(key string, value string) error {
 }
 
 func (r *SettingsRepo) getSettingDuration(key string, fallback time.Duration) (time.Duration, error) {
-	var val string
-	err := r.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&val)
-	if err == sql.ErrNoRows {
-		return fallback, nil
-	}
+	val, err := r.getSettingString(key, "")
 	if err != nil {
-		return 0, fmt.Errorf("get setting %s: %w", key, err)
+		return 0, err
+	}
+	if val == "" {
+		return fallback, nil
 	}
 	secs, err := strconv.ParseInt(val, 10, 64)
 	if err != nil || secs < 0 {
@@ -123,17 +124,75 @@ func (r *SettingsRepo) getSettingDuration(key string, fallback time.Duration) (t
 }
 
 func (r *SettingsRepo) getSettingInt(key string, fallback int) (int, error) {
-	var val string
-	err := r.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&val)
-	if err == sql.ErrNoRows {
-		return fallback, nil
-	}
+	val, err := r.getSettingString(key, "")
 	if err != nil {
-		return 0, fmt.Errorf("get setting %s: %w", key, err)
+		return 0, err
+	}
+	if val == "" {
+		return fallback, nil
 	}
 	n, err := strconv.Atoi(val)
 	if err != nil || n < 1 {
 		return fallback, nil
 	}
 	return n, nil
+}
+
+func (r *SettingsRepo) getSettingString(key string, fallback string) (string, error) {
+	var val string
+	err := r.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&val)
+	if err == sql.ErrNoRows {
+		return fallback, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get setting %s: %w", key, err)
+	}
+	return val, nil
+}
+
+func (r *SettingsRepo) GetGrokQuotaMode() (string, error) {
+	return r.getSettingString("grok_quota_mode", "unsupported")
+}
+
+func (r *SettingsRepo) SetGrokQuotaMode(mode string) error {
+	if mode != "unsupported" && mode != "grok2api_admin" {
+		return fmt.Errorf("invalid grok quota mode: %s", mode)
+	}
+	return r.SetCooldownSetting("grok_quota_mode", mode)
+}
+
+func (r *SettingsRepo) GetGrok2APIAdminBaseURL() (string, error) {
+	return r.getSettingString("grok2api_admin_base_url", "")
+}
+
+func (r *SettingsRepo) SetGrok2APIAdminBaseURL(url string) error {
+	return r.SetCooldownSetting("grok2api_admin_base_url", url)
+}
+
+func (r *SettingsRepo) GetGrok2APIAdminKey(masterKey []byte) (string, error) {
+	val, err := r.getSettingString("grok2api_admin_key_encrypted", "")
+	if err != nil || val == "" {
+		return "", err
+	}
+	enc, err := hex.DecodeString(val)
+	if err != nil {
+		return "", fmt.Errorf("decode admin key: %w", err)
+	}
+	plain, err := secrets.Decrypt(masterKey, enc)
+	if err != nil {
+		return "", fmt.Errorf("decrypt admin key: %w", err)
+	}
+	return string(plain), nil
+}
+
+func (r *SettingsRepo) SetGrok2APIAdminKey(masterKey []byte, key string) error {
+	if key == "" {
+		return r.SetCooldownSetting("grok2api_admin_key_encrypted", "")
+	}
+	enc, err := secrets.Encrypt(masterKey, []byte(key))
+	if err != nil {
+		return fmt.Errorf("encrypt admin key: %w", err)
+	}
+	val := hex.EncodeToString(enc)
+	return r.SetCooldownSetting("grok2api_admin_key_encrypted", val)
 }

@@ -6,6 +6,7 @@ logs/
 .env
 .env.local
 .mcp.json
+.codex/
 web/admin/dist/
 web/admin/node_modules/
 web/admin/test-results/

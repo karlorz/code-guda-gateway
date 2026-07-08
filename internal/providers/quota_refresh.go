@@ -63,6 +63,7 @@ type QuotaRefresher struct {
 	Settings     *SettingsRepo
 	Quotas       *QuotaRepo
 	Now          func() time.Time
+	MasterKey    []byte
 }
 
 func (r *QuotaRefresher) Refresh(ctx context.Context, provider string) (QuotaCache, error) {
@@ -83,10 +84,60 @@ func (r *QuotaRefresher) Refresh(ctx context.Context, provider string) (QuotaCac
 	case ProviderFirecrawl:
 		return r.refreshFirecrawl(ctx, checked, expires)
 	case ProviderGrok:
-		return grokAdminRequiredQuota(checked, expires), nil
+		return r.refreshGrok2API(ctx, checked, expires)
 	default:
 		return QuotaCache{}, ErrUnknownProvider
 	}
+}
+
+func (r *QuotaRefresher) refreshGrok2API(ctx context.Context, checked, expires string) (QuotaCache, error) {
+	mode, err := r.Settings.GetGrokQuotaMode()
+	if err != nil {
+		return quotaFailure(ProviderGrok, "grok2api_admin_required", checked, expires, nil, err), nil
+	}
+	if mode != "grok2api_admin" {
+		return grokAdminRequiredQuota(checked, expires), nil
+	}
+	adminKey, err := r.Settings.GetGrok2APIAdminKey(r.MasterKey)
+	if err != nil {
+		return quotaFailure(ProviderGrok, "grok2api_admin_required", checked, expires, nil, err), nil
+	}
+	if adminKey == "" {
+		return grokAdminRequiredQuota(checked, expires), nil
+	}
+
+	base, err := r.Settings.GetGrok2APIAdminBaseURL()
+	if err != nil {
+		return quotaFailure(ProviderGrok, "grok2api_admin_tokens", checked, expires, nil, err), nil
+	}
+	if base == "" {
+		base, err = r.Settings.GetBaseURL(ProviderGrok)
+		if err != nil {
+			return quotaFailure(ProviderGrok, "grok2api_admin_tokens", checked, expires, nil, err), nil
+		}
+	}
+
+	adminBase := strings.TrimRight(base, "/")
+
+	// 1. POST /admin/api/batch/refresh?all_manageable=true
+	_, status, err := r.requestHTTP(ctx, http.MethodPost, adminBase+"/admin/api/batch/refresh?all_manageable=true", adminKey)
+	if err != nil {
+		return quotaHTTPFailure(ProviderGrok, "grok2api_admin_tokens", checked, expires, nil, status, err), nil
+	}
+
+	// 2. GET /admin/api/tokens
+	tokensURL := adminBase + "/admin/api/tokens"
+	body, status, err := r.requestHTTP(ctx, http.MethodGet, tokensURL, adminKey)
+	if err != nil {
+		return quotaHTTPFailure(ProviderGrok, "grok2api_admin_tokens", checked, expires, nil, status, err), nil
+	}
+
+	// 3. Normalize
+	var payload grok2APITokensResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return quotaMalformed(ProviderGrok, "grok2api_admin_tokens", checked, expires, nil), nil
+	}
+	return normalizeGrok2APITokens(ProviderGrok, nil, checked, expires, payload), nil
 }
 
 func grokAdminRequiredQuota(checked, expires string) QuotaCache {
@@ -150,12 +201,14 @@ func (r *QuotaRefresher) refreshProviderHTTP(
 	return parse(&keyID, body), nil
 }
 
-func (r *QuotaRefresher) getJSON(ctx context.Context, url, bearer string) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (r *QuotaRefresher) requestHTTP(ctx context.Context, method, url, bearer string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
 		return nil, 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := r.client().Do(req)
 	if err != nil {
@@ -170,6 +223,10 @@ func (r *QuotaRefresher) getJSON(ctx context.Context, url, bearer string) ([]byt
 		return body, resp.StatusCode, fmt.Errorf("upstream status %d", resp.StatusCode)
 	}
 	return body, resp.StatusCode, nil
+}
+
+func (r *QuotaRefresher) getJSON(ctx context.Context, url, bearer string) ([]byte, int, error) {
+	return r.requestHTTP(ctx, http.MethodGet, url, bearer)
 }
 
 func (r *QuotaRefresher) recordQuotaEvent(keyID int64, status int, err error) {

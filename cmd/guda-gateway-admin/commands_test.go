@@ -349,6 +349,53 @@ func TestGrokSetBaseURL_GetBaseURL(t *testing.T) {
 	}
 }
 
+func TestGrokQuotaSettingsCLI(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+
+	// Test quota-mode
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "grok", "set-quota-mode", "grok2api_admin"); c != 0 {
+		t.Fatalf("set-quota-mode failed")
+	}
+	out, _, c := runCLI(t, dbPath, masterPath, "", "grok", "get-quota-mode")
+	if c != 0 || strings.TrimSpace(out) != "grok2api_admin" {
+		t.Fatalf("get-quota-mode: code=%d out=%q", c, out)
+	}
+
+	// Test admin-base-url
+	url := "http://127.0.0.1:9000"
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "grok", "set-admin-base-url", url); c != 0 {
+		t.Fatalf("set-admin-base-url failed")
+	}
+	out, _, c = runCLI(t, dbPath, masterPath, "", "grok", "get-admin-base-url")
+	if c != 0 || strings.TrimSpace(out) != url {
+		t.Fatalf("get-admin-base-url: code=%d out=%q", c, out)
+	}
+
+	// Test admin-key
+	if _, _, c := runCLI(t, dbPath, masterPath, "super-secret-admin-key", "grok", "set-admin-key"); c != 0 {
+		t.Fatalf("set-admin-key failed")
+	}
+	// Verify that it is encrypted in settings table
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	settings := providers.NewSettingsRepo(st.DB())
+	mk, err := secrets.LoadOrCreate(masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decrypted, err := settings.GetGrok2APIAdminKey(mk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decrypted != "super-secret-admin-key" {
+		t.Fatalf("expected decrypted key = super-secret-admin-key, got %q", decrypted)
+	}
+}
+
 func TestAuditTail_PrintsRedacted(t *testing.T) {
 	dbPath, masterPath := testEnv(t)
 	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")

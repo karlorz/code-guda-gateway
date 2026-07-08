@@ -342,7 +342,7 @@ func (a *app) cmdProviderKey(args []string) int {
 
 func (a *app) cmdGrok(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.stderr, "usage: grok set-base-url|get-base-url")
+		fmt.Fprintln(a.stderr, "usage: grok set-base-url|get-base-url|set-quota-mode|get-quota-mode|set-admin-base-url|get-admin-base-url|set-admin-key")
 		return exitUsage
 	}
 	st, err := a.openStore()
@@ -372,6 +372,69 @@ func (a *app) cmdGrok(args []string) int {
 			return exitError
 		}
 		fmt.Fprintln(a.stdout, url)
+		return exitOK
+	case "set-quota-mode":
+		if len(args) < 2 {
+			fmt.Fprintln(a.stderr, "grok set-quota-mode requires <unsupported|grok2api_admin>")
+			return exitUsage
+		}
+		mode := strings.TrimSpace(args[1])
+		if err := settings.SetGrokQuotaMode(mode); err != nil {
+			fmt.Fprintf(a.stderr, "grok set-quota-mode: %v\n", err)
+			return exitError
+		}
+		recordCLIAudit(st.DB(), "setting.update", "setting", "grok_quota_mode", "value="+mode+";result=ok")
+		return exitOK
+	case "get-quota-mode":
+		mode, err := settings.GetGrokQuotaMode()
+		if err != nil {
+			fmt.Fprintf(a.stderr, "grok get-quota-mode: %v\n", err)
+			return exitError
+		}
+		fmt.Fprintln(a.stdout, mode)
+		return exitOK
+	case "set-admin-base-url":
+		if len(args) < 2 {
+			fmt.Fprintln(a.stderr, "grok set-admin-base-url requires <url>")
+			return exitUsage
+		}
+		url := strings.TrimSpace(args[1])
+		if err := settings.SetGrok2APIAdminBaseURL(url); err != nil {
+			fmt.Fprintf(a.stderr, "grok set-admin-base-url: %v\n", err)
+			return exitError
+		}
+		recordCLIAudit(st.DB(), "setting.update", "setting", "grok2api_admin_base_url", "value="+url+";result=ok")
+		return exitOK
+	case "get-admin-base-url":
+		url, err := settings.GetGrok2APIAdminBaseURL()
+		if err != nil {
+			fmt.Fprintf(a.stderr, "grok get-admin-base-url: %v\n", err)
+			return exitError
+		}
+		fmt.Fprintln(a.stdout, url)
+		return exitOK
+	case "set-admin-key":
+		mk, err := a.masterKey()
+		if err != nil {
+			fmt.Fprintf(a.stderr, "master key: %v\n", err)
+			return exitError
+		}
+		rawKey, err := readLine(a.stdin)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				fmt.Fprintln(a.stderr, "empty admin key")
+				return exitUsage
+			}
+			fmt.Fprintf(a.stderr, "read admin key from stdin: %v\n", err)
+			return exitError
+		}
+		rawKey = strings.TrimSpace(rawKey)
+		if err := settings.SetGrok2APIAdminKey(mk, rawKey); err != nil {
+			fmt.Fprintf(a.stderr, "grok set-admin-key: %v\n", err)
+			return exitError
+		}
+		recordCLIAudit(st.DB(), "setting.update", "setting", "grok2api_admin_key_encrypted", "result=ok")
+		fmt.Fprintln(a.stdout, "grok2api admin key updated successfully")
 		return exitOK
 	default:
 		fmt.Fprintf(a.stderr, "unknown grok subcommand %q\n", args[0])
@@ -458,7 +521,7 @@ Commands:
   gateway-key create --name NAME | list | disable|enable|revoke|delete --id ID
   provider-key add --provider grok|tavily|firecrawl --name NAME (key on stdin only; never pass secrets as argv)
   provider-key list | disable|enable|archive|restore|reset-cooldown|delete --id ID
-  grok set-base-url URL | get-base-url
+  grok set-base-url URL | get-base-url | set-quota-mode MODE | get-quota-mode | set-admin-base-url URL | get-admin-base-url | set-admin-key
   audit tail [--limit N]
   db migrate`)
 }

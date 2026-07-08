@@ -24,11 +24,21 @@ describe('ProvidersPage quotas', () => {
       if (path === '/admin/api/provider-health') {
         return { items: [{ provider: 'tavily', status: 'healthy', key_count: 1, enabled_key_count: 1, cooldown_key_count: 0, reasons: [] }] };
       }
+      if (path === '/admin/api/provider-keys') {
+        return {
+          items: [
+            { id: 2, provider: 'tavily', name: 'gh01', enabled: true },
+            { id: 3, provider: 'tavily', name: 'gh02', enabled: true },
+            { id: 4, provider: 'tavily', name: 'gmail', enabled: true },
+          ],
+        };
+      }
       if (path === '/admin/api/provider-quotas') {
         return {
           items: [
             {
               provider: 'tavily',
+              provider_key_id: 2,
               available: true,
               source: 'tavily_usage',
               remaining: 850,
@@ -50,6 +60,8 @@ describe('ProvidersPage quotas', () => {
     renderWithClient(<ProvidersPage />);
     expect(await screen.findByText('850 / 1000 remaining')).toBeInTheDocument();
     expect(screen.getByText(/Source: tavily_usage/)).toBeInTheDocument();
+    expect(screen.getByText('Quota key: gh01 (#2)')).toBeInTheDocument();
+    expect(screen.getByText('Quota refresh uses 1 of 3 enabled keys.')).toBeInTheDocument();
     expect(screen.getByText(/Checked:/)).toBeInTheDocument();
   });
 
@@ -57,6 +69,7 @@ describe('ProvidersPage quotas', () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
       if (path === '/admin/api/provider-settings') return { items: [] };
       if (path === '/admin/api/provider-health') return { items: [] };
+      if (path === '/admin/api/provider-keys') return { items: [] };
       if (path === '/admin/api/provider-quotas') {
         return {
           items: [

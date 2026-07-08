@@ -304,3 +304,98 @@ func TestQuotaRefresherGrokAdminRequired(t *testing.T) {
 		t.Fatalf("quota = %+v", q)
 	}
 }
+
+func TestQuotaRefresherGrok2API(t *testing.T) {
+	_, mk, keyRepo, settingsRepo := openQuotaTestDB(t)
+
+	var batchCalled bool
+	var tokensCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer secret-admin-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/admin/api/batch/refresh" {
+			if r.URL.Query().Get("all_manageable") != "true" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			batchCalled = true
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"success":true}`))
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/admin/api/tokens" {
+			tokensCalled = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"tokens": [
+					{"token": "t1", "quota": {"fast": {"remaining": 8, "total": 10}, "expert": {"remaining": 2, "total": 5}}}
+				]
+			}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	ref := &QuotaRefresher{
+		HTTPClient:   srv.Client(),
+		ProviderKeys: keyRepo,
+		Settings:     settingsRepo,
+		MasterKey:    mk,
+		Now:          func() time.Time { return time.Date(2026, 7, 8, 0, 0, 0, 0, time.UTC) },
+	}
+
+	// Case 1: mode is grok2api_admin but missing admin key
+	if err := settingsRepo.SetGrokQuotaMode("grok2api_admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := settingsRepo.SetGrok2APIAdminBaseURL(srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	q, err := ref.Refresh(context.Background(), ProviderGrok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Available || q.Source != "grok2api_admin_required" {
+		t.Fatalf("case 1 failed: %+v", q)
+	}
+
+	// Case 2: mode is grok2api_admin and valid admin key exists
+	if err := settingsRepo.SetGrok2APIAdminKey(mk, "secret-admin-key"); err != nil {
+		t.Fatal(err)
+	}
+	q, err = ref.Refresh(context.Background(), ProviderGrok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !q.Available || q.Source != "grok2api_admin_tokens" {
+		t.Fatalf("case 2 failed: %+v", q)
+	}
+	if !batchCalled || !tokensCalled {
+		t.Fatalf("expected both API calls: batchCalled=%v, tokensCalled=%v", batchCalled, tokensCalled)
+	}
+	if q.Remaining == nil || *q.Remaining != 10 {
+		t.Fatalf("expected remaining=10, got %+v", q.Remaining)
+	}
+	if q.LimitValue == nil || *q.LimitValue != 15 {
+		t.Fatalf("expected limit=15, got %+v", q.LimitValue)
+	}
+
+	// Case 3: invalid admin key
+	if err := settingsRepo.SetGrok2APIAdminKey(mk, "wrong-key"); err != nil {
+		t.Fatal(err)
+	}
+	q, err = ref.Refresh(context.Background(), ProviderGrok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Available {
+		t.Fatalf("expected unauthorized failure: %+v", q)
+	}
+	if q.MessageRedacted == nil || !strings.Contains(*q.MessageRedacted, "rejected") {
+		t.Fatalf("expected redacted rejection message, got: %+v", q.MessageRedacted)
+	}
+}

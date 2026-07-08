@@ -52,6 +52,7 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 			ProviderKeys: keyRepo,
 			Settings:     settingsRepo,
 			Quotas:       quotaRepo,
+			MasterKey:    masterKey,
 		},
 	})
 	return &Server{

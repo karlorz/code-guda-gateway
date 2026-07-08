@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"strconv"
 	"time"
 )
 
@@ -16,16 +17,20 @@ const (
 )
 
 type HealthItem struct {
-	Provider         string       `json:"provider"`
-	BaseURL          string       `json:"base_url"`
-	KeyCount         int          `json:"key_count"`
-	EnabledKeyCount  int          `json:"enabled_key_count"`
-	CooldownKeyCount int          `json:"cooldown_key_count"`
-	Status           HealthStatus `json:"status"`
-	Reasons          []string     `json:"reasons"`
-	LastUsedAt       *string      `json:"last_used_at,omitempty"`
-	LastSuccessAt    *string      `json:"last_success_at,omitempty"`
-	LastEventAt      *string      `json:"last_event_at,omitempty"`
+	Provider                 string       `json:"provider"`
+	BaseURL                  string       `json:"base_url"`
+	KeyCount                 int          `json:"key_count"`
+	EnabledKeyCount          int          `json:"enabled_key_count"`
+	CooldownKeyCount         int          `json:"cooldown_key_count"`
+	Status                   HealthStatus `json:"status"`
+	Reasons                  []string     `json:"reasons"`
+	LastUsedAt               *string      `json:"last_used_at,omitempty"`
+	LastSuccessAt            *string      `json:"last_success_at,omitempty"`
+	LastEventAt              *string      `json:"last_event_at,omitempty"`
+	LastEventSource          *string      `json:"last_event_source,omitempty"`
+	LastEventStatusClass     *string      `json:"last_event_status_class,omitempty"`
+	LastEventHTTPStatus      *int         `json:"last_event_http_status,omitempty"`
+	LastEventMessageRedacted *string      `json:"last_event_message_redacted,omitempty"`
 }
 
 func BuildHealth(settings *SettingsRepo, keys *KeyRepo) ([]HealthItem, error) {
@@ -56,8 +61,9 @@ func BuildHealth(settings *SettingsRepo, keys *KeyRepo) ([]HealthItem, error) {
 			}
 			item.LastUsedAt = laterString(item.LastUsedAt, k.LastUsedAt)
 			item.LastSuccessAt = laterString(item.LastSuccessAt, k.LastSuccessAt)
-			item.LastEventAt = laterString(item.LastEventAt, k.LastEventAt)
+			applyLatestKeyEvent(&item, k)
 		}
+		latestEventFailed := item.LastEventStatusClass != nil && *item.LastEventStatusClass != "2xx"
 		switch {
 		case item.KeyCount == 0:
 			item.Status = HealthMissingKey
@@ -68,6 +74,9 @@ func BuildHealth(settings *SettingsRepo, keys *KeyRepo) ([]HealthItem, error) {
 		case item.EnabledKeyCount == item.CooldownKeyCount:
 			item.Status = HealthCooldown
 			item.Reasons = append(item.Reasons, "enabled keys are cooling down")
+		case latestEventFailed:
+			item.Status = HealthDegraded
+			item.Reasons = append(item.Reasons, degradedEventReason(item))
 		case item.LastUsedAt == nil && item.LastSuccessAt == nil:
 			item.Status = HealthUnused
 			item.Reasons = append(item.Reasons, "no recent usage")
@@ -77,6 +86,32 @@ func BuildHealth(settings *SettingsRepo, keys *KeyRepo) ([]HealthItem, error) {
 		out = append(out, item)
 	}
 	return out, nil
+}
+
+func applyLatestKeyEvent(item *HealthItem, k DisplayProviderKey) {
+	latest := laterString(item.LastEventAt, k.LastEventAt)
+	if latest != k.LastEventAt {
+		return
+	}
+	item.LastEventAt = k.LastEventAt
+	item.LastEventSource = k.LastEventSource
+	item.LastEventStatusClass = k.LastEventStatusClass
+	item.LastEventHTTPStatus = k.LastEventHTTPStatus
+	item.LastEventMessageRedacted = k.LastEventMessageRedacted
+}
+
+func degradedEventReason(item HealthItem) string {
+	reason := "latest provider event failed"
+	if item.LastEventSource != nil && *item.LastEventSource != "" {
+		reason += ": " + *item.LastEventSource
+	}
+	if item.LastEventHTTPStatus != nil {
+		reason += " http " + strconv.Itoa(*item.LastEventHTTPStatus)
+	}
+	if item.LastEventMessageRedacted != nil && *item.LastEventMessageRedacted != "" {
+		reason += " - " + *item.LastEventMessageRedacted
+	}
+	return reason
 }
 
 func laterString(a, b *string) *string {
