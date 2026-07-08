@@ -344,9 +344,24 @@ func normalizeFirecrawlCreditUsage(provider string, keyID *int64, checked, expir
 		v := *limit - *remaining
 		used = &v
 	}
+	// Firecrawl documents planCredits as plan-period credits only (excludes
+	// one-time packs / coupons). remainingCredits is the full pool. When
+	// remaining exceeds planCredits, limit-used math goes negative.
+	if remaining != nil && limit != nil && *remaining > *limit {
+		extra := *remaining - *limit
+		q.Details = map[string]any{
+			"plan_credits":              *limit,
+			"extra_credits_remaining":   extra,
+			"plan_credits_note":         "planCredits excludes one-time credit packs per Firecrawl API",
+		}
+		q.LimitValue = nil
+		q.Used = clampUsedNonNegative(used)
+		q.Remaining = remaining
+		return q
+	}
 	q.Remaining = remaining
 	q.LimitValue = limit
-	q.Used = used
+	q.Used = clampUsedNonNegative(used)
 	return q
 }
 
@@ -386,10 +401,20 @@ func coalesceInt64(a, b *int64) *int64 {
 	return b
 }
 
+func clampUsedNonNegative(used *int64) *int64 {
+	if used != nil && *used < 0 {
+		zero := int64(0)
+		return &zero
+	}
+	return used
+}
+
 func quotaFailure(provider, source, checked, expires string, keyID *int64, err error) QuotaCache {
 	msg := "quota refresh failed"
 	if errors.Is(err, ErrNoEnabledKey) {
 		msg = "no enabled provider key available"
+	} else if err != nil && strings.Contains(err.Error(), "decrypt") {
+		msg = "stored provider key could not be decrypted (check GUDA_MASTER_KEY_PATH)"
 	}
 	return QuotaCache{
 		Provider:        provider,

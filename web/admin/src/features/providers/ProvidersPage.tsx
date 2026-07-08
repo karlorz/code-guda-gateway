@@ -71,9 +71,19 @@ export function ProvidersPage() {
   );
 }
 
+function detailNumber(details: ProviderQuota['details'], key: string): number | undefined {
+  const v = details?.[key];
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
 function quotaRemainingLabel(quota: ProviderQuota): string | null {
   if (!quota.available || quota.remaining == null) return null;
   if (quota.limit_value != null) return `${quota.remaining} / ${quota.limit_value} remaining`;
+  const plan = detailNumber(quota.details, 'plan_credits');
+  const extra = detailNumber(quota.details, 'extra_credits_remaining');
+  if (plan != null && extra != null && extra > 0) {
+    return `${quota.remaining} credits remaining (${plan} plan + ${extra} one-time)`;
+  }
   return `${quota.remaining} remaining`;
 }
 

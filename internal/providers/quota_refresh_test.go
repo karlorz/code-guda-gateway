@@ -104,6 +104,60 @@ func TestParseFirecrawlCreditUsageV2(t *testing.T) {
 	}
 }
 
+func TestParseFirecrawlCreditUsagePlanPlusOneTimePack(t *testing.T) {
+	// Matches dashboard: 1000 free plan + 400 one-time = 1400 remaining; API planCredits=1000 only.
+	body := []byte(`{
+	  "success": true,
+	  "data": {
+	    "remainingCredits": 1400,
+	    "planCredits": 1000,
+	    "billingPeriodStart": "2026-07-07T12:07:29.939Z",
+	    "billingPeriodEnd": "2026-08-07T12:07:29.939Z"
+	  }
+	}`)
+	var payload firecrawlCreditUsageResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	q := normalizeFirecrawlCreditUsage(ProviderFirecrawl, nil, "2026-07-08T00:00:00Z", "2026-07-08T00:05:00Z", payload)
+	if !q.Available {
+		t.Fatal("quota should be available")
+	}
+	if q.Remaining == nil || *q.Remaining != 1400 {
+		t.Fatalf("remaining = %#v", q.Remaining)
+	}
+	if q.LimitValue != nil {
+		t.Fatalf("limit should be omitted when remaining > planCredits, got %#v", q.LimitValue)
+	}
+	if q.Used == nil || *q.Used != 0 {
+		t.Fatalf("used = %#v, want 0", q.Used)
+	}
+	if q.Details == nil || q.Details["plan_credits"] != int64(1000) {
+		t.Fatalf("details = %#v", q.Details)
+	}
+	if q.Details["extra_credits_remaining"] != int64(400) {
+		t.Fatalf("extra = %#v", q.Details["extra_credits_remaining"])
+	}
+}
+
+func TestParseFirecrawlCreditUsagePlanPlusOneTimeNegativeDerivedUsed(t *testing.T) {
+	body := []byte(`{
+	  "success": true,
+	  "data": {
+	    "remainingCredits": 1400,
+	    "planCredits": 1000
+	  }
+	}`)
+	var payload firecrawlCreditUsageResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	q := normalizeFirecrawlCreditUsage(ProviderFirecrawl, nil, "2026-07-08T00:00:00Z", "2026-07-08T00:05:00Z", payload)
+	if q.Used == nil || *q.Used != 0 {
+		t.Fatalf("used = %#v, want 0 when derived used would be -400", q.Used)
+	}
+}
+
 func TestNormalizeGrok2APITokensAggregatesQuotaModes(t *testing.T) {
 	body := []byte(`{
 	  "tokens": [

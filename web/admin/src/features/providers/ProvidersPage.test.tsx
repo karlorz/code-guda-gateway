@@ -65,6 +65,36 @@ describe('ProvidersPage quotas', () => {
     expect(screen.getByText(/Checked:/)).toBeInTheDocument();
   });
 
+  it('shows Firecrawl plan plus one-time credits without bogus used', async () => {
+    vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/admin/api/provider-settings') return { items: [] };
+      if (path === '/admin/api/provider-health') return { items: [] };
+      if (path === '/admin/api/provider-keys') {
+        return { items: [{ id: 7, provider: 'firecrawl', name: 'gh01', enabled: true }] };
+      }
+      if (path === '/admin/api/provider-quotas') {
+        return {
+          items: [
+            {
+              provider: 'firecrawl',
+              provider_key_id: 7,
+              available: true,
+              source: 'firecrawl_credit_usage',
+              remaining: 1400,
+              used: 0,
+              details: { plan_credits: 1000, extra_credits_remaining: 400 },
+              checked_at: '2026-07-08T18:42:05.671803Z',
+            },
+          ],
+        };
+      }
+      throw new Error(`unexpected path ${path}`);
+    });
+    renderWithClient(<ProvidersPage />);
+    expect(await screen.findByText('1400 credits remaining (1000 plan + 400 one-time)')).toBeInTheDocument();
+    expect(screen.getByText('Used: 0')).toBeInTheDocument();
+  });
+
   it('shows unavailable message when quota not available', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
       if (path === '/admin/api/provider-settings') return { items: [] };
