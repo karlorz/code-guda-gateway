@@ -90,11 +90,21 @@ DB_PATH="$HOME/.local/share/guda-gateway/gateway.db"
 GUDA_MASTER_KEY_PATH="$HOME/.local/share/guda-gateway/master.key"
 
 go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" db migrate
-go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" token init
+go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" \
+  token init --save-env ~/.secrets/guda-gateway.env
 go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" gateway-key create --name dev
 # Paste provider secrets on stdin when prompted for provider-key add.
 
 GUDA_ADMIN_COOKIE_SECURE=false go run ./cmd/guda-gateway
+```
+
+For local dev only, `--save-env` writes or replaces
+`GUDA_ADMIN_TOKEN=<gat_...>` in the untracked env file with file mode `0600`.
+Use the same flag with `token rotate` after rotating the admin token:
+
+```bash
+go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" \
+  token rotate --save-env ~/.secrets/guda-gateway.env
 ```
 
 ### Throwaway dev (quick start)
@@ -159,6 +169,9 @@ Binary: `guda-gateway-admin`. Shared flags (before subcommand):
 
 Subcommands include `db migrate`, `token init|rotate|verify`, `gateway-key`,
 `provider-key`, `settings`, `audit`, and `usage` — run with no args for usage.
+`token init` and `token rotate` print the raw admin token once; pass
+`--save-env ~/.secrets/guda-gateway.env` in local dev to also persist
+`GUDA_ADMIN_TOKEN` for agent/browser smoke tests.
 
 ## Verify
 
