@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_URL="{{REPO_URL}}"
+REPO_BRANCH="{{REPO_BRANCH}}"
+SRC_DIR="{{SRC_DIR}}"
+
+cd "$SRC_DIR"
+git fetch origin "$REPO_BRANCH" --prune
+git checkout "$REPO_BRANCH"
+git pull --ff-only origin "$REPO_BRANCH"
+
+exec "$SRC_DIR/scripts/install-linux.sh" \
+  --repo-url "$REPO_URL" \
+  --branch "$REPO_BRANCH" \
+  "$@"

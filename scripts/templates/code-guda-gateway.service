@@ -1,0 +1,22 @@
+[Unit]
+Description=Code GuDa Gateway
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User={{SERVICE_USER}}
+Group={{SERVICE_GROUP}}
+EnvironmentFile={{ETC_DIR}}/bootstrap.env
+WorkingDirectory={{VAR_DIR}}
+ExecStart={{BIN_DIR}}/guda-gateway
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths={{VAR_DIR}} {{ETC_DIR}}
+
+[Install]
+WantedBy=multi-user.target

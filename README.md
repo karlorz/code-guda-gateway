@@ -68,6 +68,85 @@ go build -o guda-gateway ./cmd/guda-gateway
 ./guda-gateway
 ```
 
+## Linux systemd/Caddy deploy
+
+The production installer builds the embedded-admin release from a host checkout,
+preserves existing state, installs systemd, and optionally configures Caddy for:
+
+```text
+https://search.karldigi.dev -> 127.0.0.1:8080
+```
+
+Default paths:
+
+| Purpose | Path |
+|---|---|
+| Source checkout | `/opt/code-guda-gateway/src` |
+| Binaries | `/opt/code-guda-gateway/bin/guda-gateway`, `/opt/code-guda-gateway/bin/guda-gateway-admin` |
+| Bootstrap env | `/etc/code-guda-gateway/bootstrap.env` |
+| Master key | `/etc/code-guda-gateway/master.key` |
+| SQLite DB | `/var/lib/code-guda-gateway/gateway.db` |
+| systemd unit | `/etc/systemd/system/code-guda-gateway.service` |
+| Caddy site snippet | `/etc/caddy/Caddyfile.code-guda-gateway` |
+| Update command | `/usr/bin/update-code-guda-gateway` |
+
+Run from a root shell or a sudo-capable user:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/karlorz/code-guda-gateway/main/scripts/install-linux.sh -o /tmp/install-code-guda-gateway.sh
+bash /tmp/install-code-guda-gateway.sh \
+  --repo-url https://github.com/karlorz/code-guda-gateway.git \
+  --branch main \
+  --domain search.karldigi.dev
+```
+
+The installer creates missing directories, the service user, bootstrap env,
+master key, systemd unit, Caddy snippet, and update command. It installs missing
+build prerequisites by default (`git`, `curl`, Caddy when needed, Go, and Bun);
+set `INSTALL_PREREQS=0` to verify-only and fail if tools are absent. It does not
+replace an existing SQLite DB, master key, or bootstrap env.
+
+After install, initialize operational credentials on the host. Admin tokens and
+gateway keys print once; provider keys and Grok admin keys must be supplied via
+stdin, never as command arguments:
+
+```bash
+ADM=/opt/code-guda-gateway/bin/guda-gateway-admin
+DB=/var/lib/code-guda-gateway/gateway.db
+MK=/etc/code-guda-gateway/master.key
+
+"$ADM" --db "$DB" --master-key "$MK" token init
+"$ADM" --db "$DB" --master-key "$MK" gateway-key create --name groksearch
+printf '%s' "$GROK_UPSTREAM_API_KEY" | "$ADM" --db "$DB" --master-key "$MK" provider-key add --provider grok --name primary
+printf '%s' "$TAVILY_API_KEY" | "$ADM" --db "$DB" --master-key "$MK" provider-key add --provider tavily --name primary
+printf '%s' "$FIRECRAWL_API_KEY" | "$ADM" --db "$DB" --master-key "$MK" provider-key add --provider firecrawl --name primary
+```
+
+Operational checks:
+
+```bash
+systemctl status code-guda-gateway --no-pager
+systemctl is-enabled code-guda-gateway
+caddy validate --config /etc/caddy/Caddyfile
+curl -fsS https://search.karldigi.dev/healthz
+curl -fsS https://search.karldigi.dev/admin
+```
+
+Update in place after the first install:
+
+```bash
+update-code-guda-gateway
+```
+
+The update command fetches the configured branch, reruns the installer, applies
+DB migrations, and restarts the service while preserving DB, master key,
+bootstrap env, admin token hash, provider keys, and gateway keys.
+
+If a host cannot clone the private repository yet, copy a source checkout to
+`/opt/code-guda-gateway/src` and run the installer with `--skip-source-sync`.
+The installed update command still expects working Git credentials before it can
+fetch future changes.
+
 ## Local development
 
 There are two local dev path setups. **Do not mix them** - the SQLite DB and
