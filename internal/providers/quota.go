@@ -18,7 +18,8 @@ type QuotaCache struct {
 	PeriodEnd       *string `json:"period_end,omitempty"`
 	CheckedAt       string  `json:"checked_at"`
 	ExpiresAt       string  `json:"expires_at"`
-	MessageRedacted *string `json:"message_redacted,omitempty"`
+	MessageRedacted *string        `json:"message_redacted,omitempty"`
+	Details         map[string]any `json:"details,omitempty"`
 }
 
 // QuotaRepo stores redacted provider quota snapshots.

@@ -70,7 +70,46 @@ go build -o guda-gateway ./cmd/guda-gateway
 
 ## Local development
 
-Use temporary paths so you do not need system directories:
+There are two local dev path setups. **Do not mix them** - the SQLite DB and
+master key file are a pair; if you seed keys with one master key and run the
+gateway with another, provider key decryption fails with
+`cipher: message authentication failed`.
+
+### Persistent macOS dev (recommended)
+
+Keeps a real dev DB and master key under `~/.local/share/guda-gateway/`,
+surviving reboots. This matches the bootstrap settings in
+`~/.secrets/guda-gateway.env`:
+
+```bash
+set -a
+. ~/.secrets/guda-gateway.env   # sets DB_PATH, GUDA_MASTER_KEY_PATH, etc.
+set +a
+# Expand $HOME if your shell does not expand it from the env file:
+DB_PATH="$HOME/.local/share/guda-gateway/gateway.db"
+GUDA_MASTER_KEY_PATH="$HOME/.local/share/guda-gateway/master.key"
+
+go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" db migrate
+go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" \
+  token init --save-env ~/.secrets/guda-gateway.env
+go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" gateway-key create --name dev
+# Paste provider secrets on stdin when prompted for provider-key add.
+
+GUDA_ADMIN_COOKIE_SECURE=false go run ./cmd/guda-gateway
+```
+
+For local dev only, `--save-env` writes or replaces
+`GUDA_ADMIN_TOKEN=<gat_...>` in the untracked env file with file mode `0600`.
+Use the same flag with `token rotate` after rotating the admin token:
+
+```bash
+go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" \
+  token rotate --save-env ~/.secrets/guda-gateway.env
+```
+
+### Throwaway dev (quick start)
+
+Uses `/tmp` paths so you start clean each time, no system directories:
 
 ```bash
 export ADDR=127.0.0.1:8080
@@ -83,6 +122,17 @@ go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_P
 # Paste provider secrets on stdin when prompted for provider-key add.
 
 go run ./cmd/guda-gateway
+```
+
+### Master key rotation
+
+If the master key file is replaced or rotated, all provider keys encrypted
+with the old key become undecryptable. Re-seed provider keys with:
+
+```bash
+printf '%s' "<provider-key>" | ./guda-gateway-admin \
+  --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" \
+  provider-key add --provider <provider> --name <name>
 ```
 
 The React admin UI lives in `web/admin`. During local frontend work, run the Go
@@ -119,6 +169,9 @@ Binary: `guda-gateway-admin`. Shared flags (before subcommand):
 
 Subcommands include `db migrate`, `token init|rotate|verify`, `gateway-key`,
 `provider-key`, `settings`, `audit`, and `usage` — run with no args for usage.
+`token init` and `token rotate` print the raw admin token once; pass
+`--save-env ~/.secrets/guda-gateway.env` in local dev to also persist
+`GUDA_ADMIN_TOKEN` for agent/browser smoke tests.
 
 ## Verify
 

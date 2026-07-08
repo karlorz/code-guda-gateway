@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -91,6 +92,62 @@ func TestTokenRotate_PrintsNewRawInvalidatesOld(t *testing.T) {
 	ok, _ = auth.Verify(newRaw)
 	if !ok {
 		t.Fatal("new token not valid")
+	}
+}
+
+func TestTokenInit_SaveEnvWritesTokenToDevSecretFile(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	envPath := filepath.Join(t.TempDir(), "secrets", "guda-gateway.env")
+	stdout, stderr, code := runCLI(t, dbPath, masterPath, "", "token", "init", "--save-env", envPath)
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	raw := strings.TrimSpace(stdout)
+	if !reGAT.MatchString(raw) {
+		t.Fatalf("stdout token %q does not match gat_<32>", raw)
+	}
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("read env: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "GUDA_ADMIN_TOKEN="+raw {
+		t.Fatalf("env file = %q", got)
+	}
+	info, err := os.Stat(envPath)
+	if err != nil {
+		t.Fatalf("stat env: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("env file mode = %v, want 0600", got)
+	}
+}
+
+func TestTokenRotate_SaveEnvReplacesExistingBindingOnly(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "guda-gateway.env")
+	if err := os.WriteFile(envPath, []byte("DB_PATH=/tmp/dev.db\nGUDA_ADMIN_TOKEN=old-token\nGUDA_API_KEY=gsk_keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "token", "init")
+	stdout, stderr, code := runCLI(t, dbPath, masterPath, "", "token", "rotate", "--save-env", envPath)
+	if code != 0 {
+		t.Fatalf("rotate exit %d stderr=%s", code, stderr)
+	}
+	raw := strings.TrimSpace(stdout)
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("read env: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "DB_PATH=/tmp/dev.db\n") || !strings.Contains(got, "GUDA_API_KEY=gsk_keep\n") {
+		t.Fatalf("env file did not preserve existing bindings: %q", got)
+	}
+	if strings.Contains(got, "old-token") {
+		t.Fatalf("env file still contains old token: %q", got)
+	}
+	if !strings.Contains(got, "GUDA_ADMIN_TOKEN="+raw+"\n") {
+		t.Fatalf("env file missing new token binding: %q", got)
 	}
 }
 
@@ -346,6 +403,53 @@ func TestGrokSetBaseURL_GetBaseURL(t *testing.T) {
 	out, _, c := runCLI(t, dbPath, masterPath, "", "grok", "get-base-url")
 	if c != 0 || strings.TrimSpace(out) != url {
 		t.Fatalf("get: code=%d out=%q", c, out)
+	}
+}
+
+func TestGrokQuotaSettingsCLI(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+
+	// Test quota-mode
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "grok", "set-quota-mode", "grok2api_admin"); c != 0 {
+		t.Fatalf("set-quota-mode failed")
+	}
+	out, _, c := runCLI(t, dbPath, masterPath, "", "grok", "get-quota-mode")
+	if c != 0 || strings.TrimSpace(out) != "grok2api_admin" {
+		t.Fatalf("get-quota-mode: code=%d out=%q", c, out)
+	}
+
+	// Test admin-base-url
+	url := "http://127.0.0.1:9000"
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "grok", "set-admin-base-url", url); c != 0 {
+		t.Fatalf("set-admin-base-url failed")
+	}
+	out, _, c = runCLI(t, dbPath, masterPath, "", "grok", "get-admin-base-url")
+	if c != 0 || strings.TrimSpace(out) != url {
+		t.Fatalf("get-admin-base-url: code=%d out=%q", c, out)
+	}
+
+	// Test admin-key
+	if _, _, c := runCLI(t, dbPath, masterPath, "super-secret-admin-key", "grok", "set-admin-key"); c != 0 {
+		t.Fatalf("set-admin-key failed")
+	}
+	// Verify that it is encrypted in settings table
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	settings := providers.NewSettingsRepo(st.DB())
+	mk, err := secrets.LoadOrCreate(masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decrypted, err := settings.GetGrok2APIAdminKey(mk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decrypted != "super-secret-admin-key" {
+		t.Fatalf("expected decrypted key = super-secret-admin-key, got %q", decrypted)
 	}
 }
 

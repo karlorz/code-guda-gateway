@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -80,6 +82,11 @@ func (a *app) masterKey() ([]byte, error) {
 	return secrets.LoadOrCreate(a.masterPath)
 }
 
+type tokenEnvOptions struct {
+	savePath string
+	envKey   string
+}
+
 func recordCLIAudit(db *sql.DB, action, targetKind, targetID, detail string) {
 	_ = audit.NewAuditRepo(db).Record(audit.AuditEvent{
 		ActorKind:  "cli",
@@ -92,7 +99,7 @@ func recordCLIAudit(db *sql.DB, action, targetKind, targetID, detail string) {
 
 func (a *app) cmdToken(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.stderr, "usage: token init|rotate|verify")
+		fmt.Fprintln(a.stderr, "usage: token init|rotate [--save-env PATH] [--env-key NAME] | token verify [--token TOKEN]")
 		return exitUsage
 	}
 	st, err := a.openStore()
@@ -104,6 +111,11 @@ func (a *app) cmdToken(args []string) int {
 	auth := adminauth.NewService(st.DB(), 24*time.Hour)
 	switch args[0] {
 	case "init":
+		envOpts, err := parseTokenEnvOptions(args[1:])
+		if err != nil {
+			fmt.Fprintf(a.stderr, "%v\n", err)
+			return exitUsage
+		}
 		raw, err := auth.Init()
 		if err != nil {
 			if errors.Is(err, adminauth.ErrTokenAlreadySet) {
@@ -114,17 +126,20 @@ func (a *app) cmdToken(args []string) int {
 			return exitError
 		}
 		recordCLIAudit(st.DB(), "admin_token.init", "admin_token", "", "result=ok")
-		fmt.Fprintln(a.stdout, raw)
-		return exitOK
+		return a.writeAdminToken(raw, envOpts)
 	case "rotate":
+		envOpts, err := parseTokenEnvOptions(args[1:])
+		if err != nil {
+			fmt.Fprintf(a.stderr, "%v\n", err)
+			return exitUsage
+		}
 		raw, err := auth.Rotate()
 		if err != nil {
 			fmt.Fprintf(a.stderr, "token rotate: %v\n", err)
 			return exitError
 		}
 		recordCLIAudit(st.DB(), "admin_token.rotate", "admin_token", "", "result=ok")
-		fmt.Fprintln(a.stdout, raw)
-		return exitOK
+		return a.writeAdminToken(raw, envOpts)
 	case "verify":
 		raw, err := a.readTokenForVerify(args[1:])
 		if err != nil {
@@ -146,6 +161,111 @@ func (a *app) cmdToken(args []string) int {
 		fmt.Fprintf(a.stderr, "unknown token subcommand %q\n", args[0])
 		return exitUsage
 	}
+}
+
+func parseTokenEnvOptions(flags []string) (tokenEnvOptions, error) {
+	opts := tokenEnvOptions{envKey: "GUDA_ADMIN_TOKEN"}
+	for i := 0; i < len(flags); i++ {
+		switch flags[i] {
+		case "--save-env":
+			if i+1 >= len(flags) || strings.TrimSpace(flags[i+1]) == "" {
+				return opts, errors.New("token --save-env requires PATH")
+			}
+			opts.savePath = flags[i+1]
+			i++
+		case "--env-key":
+			if i+1 >= len(flags) || strings.TrimSpace(flags[i+1]) == "" {
+				return opts, errors.New("token --env-key requires NAME")
+			}
+			opts.envKey = strings.TrimSpace(flags[i+1])
+			i++
+		default:
+			return opts, fmt.Errorf("unknown token flag %q", flags[i])
+		}
+	}
+	return opts, nil
+}
+
+func (a *app) writeAdminToken(raw string, opts tokenEnvOptions) int {
+	fmt.Fprintln(a.stdout, raw)
+	if opts.savePath == "" {
+		return exitOK
+	}
+	path, err := expandHomePath(opts.savePath)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "save env: %v\n", err)
+		return exitError
+	}
+	if err := writeEnvBinding(path, opts.envKey, raw); err != nil {
+		fmt.Fprintf(a.stderr, "save env: %v\n", err)
+		return exitError
+	}
+	fmt.Fprintf(a.stderr, "saved %s to %s\n", opts.envKey, path)
+	return exitOK
+}
+
+func expandHomePath(path string) (string, error) {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home directory: %w", err)
+		}
+		if path == "~" {
+			return home, nil
+		}
+		return filepath.Join(home, strings.TrimPrefix(path, "~/")), nil
+	}
+	return path, nil
+}
+
+func writeEnvBinding(path, key, value string) error {
+	if strings.TrimSpace(key) == "" {
+		return errors.New("env key is empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create env directory: %w", err)
+	}
+	existing, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read env file: %w", err)
+	}
+	binding := key + "=" + value
+	lines := strings.SplitAfter(string(existing), "\n")
+	var b strings.Builder
+	replaced := false
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		trimmed := strings.TrimRight(line, "\r\n")
+		lineEnding := strings.TrimPrefix(line, trimmed)
+		if envLineMatchesKey(trimmed, key) {
+			if lineEnding == "" {
+				lineEnding = "\n"
+			}
+			b.WriteString(binding)
+			b.WriteString(lineEnding)
+			replaced = true
+			continue
+		}
+		b.WriteString(line)
+	}
+	if !replaced {
+		if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
+			b.WriteByte('\n')
+		}
+		b.WriteString(binding)
+		b.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		return fmt.Errorf("write env file: %w", err)
+	}
+	return os.Chmod(path, 0o600)
+}
+
+func envLineMatchesKey(line, key string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, key+"=") || strings.HasPrefix(trimmed, "export "+key+"=")
 }
 
 func (a *app) readTokenForVerify(flags []string) (string, error) {
@@ -342,7 +462,7 @@ func (a *app) cmdProviderKey(args []string) int {
 
 func (a *app) cmdGrok(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.stderr, "usage: grok set-base-url|get-base-url")
+		fmt.Fprintln(a.stderr, "usage: grok set-base-url|get-base-url|set-quota-mode|get-quota-mode|set-admin-base-url|get-admin-base-url|set-admin-key")
 		return exitUsage
 	}
 	st, err := a.openStore()
@@ -372,6 +492,69 @@ func (a *app) cmdGrok(args []string) int {
 			return exitError
 		}
 		fmt.Fprintln(a.stdout, url)
+		return exitOK
+	case "set-quota-mode":
+		if len(args) < 2 {
+			fmt.Fprintln(a.stderr, "grok set-quota-mode requires <unsupported|grok2api_admin>")
+			return exitUsage
+		}
+		mode := strings.TrimSpace(args[1])
+		if err := settings.SetGrokQuotaMode(mode); err != nil {
+			fmt.Fprintf(a.stderr, "grok set-quota-mode: %v\n", err)
+			return exitError
+		}
+		recordCLIAudit(st.DB(), "setting.update", "setting", "grok_quota_mode", "value="+mode+";result=ok")
+		return exitOK
+	case "get-quota-mode":
+		mode, err := settings.GetGrokQuotaMode()
+		if err != nil {
+			fmt.Fprintf(a.stderr, "grok get-quota-mode: %v\n", err)
+			return exitError
+		}
+		fmt.Fprintln(a.stdout, mode)
+		return exitOK
+	case "set-admin-base-url":
+		if len(args) < 2 {
+			fmt.Fprintln(a.stderr, "grok set-admin-base-url requires <url>")
+			return exitUsage
+		}
+		url := strings.TrimSpace(args[1])
+		if err := settings.SetGrok2APIAdminBaseURL(url); err != nil {
+			fmt.Fprintf(a.stderr, "grok set-admin-base-url: %v\n", err)
+			return exitError
+		}
+		recordCLIAudit(st.DB(), "setting.update", "setting", "grok2api_admin_base_url", "value="+url+";result=ok")
+		return exitOK
+	case "get-admin-base-url":
+		url, err := settings.GetGrok2APIAdminBaseURL()
+		if err != nil {
+			fmt.Fprintf(a.stderr, "grok get-admin-base-url: %v\n", err)
+			return exitError
+		}
+		fmt.Fprintln(a.stdout, url)
+		return exitOK
+	case "set-admin-key":
+		mk, err := a.masterKey()
+		if err != nil {
+			fmt.Fprintf(a.stderr, "master key: %v\n", err)
+			return exitError
+		}
+		rawKey, err := readLine(a.stdin)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				fmt.Fprintln(a.stderr, "empty admin key")
+				return exitUsage
+			}
+			fmt.Fprintf(a.stderr, "read admin key from stdin: %v\n", err)
+			return exitError
+		}
+		rawKey = strings.TrimSpace(rawKey)
+		if err := settings.SetGrok2APIAdminKey(mk, rawKey); err != nil {
+			fmt.Fprintf(a.stderr, "grok set-admin-key: %v\n", err)
+			return exitError
+		}
+		recordCLIAudit(st.DB(), "setting.update", "setting", "grok2api_admin_key_encrypted", "result=ok")
+		fmt.Fprintln(a.stdout, "grok2api admin key updated successfully")
 		return exitOK
 	default:
 		fmt.Fprintf(a.stderr, "unknown grok subcommand %q\n", args[0])
@@ -454,11 +637,11 @@ Global flags (before subcommand):
   --master-key PATH  Master key file (default /etc/code-guda-gateway/master.key)
 
 Commands:
-  token init|rotate|verify
+  token init|rotate [--save-env PATH] [--env-key NAME] | token verify [--token TOKEN]
   gateway-key create --name NAME | list | disable|enable|revoke|delete --id ID
   provider-key add --provider grok|tavily|firecrawl --name NAME (key on stdin only; never pass secrets as argv)
   provider-key list | disable|enable|archive|restore|reset-cooldown|delete --id ID
-  grok set-base-url URL | get-base-url
+  grok set-base-url URL | get-base-url | set-quota-mode MODE | get-quota-mode | set-admin-base-url URL | get-admin-base-url | set-admin-key
   audit tail [--limit N]
   db migrate`)
 }
