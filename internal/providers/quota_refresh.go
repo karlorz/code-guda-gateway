@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,12 @@ import (
 )
 
 const quotaCacheTTL = 5 * time.Minute
+
+// maxQuotaResponseBytes caps how much of an upstream quota response we read
+// into memory. 1 MiB was too small for grok2api /admin/api/tokens with
+// thousands of SSO tokens (~3 MB observed), causing truncated JSON parse
+// failures. 16 MiB bounds memory while accommodating large token pools.
+const maxQuotaResponseBytes = 16 << 20
 
 type tavilyUsageResponse struct {
 	Key struct {
@@ -119,10 +126,11 @@ func (r *QuotaRefresher) refreshGrok2API(ctx context.Context, checked, expires s
 
 	adminBase := strings.TrimRight(base, "/")
 
-	// 1. POST /admin/api/batch/refresh?all_manageable=true
-	_, status, err := r.requestHTTP(ctx, http.MethodPost, adminBase+"/admin/api/batch/refresh?all_manageable=true", adminKey)
-	if err != nil {
-		return quotaHTTPFailure(ProviderGrok, "grok2api_admin_tokens", checked, expires, nil, status, err), nil
+	// 1. POST /admin/api/batch/refresh?all_manageable=true (best-effort: forces
+	// upstream quota refresh but may time out or reject; we still read tokens below).
+	batchURL := adminBase + "/admin/api/batch/refresh?all_manageable=true"
+	if _, _, err := r.postJSON(ctx, batchURL, adminKey, []byte(`{"tokens":[]}`)); err != nil {
+		// Non-fatal: continue to read cached tokens from /admin/api/tokens.
 	}
 
 	// 2. GET /admin/api/tokens
@@ -215,7 +223,7 @@ func (r *QuotaRefresher) requestHTTP(ctx context.Context, method, url, bearer st
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQuotaResponseBytes))
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
@@ -227,6 +235,31 @@ func (r *QuotaRefresher) requestHTTP(ctx context.Context, method, url, bearer st
 
 func (r *QuotaRefresher) getJSON(ctx context.Context, url, bearer string) ([]byte, int, error) {
 	return r.requestHTTP(ctx, http.MethodGet, url, bearer)
+}
+
+func (r *QuotaRefresher) postJSON(ctx context.Context, url, bearer string, body []byte) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.client().Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxQuotaResponseBytes))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return respBody, resp.StatusCode, fmt.Errorf("upstream status %d", resp.StatusCode)
+	}
+	return respBody, resp.StatusCode, nil
 }
 
 func (r *QuotaRefresher) recordQuotaEvent(keyID int64, status int, err error) {

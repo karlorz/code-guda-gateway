@@ -321,6 +321,12 @@ func TestQuotaRefresherGrok2API(t *testing.T) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			// batch/refresh requires a JSON body {"tokens":[]}
+			rb, _ := io.ReadAll(r.Body)
+			if !strings.Contains(string(rb), `"tokens"`) {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			batchCalled = true
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"success":true}`))
@@ -397,5 +403,67 @@ func TestQuotaRefresherGrok2API(t *testing.T) {
 	}
 	if q.MessageRedacted == nil || !strings.Contains(*q.MessageRedacted, "rejected") {
 		t.Fatalf("expected redacted rejection message, got: %+v", q.MessageRedacted)
+	}
+}
+
+func TestQuotaRefresherGrok2APIBatchFailureTolerated(t *testing.T) {
+	// When /admin/api/batch/refresh fails (timeout/400), the refresher should
+	// still read /admin/api/tokens and return cached quota rather than failing.
+	_, mk, keyRepo, settingsRepo := openQuotaTestDB(t)
+	if err := settingsRepo.SetGrokQuotaMode("grok2api_admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := settingsRepo.SetGrok2APIAdminKey(mk, "secret-admin-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	batchHits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer secret-admin-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/admin/api/batch/refresh" {
+			batchHits++
+			// Simulate upstream timeout / failure
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/admin/api/tokens" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"tokens": [
+					{"token": "t1", "quota": {"fast": {"remaining": 5, "total": 10}}}
+				]
+			}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	if err := settingsRepo.SetGrok2APIAdminBaseURL(srv.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	ref := &QuotaRefresher{
+		HTTPClient:   srv.Client(),
+		ProviderKeys: keyRepo,
+		Settings:     settingsRepo,
+		MasterKey:    mk,
+		Now:          func() time.Time { return time.Date(2026, 7, 8, 0, 0, 0, 0, time.UTC) },
+	}
+	q, err := ref.Refresh(context.Background(), ProviderGrok)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if batchHits == 0 {
+		t.Fatal("expected batch/refresh to be attempted")
+	}
+	if !q.Available || q.Source != "grok2api_admin_tokens" {
+		t.Fatalf("expected available cached quota despite batch failure: %+v", q)
+	}
+	if q.Remaining == nil || *q.Remaining != 5 {
+		t.Fatalf("expected remaining=5, got %+v", q.Remaining)
 	}
 }
