@@ -17,5 +17,9 @@ cp -R "$ADMIN_SRC/dist/." "$EMBED_DIST/"
 printf '%s\n' 'placeholder so go:embed has a stable directory on fresh checkout' > "$EMBED_DIST/.keep"
 
 cd "$ROOT"
-CGO_ENABLED="${CGO_ENABLED:-0}" go build -o guda-gateway ./cmd/guda-gateway
-CGO_ENABLED="${CGO_ENABLED:-0}" go build -o guda-gateway-admin ./cmd/guda-gateway-admin
+# -buildvcs=false: avoid "error obtaining VCS status" when the source dir is a
+# non-git copy (e.g. staged onto a deploy host without .git). With set -e the
+# build would otherwise fail loudly here; the flag keeps VCS stamping off so the
+# binary is produced regardless of whether .git is present.
+CGO_ENABLED="${CGO_ENABLED:-0}" go build -buildvcs=false -o guda-gateway ./cmd/guda-gateway
+CGO_ENABLED="${CGO_ENABLED:-0}" go build -buildvcs=false -o guda-gateway-admin ./cmd/guda-gateway-admin
