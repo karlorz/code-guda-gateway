@@ -85,14 +85,14 @@ type KeyQuotaRefreshResult struct {
 
 // RefreshAllKeyQuotasResult aggregates RefreshAllKeys outcomes for one provider.
 type RefreshAllKeyQuotasResult struct {
-	Provider         string                  `json:"provider"`
-	Attempted        int                     `json:"attempted"`
-	Succeeded        int                     `json:"succeeded"`
-	Failed           int                     `json:"failed"`
-	SkippedCooldown   int                     `json:"skipped_cooldown"`
-	SkippedDisabled  int                     `json:"skipped_disabled"`
-	SkippedArchived  int                     `json:"skipped_archived"`
-	KeyResults       []KeyQuotaRefreshResult `json:"key_results"`
+	Provider        string                  `json:"provider"`
+	Attempted       int                     `json:"attempted"`
+	Succeeded       int                     `json:"succeeded"`
+	Failed          int                     `json:"failed"`
+	SkippedCooldown int                     `json:"skipped_cooldown"`
+	SkippedDisabled int                     `json:"skipped_disabled"`
+	SkippedArchived int                     `json:"skipped_archived"`
+	KeyResults      []KeyQuotaRefreshResult `json:"key_results"`
 }
 
 func (r *QuotaRefresher) Refresh(ctx context.Context, provider string) (QuotaCache, error) {
@@ -526,9 +526,9 @@ func normalizeFirecrawlCreditUsage(provider string, keyID *int64, checked, expir
 	if remaining != nil && limit != nil && *remaining > *limit {
 		extra := *remaining - *limit
 		q.Details = map[string]any{
-			"plan_credits":              *limit,
-			"extra_credits_remaining":   extra,
-			"plan_credits_note":         "planCredits excludes one-time credit packs per Firecrawl API",
+			"plan_credits":            *limit,
+			"extra_credits_remaining": extra,
+			"plan_credits_note":       "planCredits excludes one-time credit packs per Firecrawl API",
 		}
 		q.LimitValue = nil
 		q.Used = clampUsedNonNegative(used)

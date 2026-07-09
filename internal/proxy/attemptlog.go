@@ -225,7 +225,6 @@ func (r *AttemptLogRepo) List(filter AttemptLogFilter) (AttemptLogPage, error) {
 	return page, nil
 }
 
-
 type attemptLogScanner interface {
 	Scan(dest ...any) error
 }

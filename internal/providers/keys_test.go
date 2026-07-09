@@ -385,7 +385,6 @@ func mustAdd(t *testing.T, repo *providers.KeyRepo, provider, name, raw string) 
 	return raw, d
 }
 
-
 func TestRawKey_RoundTripAndMissing(t *testing.T) {
 	t.Parallel()
 	repo, _, _ := openKeyRepo(t)

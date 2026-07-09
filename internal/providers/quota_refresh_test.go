@@ -529,7 +529,6 @@ func TestQuotaRefresherGrok2APIBatchFailureTolerated(t *testing.T) {
 	}
 }
 
-
 func TestQuotaRefresher_RefreshKeyTavilyCachesPerKey(t *testing.T) {
 	var auth string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
