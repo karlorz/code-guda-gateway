@@ -13,6 +13,8 @@ import (
 	"code-guda-gateway/internal/providers"
 )
 
+const tavilyPlanLimitStatus = 432
+
 // KeySelector selects provider keys and records upstream outcomes.
 type KeySelector interface {
 	SelectKey(provider string) (keyID int64, rawKey string, err error)
@@ -122,6 +124,9 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 		lastStatus = resp.StatusCode
 		lastBody = respBody
 		lastHeader = resp.Header.Clone()
+		if isTavilyPlanLimit(target.Provider, resp.StatusCode) {
+			lastStatus, lastHeader, lastBody = tavilyPlanLimitClientResponse(resp.Header)
+		}
 
 		if cooldown.ShouldMarkSuccess(resp.StatusCode) {
 			_ = target.Keys.MarkSuccess(keyID)
@@ -130,6 +135,15 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 		}
 
 		coolDur, reason, applyCooldown, retryAcrossKeys := cooldown.PolicyForStatus(resp.StatusCode, p.settings)
+		if isTavilyPlanLimit(target.Provider, resp.StatusCode) {
+			coolDur = p.settings.RateLimit
+			if coolDur <= 0 {
+				coolDur = cooldown.DefaultRateLimitCooldown
+			}
+			reason = "plan_limit_exceeded"
+			applyCooldown = true
+			retryAcrossKeys = true
+		}
 		if applyCooldown {
 			if resp.StatusCode == http.StatusTooManyRequests {
 				if ra, ok := cooldown.ParseRetryAfter(resp.Header.Get("Retry-After"), now); ok {
@@ -170,6 +184,18 @@ func (p *Proxy) do(r *http.Request, target Target, key string, body []byte) (*ht
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Host = ""
 	return p.client.Do(req)
+}
+
+func isTavilyPlanLimit(provider string, status int) bool {
+	return provider == providers.ProviderTavily && status == tavilyPlanLimitStatus
+}
+
+func tavilyPlanLimitClientResponse(header http.Header) (int, http.Header, []byte) {
+	h := header.Clone()
+	h.Del("Content-Length")
+	h.Set("Content-Type", "application/json")
+	body := []byte(`{"error":{"code":"tavily_plan_limit_exceeded","message":"Tavily plan usage limit exceeded"}}`)
+	return http.StatusTooManyRequests, h, body
 }
 
 func writeResponse(w http.ResponseWriter, status int, header http.Header, body []byte) {

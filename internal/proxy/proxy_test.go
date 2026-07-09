@@ -235,6 +235,55 @@ func TestProxy_RespectsRetryAfter(t *testing.T) {
 	}
 }
 
+func TestProxy_TavilyPlanLimitMapsToClearGatewayError(t *testing.T) {
+	upstreamBody := `{"detail":{"error":"This request exceeds your plan's set usage limit. Please upgrade your plan or contact support@tavily.com"}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(432)
+		_, _ = w.Write([]byte(upstreamBody))
+	}))
+	defer upstream.Close()
+
+	px, repo, st := openProxyTarget(t, providers.ProviderTavily, "only")
+	req := httptest.NewRequest(http.MethodPost, "/tavily/map", strings.NewReader(`{"url":"https://example.com"}`))
+	rec := httptest.NewRecorder()
+	_ = px.Forward(rec, req, proxy.Target{
+		BaseURL:  upstream.URL,
+		Path:     "/map",
+		Provider: providers.ProviderTavily,
+		Keys:     repo,
+	})
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"code":"tavily_plan_limit_exceeded"`) ||
+		!strings.Contains(body, `"message":"Tavily plan usage limit exceeded"`) {
+		t.Fatalf("body = %q, want stable Tavily plan-limit error", body)
+	}
+	var status int
+	var reason sql.NullString
+	var cooldownUntil sql.NullString
+	var lastMessage string
+	_ = st.DB().QueryRow(`
+		SELECT last_error_status, cooldown_reason, cooldown_until, last_error_message_redacted
+		FROM provider_keys WHERE name = 'a'`,
+	).Scan(&status, &reason, &cooldownUntil, &lastMessage)
+	if status != 432 {
+		t.Fatalf("last_error_status = %d, want upstream 432", status)
+	}
+	if !reason.Valid || reason.String != "plan_limit_exceeded" {
+		t.Fatalf("cooldown_reason = %v, want plan_limit_exceeded", reason)
+	}
+	if !cooldownUntil.Valid || cooldownUntil.String == "" {
+		t.Fatal("expected cooldown_until set after Tavily plan limit")
+	}
+	if !strings.Contains(lastMessage, "usage limit") {
+		t.Fatalf("last_error_message_redacted = %q, want usage limit detail", lastMessage)
+	}
+}
+
 func TestProxy_MaxRetriesExhausted(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
