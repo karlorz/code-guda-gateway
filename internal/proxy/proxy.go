@@ -102,6 +102,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 	var lastBody []byte
 	var lastHeader http.Header
 	now := time.Now()
+	attemptLogging := p.attempts != nil && p.attempts.Enabled()
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		keyID, key, selErr := target.Keys.SelectKey(target.Provider)
@@ -144,7 +145,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 				Reason:        &reason,
 				CooldownUntil: &untilStr,
 				Terminal:      terminal,
-			})
+			}, attemptLogging)
 			if terminal {
 				http.Error(w, "upstream request failed", http.StatusBadGateway)
 				return Result{Err: err, StatusCode: http.StatusBadGateway, NetworkError: true}
@@ -177,9 +178,9 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 				AttemptIndex:   attempt + 1,
 				ProviderKeyID:  &keyIDCopy,
 				UpstreamStatus: &status,
-				StatusClass:    statusClass(status),
+				StatusClass:    usage.StatusClassFromHTTP(status),
 				Terminal:       true,
-			})
+			}, attemptLogging)
 			writeResponse(w, resp.StatusCode, lastHeader, lastBody)
 			return Result{StatusCode: resp.StatusCode}
 		}
@@ -221,7 +222,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 			AttemptIndex:   attempt + 1,
 			ProviderKeyID:  &keyIDCopy,
 			UpstreamStatus: &status,
-			StatusClass:    statusClass(status),
+			StatusClass:    usage.StatusClassFromHTTP(status),
 			Terminal:       terminal,
 		}
 		if reasonPtr != nil {
@@ -231,7 +232,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 			untilStr := untilPtr.UTC().Format(time.RFC3339Nano)
 			row.CooldownUntil = &untilStr
 		}
-		p.recordAttempt(row)
+		p.recordAttempt(row, attemptLogging)
 
 		if terminal {
 			writeResponse(w, lastStatus, lastHeader, lastBody)
@@ -249,20 +250,11 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 }
 
 // recordAttempt is best-effort: nil/disabled recorder and Record errors are ignored.
-func (p *Proxy) recordAttempt(row AttemptLog) {
-	if p.attempts == nil || !p.attempts.Enabled() {
+func (p *Proxy) recordAttempt(row AttemptLog, enabled bool) {
+	if !enabled || p.attempts == nil {
 		return
 	}
 	_ = p.attempts.Record(row)
-}
-
-// statusClass maps an upstream status code to a coarse bucket string.
-// Uses Nxx for HTTP statuses; network errors use the literal "network_error".
-func statusClass(status int) string {
-	if status < 100 {
-		return fmt.Sprintf("%d", status)
-	}
-	return fmt.Sprintf("%dxx", status/100)
 }
 
 func (p *Proxy) do(r *http.Request, target Target, key string, body []byte) (*http.Response, error) {

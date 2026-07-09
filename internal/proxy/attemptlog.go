@@ -165,17 +165,7 @@ func (r *AttemptLogRepo) List(filter AttemptLogFilter) (AttemptLogPage, error) {
 	if r == nil || r.db == nil {
 		return page, fmt.Errorf("attempt log repo: not configured")
 	}
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 200 {
-		limit = 200
-	}
-	offset := filter.Offset
-	if offset < 0 {
-		offset = 0
-	}
+	limit, offset := providers.ClampLimitOffset(filter.Limit, filter.Offset, 50, 200)
 
 	where := ""
 	args := make([]any, 0, 3)

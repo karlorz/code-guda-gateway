@@ -128,16 +128,14 @@ func (r *QuotaRefresher) RefreshKey(ctx context.Context, providerKeyID int64) (P
 	if err != nil {
 		return ProviderKeyQuota{}, err
 	}
+	var q ProviderKeyQuota
 	raw, err := r.ProviderKeys.RawKey(providerKeyID)
 	if err != nil {
-		q := keyQuotaFailure(display, "quota_refresh", err)
-		if r.KeyQuotas != nil {
-			_ = r.KeyQuotas.Upsert(q)
-		}
-		return q, nil
+		q = keyQuotaFailure(display, "quota_refresh", err)
+	} else {
+		qc := r.refreshProviderWithRawKey(ctx, display.Provider, providerKeyID, raw)
+		q = providerKeyQuotaFromCache(providerKeyID, qc)
 	}
-	qc := r.refreshProviderWithRawKey(ctx, display.Provider, providerKeyID, raw)
-	q := providerKeyQuotaFromCache(providerKeyID, qc)
 	if r.KeyQuotas != nil {
 		if err := r.KeyQuotas.Upsert(q); err != nil {
 			return ProviderKeyQuota{}, err
@@ -155,26 +153,17 @@ func (r *QuotaRefresher) RefreshAllKeys(ctx context.Context, provider string) (R
 	if err != nil {
 		return out, err
 	}
-	nowFn := r.Now
-	if nowFn == nil {
-		nowFn = time.Now
-	}
-	now := nowFn().UTC()
+	now := r.nowUTC()
 	for _, key := range keys {
-		switch {
-		case key.ArchivedAt != nil:
-			out.SkippedArchived++
-			reason := "archived"
-			out.KeyResults = append(out.KeyResults, KeyQuotaRefreshResult{ProviderKeyID: key.ID, Provider: provider, SkippedReason: &reason})
-			continue
-		case !key.Enabled:
-			out.SkippedDisabled++
-			reason := "disabled"
-			out.KeyResults = append(out.KeyResults, KeyQuotaRefreshResult{ProviderKeyID: key.ID, Provider: provider, SkippedReason: &reason})
-			continue
-		case cooldownActive(key.CooldownUntil, now):
-			out.SkippedCooldown++
-			reason := "cooldown"
+		if reason := poolKeySkipReason(key, now); reason != "" {
+			switch reason {
+			case "archived":
+				out.SkippedArchived++
+			case "disabled":
+				out.SkippedDisabled++
+			case "cooldown":
+				out.SkippedCooldown++
+			}
 			out.KeyResults = append(out.KeyResults, KeyQuotaRefreshResult{ProviderKeyID: key.ID, Provider: provider, SkippedReason: &reason})
 			continue
 		}
@@ -195,11 +184,7 @@ func (r *QuotaRefresher) RefreshAllKeys(ctx context.Context, provider string) (R
 // For Grok, per-key raw keys are not used for quota (admin token path); we attribute the
 // admin-token pool snapshot to the chosen key id so a ProviderKeyQuota row still lands.
 func (r *QuotaRefresher) refreshProviderWithRawKey(ctx context.Context, provider string, keyID int64, rawKey string) QuotaCache {
-	nowFn := r.Now
-	if nowFn == nil {
-		nowFn = time.Now
-	}
-	now := nowFn().UTC()
+	now := r.nowUTC()
 	checked := now.Format(time.RFC3339Nano)
 	expires := now.Add(quotaCacheTTL).Format(time.RFC3339Nano)
 
@@ -247,11 +232,15 @@ func providerKeyQuotaFromCache(providerKeyID int64, qc QuotaCache) ProviderKeyQu
 		MessageRedacted: qc.MessageRedacted,
 		Details:         qc.Details,
 	}
-	if q.MessageRedacted != nil {
-		redacted := Redact(*q.MessageRedacted)
-		q.MessageRedacted = &redacted
-	}
 	return q
+}
+
+func (r *QuotaRefresher) nowUTC() time.Time {
+	nowFn := r.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	return nowFn().UTC()
 }
 
 func keyQuotaFailure(display DisplayProviderKey, source string, err error) ProviderKeyQuota {

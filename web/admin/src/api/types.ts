@@ -1,5 +1,6 @@
 export type SessionResponse = { authenticated: true; csrf_token: string };
 export type ListResponse<T> = { items: T[]; page?: { limit: number; offset: number }; filter?: Record<string, string> };
+export type PagedItems<T> = { items: T[]; page: { limit: number; offset: number; total: number } };
 
 export type GatewayKey = {
   ID?: number;

@@ -89,11 +89,11 @@ function statusTone(status: ProviderPoolRow['status']) {
 }
 
 function keyID(key: ProviderKey): number {
-  return key.id ?? key.ID ?? 0;
+  return valueOf<number>(key as Record<string, unknown>, 'ID', 'id', 0);
 }
 
 function keyName(key: ProviderKey): string {
-  return key.name ?? key.Name ?? '';
+  return valueOf<string>(key as Record<string, unknown>, 'Name', 'name', '');
 }
 
 function detailNumber(details: ProviderQuota['details'] | ProviderKeyQuota['details'], key: string): number | undefined {

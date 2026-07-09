@@ -213,17 +213,7 @@ func (r *KeyQuotaRepo) ProviderPool(keys *KeyRepo, provider string, opts PoolLis
 	if keys == nil {
 		return ProviderPool{}, fmt.Errorf("provider pool: key repo required")
 	}
-	limit := opts.Limit
-	if limit <= 0 {
-		limit = 25
-	}
-	if limit > 100 {
-		limit = 100
-	}
-	offset := opts.Offset
-	if offset < 0 {
-		offset = 0
-	}
+	limit, offset := ClampLimitOffset(opts.Limit, opts.Offset, 25, 100)
 
 	allKeys, err := keys.List(provider)
 	if err != nil {
@@ -243,12 +233,7 @@ func (r *KeyQuotaRepo) ProviderPool(keys *KeyRepo, provider string, opts PoolLis
 	var hasKnownRemaining bool
 
 	// Derive status for every key so summary counts are correct independent of pagination.
-	type derived struct {
-		key    DisplayProviderKey
-		status PoolKeyStatus
-		quota  *ProviderKeyQuota
-	}
-	all := make([]derived, 0, len(allKeys))
+	all := make([]ProviderPoolRow, 0, len(allKeys))
 	for _, k := range allKeys {
 		var qPtr *ProviderKeyQuota
 		if q, ok := quotaByKey[k.ID]; ok {
@@ -256,7 +241,7 @@ func (r *KeyQuotaRepo) ProviderPool(keys *KeyRepo, provider string, opts PoolLis
 			qPtr = &cp
 		}
 		status := derivePoolKeyStatus(k, qPtr != nil, now)
-		all = append(all, derived{key: k, status: status, quota: qPtr})
+		all = append(all, ProviderPoolRow{Key: k, Status: status, Quota: qPtr})
 
 		if k.Enabled && k.ArchivedAt == nil {
 			summary.EnabledKeyCount++
@@ -289,15 +274,7 @@ func (r *KeyQuotaRepo) ProviderPool(keys *KeyRepo, provider string, opts PoolLis
 	if end > total {
 		end = total
 	}
-	pageSlice := all[start:end]
-	items := make([]ProviderPoolRow, 0, len(pageSlice))
-	for _, d := range pageSlice {
-		items = append(items, ProviderPoolRow{
-			Key:    d.key,
-			Status: d.status,
-			Quota:  d.quota,
-		})
-	}
+	items := all[start:end]
 
 	return ProviderPool{
 		Provider: provider,
@@ -309,6 +286,20 @@ func (r *KeyQuotaRepo) ProviderPool(keys *KeyRepo, provider string, opts PoolLis
 			Total:  total,
 		},
 	}, nil
+}
+
+// poolKeySkipReason returns a refresh-all skip reason when the key must not be refreshed, or "".
+func poolKeySkipReason(k DisplayProviderKey, now time.Time) string {
+	switch {
+	case k.ArchivedAt != nil:
+		return "archived"
+	case !k.Enabled:
+		return "disabled"
+	case cooldownActive(k.CooldownUntil, now):
+		return "cooldown"
+	default:
+		return ""
+	}
 }
 
 // derivePoolKeyStatus applies the precedence rules for a single key.

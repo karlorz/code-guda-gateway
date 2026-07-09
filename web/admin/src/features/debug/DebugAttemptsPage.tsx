@@ -2,10 +2,10 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bug, ChevronLeft, ChevronRight, ToggleLeft, ToggleRight } from 'lucide-react';
 import { apiFetch } from '../../api/client';
-import type { ProxyAttempt, ProxyDebugAttemptsSetting } from '../../api/types';
+import type { PagedItems, ProxyAttempt, ProxyDebugAttemptsSetting } from '../../api/types';
 import { Badge, Button, Panel } from '../../components/ui';
 
-type AttemptPage = { items: ProxyAttempt[]; page: { limit: number; offset: number; total: number } };
+const PAGE_SIZE = 50;
 const providers = ['all', 'tavily', 'firecrawl', 'grok'] as const;
 
 export function DebugAttemptsPage() {
@@ -13,7 +13,7 @@ export function DebugAttemptsPage() {
   const [offset, setOffset] = useState(0);
   const [provider, setProvider] = useState<(typeof providers)[number]>('all');
   const setting = useQuery({ queryKey: ['proxy-debug-attempts'], queryFn: () => apiFetch<ProxyDebugAttemptsSetting>('/admin/api/settings/proxy-debug-attempts') });
-  const attempts = useQuery({ queryKey: ['proxy-attempts', offset], queryFn: () => apiFetch<AttemptPage>(`/admin/api/proxy-attempts?limit=50&offset=${offset}`) });
+  const attempts = useQuery({ queryKey: ['proxy-attempts', offset], queryFn: () => apiFetch<PagedItems<ProxyAttempt>>(`/admin/api/proxy-attempts?limit=${PAGE_SIZE}&offset=${offset}`) });
   const toggle = useMutation({
     mutationFn: (enabled: boolean) => apiFetch('/admin/api/settings/proxy-debug-attempts', { method: 'PATCH', body: JSON.stringify({ enabled }) }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['proxy-debug-attempts'] }),
@@ -59,8 +59,8 @@ export function DebugAttemptsPage() {
           </table>
         </div>
         <div className="mt-3 flex justify-end gap-2">
-          <Button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))} type="button" variant="secondary"><ChevronLeft size={16} />Prev</Button>
-          <Button disabled={(attempts.data?.page.offset ?? 0) + (attempts.data?.page.limit ?? 50) >= (attempts.data?.page.total ?? 0)} onClick={() => setOffset(offset + 50)} type="button" variant="secondary">Next<ChevronRight size={16} /></Button>
+          <Button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))} type="button" variant="secondary"><ChevronLeft size={16} />Prev</Button>
+          <Button disabled={(attempts.data?.page.offset ?? 0) + (attempts.data?.page.limit ?? PAGE_SIZE) >= (attempts.data?.page.total ?? 0)} onClick={() => setOffset(offset + PAGE_SIZE)} type="button" variant="secondary">Next<ChevronRight size={16} /></Button>
         </div>
       </Panel>
     </div>
