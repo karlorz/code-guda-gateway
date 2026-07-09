@@ -261,6 +261,24 @@ func (r *KeyRepo) SelectKey(provider string) (keyID int64, rawKey string, err er
 	return id, string(plain), nil
 }
 
+// RawKey decrypts the stored key for a specific row id without updating last_used_at.
+// Used by admin per-key quota refresh so selection stats are not perturbed.
+func (r *KeyRepo) RawKey(id int64) (string, error) {
+	var enc []byte
+	err := r.db.QueryRow(`SELECT encrypted_key FROM provider_keys WHERE id = ?`, id).Scan(&enc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("provider key %d: not found", id)
+	}
+	if err != nil {
+		return "", fmt.Errorf("load provider key: %w", err)
+	}
+	plain, err := secrets.Decrypt(r.masterKey, enc)
+	if err != nil {
+		return "", fmt.Errorf("decrypt provider key: %w", err)
+	}
+	return string(plain), nil
+}
+
 // LastEvent is the latest control-plane or runtime event summary for a key.
 type LastEvent struct {
 	Source      string

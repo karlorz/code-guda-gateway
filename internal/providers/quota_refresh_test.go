@@ -31,6 +31,13 @@ func openQuotaTestDB(t *testing.T) (*store.Store, []byte, *KeyRepo, *SettingsRep
 	return st, mk, NewKeyRepo(st.DB(), mk), NewSettingsRepo(st.DB())
 }
 
+// openQuotaRefreshStore wraps openQuotaTestDB in the (keyRepo, st, mk) order used by per-key refresh tests.
+func openQuotaRefreshStore(t *testing.T) (*KeyRepo, *store.Store, []byte) {
+	t.Helper()
+	st, mk, keyRepo, _ := openQuotaTestDB(t)
+	return keyRepo, st, mk
+}
+
 func TestParseTavilyUsageQuota(t *testing.T) {
 	body := []byte(`{
 	  "key": {
@@ -519,5 +526,66 @@ func TestQuotaRefresherGrok2APIBatchFailureTolerated(t *testing.T) {
 	}
 	if q.Remaining == nil || *q.Remaining != 5 {
 		t.Fatalf("expected remaining=5, got %+v", q.Remaining)
+	}
+}
+
+
+func TestQuotaRefresher_RefreshKeyTavilyCachesPerKey(t *testing.T) {
+	var auth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		if r.URL.Path != "/usage" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"key":{"usage":25,"limit":100},"account":{"plan_usage":25,"plan_limit":100}}`))
+	}))
+	defer ts.Close()
+
+	keyRepo, st, mk := openQuotaRefreshStore(t)
+	settings := NewSettingsRepo(st.DB())
+	if err := settings.SetBaseURL(ProviderTavily, ts.URL); err != nil {
+		t.Fatalf("SetBaseURL: %v", err)
+	}
+	key, err := keyRepo.Add(ProviderTavily, "t1", "tvly-secret-1")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	refresher := QuotaRefresher{
+		ProviderKeys: keyRepo,
+		Settings:     settings,
+		Quotas:       NewQuotaRepo(st.DB()),
+		KeyQuotas:    NewKeyQuotaRepo(st.DB()),
+		MasterKey:    mk,
+	}
+	q, err := refresher.RefreshKey(context.Background(), key.ID)
+	if err != nil {
+		t.Fatalf("RefreshKey: %v", err)
+	}
+	if !q.Available || q.ProviderKeyID != key.ID || q.Remaining == nil || *q.Remaining != 75 {
+		t.Fatalf("quota = %#v", q)
+	}
+	if auth != "Bearer tvly-secret-1" {
+		t.Fatalf("auth = %q", auth)
+	}
+}
+
+func TestQuotaRefresher_RefreshAllSkipsCooling(t *testing.T) {
+	keyRepo, st, mk := openQuotaRefreshStore(t)
+	k1, _ := keyRepo.Add(ProviderTavily, "a", "tvly-a")
+	k2, _ := keyRepo.Add(ProviderTavily, "b", "tvly-b")
+	until := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	_, _ = st.DB().Exec(`UPDATE provider_keys SET cooldown_until = ?, cooldown_reason = ? WHERE id = ?`, until, "plan_limit_exceeded", k2.ID)
+	refresher := QuotaRefresher{
+		ProviderKeys: keyRepo,
+		Settings:     NewSettingsRepo(st.DB()),
+		KeyQuotas:    NewKeyQuotaRepo(st.DB()),
+		MasterKey:    mk,
+	}
+	result, err := refresher.RefreshAllKeys(context.Background(), ProviderTavily)
+	if err != nil {
+		t.Fatalf("RefreshAllKeys: %v", err)
+	}
+	if result.Attempted != 1 || result.SkippedCooldown != 1 || result.KeyResults[0].ProviderKeyID != k1.ID {
+		t.Fatalf("result = %#v", result)
 	}
 }
