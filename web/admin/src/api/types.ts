@@ -144,3 +144,25 @@ export type AuditEvent = {
   DetailRedacted?: string;
   detail_redacted?: string;
 };
+
+export type ProxyAttempt = {
+  id: number;
+  occurred_at?: string;
+  request_id: string;
+  provider: string;
+  route_family: string;
+  path: string;
+  attempt_index: number;
+  provider_key_id?: number;
+  provider_key_name?: string;
+  provider_key_fingerprint?: string;
+  upstream_status?: number;
+  status_class: string;
+  reason?: string;
+  cooldown_until?: string;
+  terminal: boolean;
+  message_redacted?: string;
+};
+
+export type ProxyDebugAttemptsSetting = { enabled: boolean };
+
