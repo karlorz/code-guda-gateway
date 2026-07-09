@@ -7,6 +7,8 @@ logs/
 .env.local
 .mcp.json
 .codex/
+.claude/dev-loop/
+.claude/dev-loop-debug/
 web/admin/dist/
 web/admin/node_modules/
 web/admin/test-results/
