@@ -15,6 +15,7 @@ SKIP_CADDY=0
 SKIP_SOURCE_SYNC=0
 SKIP_SERVICE_RESTART="${SKIP_SERVICE_RESTART:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
+PRINT_PRIVILEGE_MODE=0
 TEST_MODE="${CODE_GUDA_GATEWAY_TEST_MODE:-0}"
 GO_VERSION="${GO_VERSION:-1.25.0}"
 INSTALL_PREREQS="${INSTALL_PREREQS:-1}"
@@ -111,13 +112,8 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --print-privilege-mode)
-      euid="${CODE_GUDA_GATEWAY_FAKE_EUID:-$EUID}"
-      if [[ "$euid" == "0" ]]; then
-        printf 'root\n'
-      else
-        printf 'sudo\n'
-      fi
-      exit 0
+      PRINT_PRIVILEGE_MODE=1
+      shift
       ;;
     -h|--help)
       usage
@@ -152,6 +148,11 @@ privilege_mode() {
     printf 'sudo\n'
   fi
 }
+
+if [[ "$PRINT_PRIVILEGE_MODE" == "1" ]]; then
+  privilege_mode
+  exit 0
+fi
 
 run_privileged() {
   if [[ "$TEST_MODE" == "1" ]]; then
@@ -273,19 +274,26 @@ install_bun() {
 
 install_missing_prerequisites() {
   local apt_packages=()
+  local need_https_download=0
+
   for cmd in git curl; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       apt_packages+=("$cmd")
     fi
   done
-  if ! command -v ca-certificates >/dev/null 2>&1; then
-    apt_packages+=("ca-certificates")
-  fi
   if ! command -v tar >/dev/null 2>&1; then
     apt_packages+=("tar")
   fi
   if [[ "$SKIP_CADDY" != "1" ]] && ! command -v caddy >/dev/null 2>&1; then
     apt_packages+=("caddy")
+  fi
+  if ! command -v go >/dev/null 2>&1 || ! command -v bun >/dev/null 2>&1; then
+    need_https_download=1
+  fi
+  # ca-certificates is a package, not a command; pull it only when we will hit
+  # apt or HTTPS bootstrap downloads.
+  if [[ "${#apt_packages[@]}" -gt 0 || "$need_https_download" == "1" ]]; then
+    apt_packages+=("ca-certificates")
   fi
   if [[ "${#apt_packages[@]}" -gt 0 ]]; then
     apt_install "${apt_packages[@]}"
@@ -306,9 +314,8 @@ write_file() {
   local dest="$2"
   local mode="$3"
   local owner="${4:-}"
-  local tmp
-  tmp="$(mktemp)"
-  cat "$src" > "$tmp"
+  local dest_path
+  dest_path="$(target_path "$dest")"
   if [[ -n "$owner" && "$TEST_MODE" != "1" ]]; then
     local file_owner="${owner%%:*}"
     local file_group=""
@@ -316,20 +323,20 @@ write_file() {
       file_group="${owner#*:}"
     fi
     if [[ -n "$file_group" ]]; then
-      run_privileged install -m "$mode" -o "$file_owner" -g "$file_group" "$tmp" "$(target_path "$dest")"
+      run_privileged install -m "$mode" -o "$file_owner" -g "$file_group" "$src" "$dest_path"
     else
-      run_privileged install -m "$mode" -o "$file_owner" "$tmp" "$(target_path "$dest")"
+      run_privileged install -m "$mode" -o "$file_owner" "$src" "$dest_path"
     fi
   else
-    run_privileged install -m "$mode" "$tmp" "$(target_path "$dest")"
+    run_privileged install -m "$mode" "$src" "$dest_path"
   fi
-  rm -f "$tmp"
 }
 
 render_template_to() {
   local template="$1"
   local dest="$2"
   local mode="$3"
+  local owner="${4:-}"
   local content
   content="$(cat "$template")"
   content="${content//\{\{APP_NAME\}\}/$APP_NAME}"
@@ -347,8 +354,16 @@ render_template_to() {
   local tmp
   tmp="$(mktemp)"
   printf '%s\n' "$content" > "$tmp"
-  write_file "$tmp" "$dest" "$mode"
+  write_file "$tmp" "$dest" "$mode" "$owner"
   rm -f "$tmp"
+}
+
+use_source_templates() {
+  local from_src
+  from_src="$(target_path "$SRC_DIR/scripts/templates")"
+  if [[ -d "$from_src" ]]; then
+    TEMPLATE_DIR="$from_src"
+  fi
 }
 
 ensure_service_user() {
@@ -382,13 +397,7 @@ ensure_bootstrap_env() {
   if [[ -e "$env_path" ]]; then
     return
   fi
-  local content tmp
-  content="$(cat "$TEMPLATE_DIR/bootstrap.env.example")"
-  content="${content//\{\{LISTEN_ADDR\}\}/$LISTEN_ADDR}"
-  tmp="$(mktemp)"
-  printf '%s\n' "$content" > "$tmp"
-  write_file "$tmp" "$ETC_DIR/bootstrap.env" 0640 "root:$SERVICE_GROUP"
-  rm -f "$tmp"
+  render_template_to "$TEMPLATE_DIR/bootstrap.env.example" "$ETC_DIR/bootstrap.env" 0640 "root:$SERVICE_GROUP"
 }
 
 install_static_files() {
@@ -467,7 +476,8 @@ install_caddy_import() {
   if [[ ! -f "$caddyfile" ]]; then
     printf '%s\n' "$import_line" | run_privileged tee "$caddyfile" >/dev/null
   elif ! grep -Fxq "$import_line" "$caddyfile"; then
-    local backup="$caddyfile.bak.$(date +%Y%m%d%H%M%S)"
+    local backup
+    backup="$caddyfile.bak.$(date +%Y%m%d%H%M%S)"
     run_privileged cp "$caddyfile" "$backup"
     printf '\n%s\n' "$import_line" | run_privileged tee -a "$caddyfile" >/dev/null
   fi
@@ -489,14 +499,18 @@ main() {
   require_linux
   ensure_prerequisites
   ensure_service_user
-  install_static_files
 
   if [[ "$RENDER_ONLY" == "1" ]]; then
+    install_static_files
     printf 'Rendered deployment files under %s\n' "${INSTALL_ROOT:-/}"
     return
   fi
 
+  # Sync first so curl-bootstrap and in-place updates render templates/build
+  # from the checkout being installed, not from the invoking script path.
   sync_source
+  use_source_templates
+  install_static_files
   build_and_install
   run_migrations
   install_systemd_service

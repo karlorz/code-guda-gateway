@@ -17,7 +17,7 @@ assert_file() {
 assert_contains() {
   local file="$1"
   local pattern="$2"
-  grep -Fq "$pattern" "$file" || fail "expected $file to contain: $pattern"
+  grep -Fq -- "$pattern" "$file" || fail "expected $file to contain: $pattern"
 }
 
 assert_equals() {
@@ -64,6 +64,8 @@ assert_contains "$UPDATE" "REPO_URL=\"https://example.invalid/karlorz/code-guda-
 assert_contains "$UPDATE" "REPO_BRANCH=\"main\""
 assert_contains "$UPDATE" "SRC_DIR=\"/opt/code-guda-gateway/src\""
 assert_contains "$UPDATE" 'exec "$SRC_DIR/scripts/install-linux.sh"'
+assert_contains "$UPDATE" "--skip-source-sync"
+assert_contains "$UPDATE" '--source-dir "$SRC_DIR"'
 
 [[ "$(wc -c < "$MASTER" | tr -d ' ')" == "32" ]] || fail "master key should be 32 bytes"
 
@@ -78,5 +80,18 @@ assert_equals "12345678901234567890123456789012" "$(cat "$MASTER")"
 
 assert_equals "root" "$(CODE_GUDA_GATEWAY_FAKE_EUID=0 "$ROOT/scripts/install-linux.sh" --print-privilege-mode)"
 assert_equals "sudo" "$(CODE_GUDA_GATEWAY_FAKE_EUID=501 "$ROOT/scripts/install-linux.sh" --print-privilege-mode)"
+
+# Custom path flags must flow into rendered bootstrap.env
+CUSTOM_ROOT="$TMP/custom"
+CODE_GUDA_GATEWAY_TEST_MODE=1 INSTALL_ROOT="$CUSTOM_ROOT" \
+  "$ROOT/scripts/install-linux.sh" \
+  --render-only \
+  --etc-dir /etc/custom-guda \
+  --var-dir /var/lib/custom-guda \
+  --domain custom.example >/dev/null
+
+assert_contains "$CUSTOM_ROOT/etc/custom-guda/bootstrap.env" "DB_PATH=/var/lib/custom-guda/gateway.db"
+assert_contains "$CUSTOM_ROOT/etc/custom-guda/bootstrap.env" "GUDA_MASTER_KEY_PATH=/etc/custom-guda/master.key"
+assert_contains "$CUSTOM_ROOT/etc/caddy/Caddyfile.code-guda-gateway" "custom.example {"
 
 printf 'installer tests passed\n'
