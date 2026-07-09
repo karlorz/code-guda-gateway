@@ -15,6 +15,7 @@ import (
 	"code-guda-gateway/internal/audit"
 	"code-guda-gateway/internal/gatewaykeys"
 	"code-guda-gateway/internal/providers"
+	"code-guda-gateway/internal/proxy"
 	"code-guda-gateway/internal/usage"
 )
 
@@ -26,13 +27,15 @@ var staticFS embed.FS
 
 // Deps wires admin UI to backing services.
 type Deps struct {
-	Auth         *adminauth.Service
-	GatewayKeys  *gatewaykeys.Service
-	ProviderKeys *providers.KeyRepo
-	Settings     *providers.SettingsRepo
-	Audit        *audit.AuditRepo
-	Usage        *usage.UsageRepo
+	Auth           *adminauth.Service
+	GatewayKeys    *gatewaykeys.Service
+	ProviderKeys   *providers.KeyRepo
+	Settings       *providers.SettingsRepo
+	Audit          *audit.AuditRepo
+	Usage          *usage.UsageRepo
 	Quotas         *providers.QuotaRepo
+	KeyQuotas      *providers.KeyQuotaRepo
+	AttemptLogs    *proxy.AttemptLogRepo
 	QuotaRefresher *providers.QuotaRefresher
 }
 
@@ -252,6 +255,18 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 		h.handleProviderQuotas(w, r)
 	case strings.HasPrefix(path, "/admin/api/provider-quotas/") && strings.HasSuffix(path, "/refresh") && r.Method == http.MethodPost:
 		h.handleProviderQuotaRefresh(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-pools/") && r.Method == http.MethodGet:
+		h.handleProviderPool(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-key-quotas/") && strings.HasSuffix(path, "/refresh-all") && r.Method == http.MethodPost:
+		h.handleProviderKeyQuotaRefreshAll(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-key-quotas/") && strings.HasSuffix(path, "/refresh") && r.Method == http.MethodPost:
+		h.handleProviderKeyQuotaRefreshOne(w, r)
+	case path == "/admin/api/proxy-attempts" && r.Method == http.MethodGet:
+		h.handleProxyAttempts(w, r)
+	case path == "/admin/api/settings/proxy-debug-attempts" && r.Method == http.MethodGet:
+		h.handleProxyDebugAttemptsGet(w, r)
+	case path == "/admin/api/settings/proxy-debug-attempts" && r.Method == http.MethodPatch:
+		h.handleProxyDebugAttemptsPatch(w, r)
 	case path == "/admin/api/audit-events" && r.Method == http.MethodGet:
 		h.handleAuditList(w, r)
 	case path == "/admin/api/usage-daily" && r.Method == http.MethodGet:
@@ -699,6 +714,103 @@ func (h *Handler) handleProviderQuotaRefresh(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	writeJSON(w, http.StatusOK, q)
+}
+
+func (h *Handler) handleProviderPool(w http.ResponseWriter, r *http.Request) {
+	provider, err := providerFromActionPath(r.URL.Path, "/admin/api/provider-pools/", "")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad provider")
+		return
+	}
+	if h.deps.KeyQuotas == nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	limit, offset := limitOffset(r)
+	pool, err := h.deps.KeyQuotas.ProviderPool(h.deps.ProviderKeys, provider, providers.PoolListOptions{Limit: limit, Offset: offset})
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, pool)
+}
+
+func (h *Handler) handleProviderKeyQuotaRefreshOne(w http.ResponseWriter, r *http.Request) {
+	id, err := parseActionID(r.URL.Path, "/admin/api/provider-key-quotas/", "/refresh")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	if h.deps.QuotaRefresher == nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	q, err := h.deps.QuotaRefresher.RefreshKey(r.Context(), id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, q)
+}
+
+func (h *Handler) handleProviderKeyQuotaRefreshAll(w http.ResponseWriter, r *http.Request) {
+	provider, err := providerFromActionPath(r.URL.Path, "/admin/api/provider-key-quotas/", "/refresh-all")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	if h.deps.QuotaRefresher == nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	result, err := h.deps.QuotaRefresher.RefreshAllKeys(r.Context(), provider)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *Handler) handleProxyAttempts(w http.ResponseWriter, r *http.Request) {
+	if h.deps.AttemptLogs == nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	limit, offset := limitOffset(r)
+	page, err := h.deps.AttemptLogs.List(proxy.AttemptLogFilter{
+		RequestID: r.URL.Query().Get("request_id"),
+		Limit:     limit,
+		Offset:    offset,
+	})
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+func (h *Handler) handleProxyDebugAttemptsGet(w http.ResponseWriter, r *http.Request) {
+	enabled, err := h.deps.Settings.GetProxyDebugAttempts()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": enabled})
+}
+
+func (h *Handler) handleProxyDebugAttemptsPatch(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := h.deps.Settings.SetProxyDebugAttempts(body.Enabled); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": body.Enabled})
 }
 
 func (h *Handler) providerQuotaItems() ([]providers.QuotaCache, error) {

@@ -267,3 +267,36 @@ func nullStrPtr(n sql.NullString) *string {
 	s := n.String
 	return &s
 }
+
+// DebugSettingReader reads the proxy-debug-attempts setting.
+type DebugSettingReader interface {
+	GetProxyDebugAttempts() (bool, error)
+}
+
+// SettingsAttemptRecorder gates attempt logging on the admin debug setting.
+type SettingsAttemptRecorder struct {
+	Settings DebugSettingReader
+	Logs     *AttemptLogRepo
+}
+
+// NewSettingsAttemptRecorder wires a settings reader to an attempt log repo.
+func NewSettingsAttemptRecorder(settings DebugSettingReader, logs *AttemptLogRepo) *SettingsAttemptRecorder {
+	return &SettingsAttemptRecorder{Settings: settings, Logs: logs}
+}
+
+// Enabled reports whether proxy attempt debug logging is currently on.
+func (r *SettingsAttemptRecorder) Enabled() bool {
+	if r == nil || r.Settings == nil {
+		return false
+	}
+	ok, err := r.Settings.GetProxyDebugAttempts()
+	return err == nil && ok
+}
+
+// Record delegates to the underlying attempt log repo.
+func (r *SettingsAttemptRecorder) Record(row AttemptLog) error {
+	if r == nil || r.Logs == nil {
+		return fmt.Errorf("attempt recorder: not configured")
+	}
+	return r.Logs.Record(row)
+}
