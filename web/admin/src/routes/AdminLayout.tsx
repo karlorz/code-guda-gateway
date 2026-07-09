@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from 'react-router-dom';
-import { Activity, BarChart3, Gauge, KeyRound, LogOut, ServerCog, Settings, ShieldCheck } from 'lucide-react';
+import { Activity, BarChart3, Bug, Gauge, KeyRound, LogOut, ServerCog, Settings, ShieldCheck } from 'lucide-react';
 import { useSession } from '../api/session';
 
 const navItems = [
@@ -10,6 +10,7 @@ const navItems = [
   { to: '/usage', label: 'Usage', icon: BarChart3 },
   { to: '/audit', label: 'Audit', icon: Activity },
   { to: '/settings', label: 'Settings', icon: Settings },
+  { to: '/debug/attempts', label: 'Debug', icon: Bug },
 ];
 
 export function AdminLayout() {

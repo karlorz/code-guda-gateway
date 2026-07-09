@@ -32,6 +32,10 @@ var migrations = []migration{
 		id:  "0005",
 		sql: migration0005,
 	},
+	{
+		id:  "0006",
+		sql: migration0006,
+	},
 }
 
 const migration0002 = `
@@ -68,6 +72,52 @@ CREATE TABLE IF NOT EXISTS provider_quota_cache (
   expires_at TEXT NOT NULL,
   message_redacted TEXT
 );
+`
+
+const migration0006 = `
+CREATE TABLE IF NOT EXISTS provider_key_quota_cache (
+  provider_key_id INTEGER NOT NULL PRIMARY KEY,
+  provider TEXT NOT NULL,
+  source TEXT NOT NULL,
+  available INTEGER NOT NULL,
+  used INTEGER,
+  limit_value INTEGER,
+  remaining INTEGER,
+  period_start TEXT,
+  period_end TEXT,
+  checked_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  message_redacted TEXT,
+  details_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_key_quota_cache_provider
+  ON provider_key_quota_cache(provider);
+
+CREATE TABLE IF NOT EXISTS proxy_attempt_logs (
+  id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+  occurred_at TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  route_family TEXT NOT NULL,
+  path TEXT NOT NULL,
+  attempt_index INTEGER NOT NULL,
+  provider_key_id INTEGER,
+  provider_key_name TEXT,
+  provider_key_fingerprint TEXT,
+  upstream_status INTEGER,
+  status_class TEXT NOT NULL,
+  reason TEXT,
+  cooldown_until TEXT,
+  terminal INTEGER NOT NULL,
+  message_redacted TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_proxy_attempt_logs_request_id
+  ON proxy_attempt_logs(request_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_proxy_attempt_logs_occurred_at
+  ON proxy_attempt_logs(occurred_at, id);
 `
 
 const migration0001 = `

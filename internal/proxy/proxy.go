@@ -6,18 +6,29 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"code-guda-gateway/internal/cooldown"
 	"code-guda-gateway/internal/providers"
+	"code-guda-gateway/internal/usage"
 )
+
+const tavilyPlanLimitStatus = 432
 
 // KeySelector selects provider keys and records upstream outcomes.
 type KeySelector interface {
 	SelectKey(provider string) (keyID int64, rawKey string, err error)
 	MarkSuccess(keyID int64) error
 	MarkFailureWithCooldown(keyID int64, status int, redactedMsg string, until *time.Time, reason *string) error
+}
+
+// AttemptRecorder is an optional best-effort sink for per-attempt debug rows.
+// When nil or disabled, Forward behavior is unchanged.
+type AttemptRecorder interface {
+	Enabled() bool
+	Record(AttemptLog) error
 }
 
 type Target struct {
@@ -27,13 +38,17 @@ type Target struct {
 	Keys     KeySelector
 }
 
+// Options configures a Proxy. Client and AttemptRecorder are both optional;
+// AttemptRecorder is disabled by default (nil).
 type Options struct {
-	Client *http.Client
+	Client          *http.Client
+	AttemptRecorder AttemptRecorder
 }
 
 type Proxy struct {
 	client   *http.Client
 	settings cooldown.Settings
+	attempts AttemptRecorder
 }
 
 type Result struct {
@@ -47,7 +62,7 @@ func New(opts Options) *Proxy {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &Proxy{client: client, settings: cooldown.DefaultSettings()}
+	return &Proxy{client: client, settings: cooldown.DefaultSettings(), attempts: opts.AttemptRecorder}
 }
 
 // SetCooldownSettings configures retry limits and cooldown durations for forwarding.
@@ -76,10 +91,18 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 		maxAttempts = cooldown.DefaultMaxRetries
 	}
 
+	requestID := r.Header.Get("X-Request-ID")
+	if requestID == "" {
+		requestID = strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	routeFamily := usage.RouteFamilyFromPath(r.URL.Path)
+	path := r.URL.Path
+
 	var lastStatus int
 	var lastBody []byte
 	var lastHeader http.Header
 	now := time.Now()
+	attemptLogging := p.attempts != nil && p.attempts.Enabled()
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		keyID, key, selErr := target.Keys.SelectKey(target.Provider)
@@ -96,6 +119,10 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 			return Result{Err: selErr, StatusCode: http.StatusInternalServerError}
 		}
 
+		// Minimal surface: record numeric key id only. Name/fingerprint stay nil;
+		// the admin pool endpoint maps id -> display metadata for the UI.
+		keyIDCopy := keyID
+
 		resp, err := p.do(r, target, key, body)
 		if err != nil {
 			coolDur := p.settings.Transient
@@ -105,7 +132,21 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 			until := now.Add(coolDur)
 			reason := "network_error"
 			_ = target.Keys.MarkFailureWithCooldown(keyID, 0, "network_error", &until, &reason)
-			if attempt == maxAttempts-1 {
+			terminal := attempt == maxAttempts-1
+			untilStr := until.UTC().Format(time.RFC3339Nano)
+			p.recordAttempt(AttemptLog{
+				RequestID:     requestID,
+				Provider:      target.Provider,
+				RouteFamily:   routeFamily,
+				Path:          path,
+				AttemptIndex:  attempt + 1,
+				ProviderKeyID: &keyIDCopy,
+				StatusClass:   "network_error",
+				Reason:        &reason,
+				CooldownUntil: &untilStr,
+				Terminal:      terminal,
+			}, attemptLogging)
+			if terminal {
 				http.Error(w, "upstream request failed", http.StatusBadGateway)
 				return Result{Err: err, StatusCode: http.StatusBadGateway, NetworkError: true}
 			}
@@ -122,14 +163,41 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 		lastStatus = resp.StatusCode
 		lastBody = respBody
 		lastHeader = resp.Header.Clone()
+		if isTavilyPlanLimit(target.Provider, resp.StatusCode) {
+			lastStatus, lastHeader, lastBody = tavilyPlanLimitClientResponse(resp.Header)
+		}
 
 		if cooldown.ShouldMarkSuccess(resp.StatusCode) {
 			_ = target.Keys.MarkSuccess(keyID)
+			status := resp.StatusCode
+			p.recordAttempt(AttemptLog{
+				RequestID:      requestID,
+				Provider:       target.Provider,
+				RouteFamily:    routeFamily,
+				Path:           path,
+				AttemptIndex:   attempt + 1,
+				ProviderKeyID:  &keyIDCopy,
+				UpstreamStatus: &status,
+				StatusClass:    usage.StatusClassFromHTTP(status),
+				Terminal:       true,
+			}, attemptLogging)
 			writeResponse(w, resp.StatusCode, lastHeader, lastBody)
 			return Result{StatusCode: resp.StatusCode}
 		}
 
 		coolDur, reason, applyCooldown, retryAcrossKeys := cooldown.PolicyForStatus(resp.StatusCode, p.settings)
+		if isTavilyPlanLimit(target.Provider, resp.StatusCode) {
+			coolDur = p.settings.RateLimit
+			if coolDur <= 0 {
+				coolDur = cooldown.DefaultRateLimitCooldown
+			}
+			reason = "plan_limit_exceeded"
+			applyCooldown = true
+			retryAcrossKeys = true
+		}
+
+		var untilPtr *time.Time
+		var reasonPtr *string
 		if applyCooldown {
 			if resp.StatusCode == http.StatusTooManyRequests {
 				if ra, ok := cooldown.ParseRetryAfter(resp.Header.Get("Retry-After"), now); ok {
@@ -137,12 +205,36 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 				}
 			}
 			until := now.Add(coolDur)
+			untilPtr = &until
+			reasonPtr = &reason
 			_ = target.Keys.MarkFailureWithCooldown(keyID, resp.StatusCode, string(respBody), &until, &reason)
 		} else {
 			_ = target.Keys.MarkFailureWithCooldown(keyID, resp.StatusCode, string(respBody), nil, nil)
 		}
 
-		if !retryAcrossKeys || attempt >= maxAttempts-1 {
+		terminal := !retryAcrossKeys || attempt >= maxAttempts-1
+		status := resp.StatusCode
+		row := AttemptLog{
+			RequestID:      requestID,
+			Provider:       target.Provider,
+			RouteFamily:    routeFamily,
+			Path:           path,
+			AttemptIndex:   attempt + 1,
+			ProviderKeyID:  &keyIDCopy,
+			UpstreamStatus: &status,
+			StatusClass:    usage.StatusClassFromHTTP(status),
+			Terminal:       terminal,
+		}
+		if reasonPtr != nil {
+			row.Reason = reasonPtr
+		}
+		if untilPtr != nil {
+			untilStr := untilPtr.UTC().Format(time.RFC3339Nano)
+			row.CooldownUntil = &untilStr
+		}
+		p.recordAttempt(row, attemptLogging)
+
+		if terminal {
 			writeResponse(w, lastStatus, lastHeader, lastBody)
 			return Result{StatusCode: lastStatus}
 		}
@@ -155,6 +247,14 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 
 	http.Error(w, "upstream request failed", http.StatusBadGateway)
 	return Result{Err: fmt.Errorf("upstream request failed"), StatusCode: http.StatusBadGateway}
+}
+
+// recordAttempt is best-effort: nil/disabled recorder and Record errors are ignored.
+func (p *Proxy) recordAttempt(row AttemptLog, enabled bool) {
+	if !enabled || p.attempts == nil {
+		return
+	}
+	_ = p.attempts.Record(row)
 }
 
 func (p *Proxy) do(r *http.Request, target Target, key string, body []byte) (*http.Response, error) {
@@ -170,6 +270,18 @@ func (p *Proxy) do(r *http.Request, target Target, key string, body []byte) (*ht
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Host = ""
 	return p.client.Do(req)
+}
+
+func isTavilyPlanLimit(provider string, status int) bool {
+	return provider == providers.ProviderTavily && status == tavilyPlanLimitStatus
+}
+
+func tavilyPlanLimitClientResponse(header http.Header) (int, http.Header, []byte) {
+	h := header.Clone()
+	h.Del("Content-Length")
+	h.Set("Content-Type", "application/json")
+	body := []byte(`{"error":{"code":"tavily_plan_limit_exceeded","message":"Tavily plan usage limit exceeded"}}`)
+	return http.StatusTooManyRequests, h, body
 }
 
 func writeResponse(w http.ResponseWriter, status int, header http.Header, body []byte) {

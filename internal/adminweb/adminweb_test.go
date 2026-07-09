@@ -20,6 +20,7 @@ import (
 	"code-guda-gateway/internal/config"
 	"code-guda-gateway/internal/gatewaykeys"
 	"code-guda-gateway/internal/providers"
+	"code-guda-gateway/internal/proxy"
 	"code-guda-gateway/internal/secrets"
 	"code-guda-gateway/internal/server"
 	"code-guda-gateway/internal/store"
@@ -50,6 +51,8 @@ func openAdminApp(t *testing.T) (http.Handler, *adminauth.Service, *gatewaykeys.
 		Audit:        audit.NewAuditRepo(st.DB()),
 		Usage:        usage.NewUsageRepo(st.DB()),
 		Quotas:       providers.NewQuotaRepo(st.DB()),
+		KeyQuotas:    providers.NewKeyQuotaRepo(st.DB()),
+		AttemptLogs:  proxy.NewAttemptLogRepo(st.DB(), proxy.DefaultAttemptLogRetention),
 	})
 	return app, auth, gk, keyRepo, st, mk
 }
@@ -59,10 +62,12 @@ func openAdminAppWithRefresher(t *testing.T, refresher *providers.QuotaRefresher
 	_, auth, gk, keyRepo, st, _ := openAdminApp(t)
 	settingsRepo := providers.NewSettingsRepo(st.DB())
 	quotaRepo := providers.NewQuotaRepo(st.DB())
+	keyQuotaRepo := providers.NewKeyQuotaRepo(st.DB())
 	if refresher != nil {
 		refresher.ProviderKeys = keyRepo
 		refresher.Settings = settingsRepo
 		refresher.Quotas = quotaRepo
+		refresher.KeyQuotas = keyQuotaRepo
 	}
 	app := adminweb.New(adminweb.Deps{
 		Auth:           auth,
@@ -72,6 +77,8 @@ func openAdminAppWithRefresher(t *testing.T, refresher *providers.QuotaRefresher
 		Audit:          audit.NewAuditRepo(st.DB()),
 		Usage:          usage.NewUsageRepo(st.DB()),
 		Quotas:         quotaRepo,
+		KeyQuotas:      keyQuotaRepo,
+		AttemptLogs:    proxy.NewAttemptLogRepo(st.DB(), proxy.DefaultAttemptLogRetention),
 		QuotaRefresher: refresher,
 	})
 	return app, auth, keyRepo, st
@@ -804,6 +811,102 @@ func TestServer_MountsAdminRoutes(t *testing.T) {
 	app.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
+func TestProviderPoolEndpointReturnsPaginatedRows(t *testing.T) {
+	app, auth, _, keyRepo, st, _ := openAdminApp(t)
+	token := initToken(t, auth)
+	c := loginSession(t, app, token)
+	keyRepo.Add(providers.ProviderTavily, "a", "tvly-a")
+	keyRepo.Add(providers.ProviderTavily, "b", "tvly-b")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/provider-pools/tavily?limit=1&offset=1", nil)
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload providers.ProviderPool
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if payload.Page.Total != 2 || len(payload.Items) != 1 || payload.Items[0].Key.Name != "b" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	_ = st
+}
+
+func TestProxyAttemptsEndpointDefaultsAllProviders(t *testing.T) {
+	app, auth, _, _, st, _ := openAdminApp(t)
+	repo := proxy.NewAttemptLogRepo(st.DB(), 1000)
+	_ = repo.Record(proxy.AttemptLog{RequestID: "r1", Provider: "tavily", RouteFamily: "tavily", Path: "/tavily/extract", AttemptIndex: 1, StatusClass: "2xx"})
+	_ = repo.Record(proxy.AttemptLog{RequestID: "r2", Provider: "grok", RouteFamily: "grok", Path: "/grok/v1/chat/completions", AttemptIndex: 1, StatusClass: "5xx"})
+	token := initToken(t, auth)
+	c := loginSession(t, app, token)
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/proxy-attempts?limit=50", nil)
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "tavily") || !strings.Contains(rec.Body.String(), "grok") {
+		t.Fatalf("default should include all providers: %s", rec.Body.String())
+	}
+}
+
+func TestProxyDebugAttemptsGetAndPatch(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	token := initToken(t, auth)
+	c := loginSession(t, app, token)
+	csrf := csrfForTest(t, app, c)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/settings/proxy-debug-attempts", nil)
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"enabled"`) {
+		t.Fatalf("get body missing enabled: %s", rec.Body.String())
+	}
+
+	req2 := httptest.NewRequest(http.MethodPatch, "/admin/api/settings/proxy-debug-attempts", strings.NewReader(`{"enabled":true}`))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("X-CSRF-Token", csrf)
+	req2.AddCookie(c)
+	rec2 := httptest.NewRecorder()
+	app.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("patch status = %d body=%s", rec2.Code, rec2.Body.String())
+	}
+	if !strings.Contains(rec2.Body.String(), `"enabled":true`) {
+		t.Fatalf("patch body: %s", rec2.Body.String())
+	}
+
+	req3 := httptest.NewRequest(http.MethodGet, "/admin/api/settings/proxy-debug-attempts", nil)
+	req3.AddCookie(c)
+	rec3 := httptest.NewRecorder()
+	app.ServeHTTP(rec3, req3)
+	if !strings.Contains(rec3.Body.String(), `"enabled":true`) {
+		t.Fatalf("get after patch: %s", rec3.Body.String())
+	}
+}
+
+func TestProviderKeyQuotaRefreshAllRequiresProvider(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	token := initToken(t, auth)
+	c := loginSession(t, app, token)
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/provider-key-quotas/not-a-provider/refresh-all", nil)
+	req.Header.Set("X-CSRF-Token", csrfForTest(t, app, c))
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

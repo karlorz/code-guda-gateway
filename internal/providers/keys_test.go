@@ -384,3 +384,31 @@ func mustAdd(t *testing.T, repo *providers.KeyRepo, provider, name, raw string) 
 	}
 	return raw, d
 }
+
+func TestRawKey_RoundTripAndMissing(t *testing.T) {
+	t.Parallel()
+	repo, _, _ := openKeyRepo(t)
+	raw := "tvly-rawkey-roundtrip-secret-xyz"
+	d, err := repo.Add(providers.ProviderTavily, "raw1", raw)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	got, err := repo.RawKey(d.ID)
+	if err != nil {
+		t.Fatalf("RawKey: %v", err)
+	}
+	if got != raw {
+		t.Fatalf("RawKey = %q, want %q", got, raw)
+	}
+	// SelectKey updates last_used_at; RawKey must not.
+	after, err := repo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if after.LastUsedAt != nil {
+		t.Fatalf("RawKey should not set last_used_at, got %v", *after.LastUsedAt)
+	}
+	if _, err := repo.RawKey(999999); err == nil {
+		t.Fatal("expected error for nonexistent id")
+	}
+}

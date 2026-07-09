@@ -32,7 +32,15 @@ type Server struct {
 func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, masterKey []byte) http.Handler {
 	keyRepo := providers.NewKeyRepo(db, masterKey)
 	settingsRepo := providers.NewSettingsRepo(db)
-	px := proxy.New(proxy.Options{})
+	keyQuotaRepo := providers.NewKeyQuotaRepo(db)
+	attemptLogRepo := proxy.NewAttemptLogRepo(db, proxy.DefaultAttemptLogRetention)
+	if cfg.ProxyDebugAttempts != nil {
+		if err := settingsRepo.SetProxyDebugAttempts(*cfg.ProxyDebugAttempts); err != nil {
+			log.Printf("failed to apply GUDA_PROXY_DEBUG_ATTEMPTS: %v", err)
+		}
+	}
+	attemptRecorder := proxy.NewSettingsAttemptRecorder(settingsRepo, attemptLogRepo)
+	px := proxy.New(proxy.Options{AttemptRecorder: attemptRecorder})
 	if cs, err := settingsRepo.GetCooldownSettings(); err != nil {
 		log.Printf("failed to load cooldown settings from DB, using defaults: %v", err)
 	} else {
@@ -48,10 +56,13 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 		Audit:        audit.NewAuditRepo(db),
 		Usage:        usage.NewUsageRepo(db),
 		Quotas:       quotaRepo,
+		KeyQuotas:    keyQuotaRepo,
+		AttemptLogs:  attemptLogRepo,
 		QuotaRefresher: &providers.QuotaRefresher{
 			ProviderKeys: keyRepo,
 			Settings:     settingsRepo,
 			Quotas:       quotaRepo,
+			KeyQuotas:    keyQuotaRepo,
 			MasterKey:    masterKey,
 		},
 	})

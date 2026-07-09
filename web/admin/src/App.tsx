@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { SessionProvider, useSession } from './api/session';
 import { AdminLayout } from './routes/AdminLayout';
 import { AuditPage } from './features/audit/AuditPage';
+import { DebugAttemptsPage } from './features/debug/DebugAttemptsPage';
 import { GatewayKeysPage } from './features/gateway-keys/GatewayKeysPage';
 import { LoginPage } from './features/login/LoginPage';
 import { OverviewPage } from './features/overview/OverviewPage';
@@ -43,6 +44,7 @@ function AppRoutes() {
         <Route element={<UsagePage />} path="usage" />
         <Route element={<AuditPage />} path="audit" />
         <Route element={<SettingsPage />} path="settings" />
+        <Route element={<DebugAttemptsPage />} path="debug/attempts" />
         <Route element={<Navigate replace to="/" />} path="*" />
       </Route>
     </Routes>

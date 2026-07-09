@@ -69,8 +69,30 @@ type QuotaRefresher struct {
 	ProviderKeys *KeyRepo
 	Settings     *SettingsRepo
 	Quotas       *QuotaRepo
+	KeyQuotas    *KeyQuotaRepo
 	Now          func() time.Time
 	MasterKey    []byte
+}
+
+// KeyQuotaRefreshResult is the per-key outcome of RefreshKey / RefreshAllKeys.
+type KeyQuotaRefreshResult struct {
+	ProviderKeyID int64             `json:"provider_key_id"`
+	Provider      string            `json:"provider"`
+	Attempted     bool              `json:"attempted"`
+	SkippedReason *string           `json:"skipped_reason,omitempty"`
+	Quota         *ProviderKeyQuota `json:"quota,omitempty"`
+}
+
+// RefreshAllKeyQuotasResult aggregates RefreshAllKeys outcomes for one provider.
+type RefreshAllKeyQuotasResult struct {
+	Provider        string                  `json:"provider"`
+	Attempted       int                     `json:"attempted"`
+	Succeeded       int                     `json:"succeeded"`
+	Failed          int                     `json:"failed"`
+	SkippedCooldown int                     `json:"skipped_cooldown"`
+	SkippedDisabled int                     `json:"skipped_disabled"`
+	SkippedArchived int                     `json:"skipped_archived"`
+	KeyResults      []KeyQuotaRefreshResult `json:"key_results"`
 }
 
 func (r *QuotaRefresher) Refresh(ctx context.Context, provider string) (QuotaCache, error) {
@@ -95,6 +117,138 @@ func (r *QuotaRefresher) Refresh(ctx context.Context, provider string) (QuotaCac
 	default:
 		return QuotaCache{}, ErrUnknownProvider
 	}
+}
+
+// RefreshKey fetches quota for one specific provider key and upserts provider_key_quota_cache.
+// Does not call SelectKey; the admin chose the exact row.
+// On decrypt/HTTP/parse failure returns an available=false snapshot with nil error
+// (matches provider-level Refresh failure philosophy), unless Upsert itself fails.
+func (r *QuotaRefresher) RefreshKey(ctx context.Context, providerKeyID int64) (ProviderKeyQuota, error) {
+	display, err := r.ProviderKeys.Get(providerKeyID)
+	if err != nil {
+		return ProviderKeyQuota{}, err
+	}
+	var q ProviderKeyQuota
+	raw, err := r.ProviderKeys.RawKey(providerKeyID)
+	if err != nil {
+		q = keyQuotaFailure(display, "quota_refresh", err)
+	} else {
+		qc := r.refreshProviderWithRawKey(ctx, display.Provider, providerKeyID, raw)
+		q = providerKeyQuotaFromCache(providerKeyID, qc)
+	}
+	if r.KeyQuotas != nil {
+		if err := r.KeyQuotas.Upsert(q); err != nil {
+			return ProviderKeyQuota{}, err
+		}
+	}
+	return q, nil
+}
+
+// RefreshAllKeys walks every key for a provider, skipping archived/disabled/cooling rows,
+// and RefreshKey's the rest.
+func (r *QuotaRefresher) RefreshAllKeys(ctx context.Context, provider string) (RefreshAllKeyQuotasResult, error) {
+	var out RefreshAllKeyQuotasResult
+	out.Provider = provider
+	keys, err := r.ProviderKeys.List(provider)
+	if err != nil {
+		return out, err
+	}
+	now := r.nowUTC()
+	for _, key := range keys {
+		if reason := poolKeySkipReason(key, now); reason != "" {
+			switch reason {
+			case "archived":
+				out.SkippedArchived++
+			case "disabled":
+				out.SkippedDisabled++
+			case "cooldown":
+				out.SkippedCooldown++
+			}
+			out.KeyResults = append(out.KeyResults, KeyQuotaRefreshResult{ProviderKeyID: key.ID, Provider: provider, SkippedReason: &reason})
+			continue
+		}
+		out.Attempted++
+		q, err := r.RefreshKey(ctx, key.ID)
+		if err != nil || !q.Available {
+			out.Failed++
+		} else {
+			out.Succeeded++
+		}
+		out.KeyResults = append(out.KeyResults, KeyQuotaRefreshResult{ProviderKeyID: key.ID, Provider: provider, Attempted: true, Quota: &q})
+	}
+	return out, nil
+}
+
+// refreshProviderWithRawKey runs the provider-specific quota endpoint using a known raw key.
+// For Tavily/Firecrawl this hits the per-key usage endpoint with that bearer.
+// For Grok, per-key raw keys are not used for quota (admin token path); we attribute the
+// admin-token pool snapshot to the chosen key id so a ProviderKeyQuota row still lands.
+func (r *QuotaRefresher) refreshProviderWithRawKey(ctx context.Context, provider string, keyID int64, rawKey string) QuotaCache {
+	now := r.nowUTC()
+	checked := now.Format(time.RFC3339Nano)
+	expires := now.Add(quotaCacheTTL).Format(time.RFC3339Nano)
+
+	switch provider {
+	case ProviderTavily:
+		return r.refreshProviderHTTPWithKey(ctx, ProviderTavily, "tavily_usage", "/usage", checked, expires, keyID, rawKey, func(id *int64, body []byte) QuotaCache {
+			var payload tavilyUsageResponse
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return quotaMalformed(ProviderTavily, "tavily_usage", checked, expires, id)
+			}
+			return normalizeTavilyUsage(ProviderTavily, id, checked, expires, payload)
+		})
+	case ProviderFirecrawl:
+		return r.refreshProviderHTTPWithKey(ctx, ProviderFirecrawl, "firecrawl_credit_usage", "/team/credit-usage", checked, expires, keyID, rawKey, func(id *int64, body []byte) QuotaCache {
+			var payload firecrawlCreditUsageResponse
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return quotaMalformed(ProviderFirecrawl, "firecrawl_credit_usage", checked, expires, id)
+			}
+			return normalizeFirecrawlCreditUsage(ProviderFirecrawl, id, checked, expires, payload)
+		})
+	case ProviderGrok:
+		// Grok quota is admin-token based, not per provider_keys raw key.
+		// Reuse the existing admin path and attribute the result to this key id.
+		qc, _ := r.refreshGrok2API(ctx, checked, expires)
+		qc.ProviderKeyID = &keyID
+		return qc
+	default:
+		return quotaFailure(provider, "quota_refresh", checked, expires, &keyID, ErrUnknownProvider)
+	}
+}
+
+func providerKeyQuotaFromCache(providerKeyID int64, qc QuotaCache) ProviderKeyQuota {
+	q := ProviderKeyQuota{
+		ProviderKeyID:   providerKeyID,
+		Provider:        qc.Provider,
+		Source:          qc.Source,
+		Available:       qc.Available,
+		Used:            qc.Used,
+		LimitValue:      qc.LimitValue,
+		Remaining:       qc.Remaining,
+		PeriodStart:     qc.PeriodStart,
+		PeriodEnd:       qc.PeriodEnd,
+		CheckedAt:       qc.CheckedAt,
+		ExpiresAt:       qc.ExpiresAt,
+		MessageRedacted: qc.MessageRedacted,
+		Details:         qc.Details,
+	}
+	return q
+}
+
+func (r *QuotaRefresher) nowUTC() time.Time {
+	nowFn := r.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	return nowFn().UTC()
+}
+
+func keyQuotaFailure(display DisplayProviderKey, source string, err error) ProviderKeyQuota {
+	now := time.Now().UTC()
+	checked := now.Format(time.RFC3339Nano)
+	expires := now.Add(quotaCacheTTL).Format(time.RFC3339Nano)
+	qc := quotaFailure(display.Provider, source, checked, expires, &display.ID, err)
+	return providerKeyQuotaFromCache(display.ID, qc)
 }
 
 func (r *QuotaRefresher) refreshGrok2API(ctx context.Context, checked, expires string) (QuotaCache, error) {
@@ -196,17 +350,28 @@ func (r *QuotaRefresher) refreshProviderHTTP(
 	if err != nil {
 		return quotaFailure(provider, source, checked, expires, nil, err), nil
 	}
+	return r.refreshProviderHTTPWithKey(ctx, provider, source, pathSuffix, checked, expires, keyID, rawKey, parse), nil
+}
+
+// refreshProviderHTTPWithKey performs the quota HTTP call with a known raw key (no SelectKey).
+func (r *QuotaRefresher) refreshProviderHTTPWithKey(
+	ctx context.Context,
+	provider, source, pathSuffix, checked, expires string,
+	keyID int64,
+	rawKey string,
+	parse func(keyID *int64, body []byte) QuotaCache,
+) QuotaCache {
 	base, err := r.Settings.GetBaseURL(provider)
 	if err != nil {
-		return quotaFailure(provider, source, checked, expires, &keyID, err), nil
+		return quotaFailure(provider, source, checked, expires, &keyID, err)
 	}
 	url := strings.TrimRight(base, "/") + pathSuffix
 	body, status, err := r.getJSON(ctx, url, rawKey)
 	r.recordQuotaEvent(keyID, status, err)
 	if err != nil {
-		return quotaHTTPFailure(provider, source, checked, expires, &keyID, status, err), nil
+		return quotaHTTPFailure(provider, source, checked, expires, &keyID, status, err)
 	}
-	return parse(&keyID, body), nil
+	return parse(&keyID, body)
 }
 
 func (r *QuotaRefresher) requestHTTP(ctx context.Context, method, url, bearer string) ([]byte, int, error) {
@@ -350,9 +515,9 @@ func normalizeFirecrawlCreditUsage(provider string, keyID *int64, checked, expir
 	if remaining != nil && limit != nil && *remaining > *limit {
 		extra := *remaining - *limit
 		q.Details = map[string]any{
-			"plan_credits":              *limit,
-			"extra_credits_remaining":   extra,
-			"plan_credits_note":         "planCredits excludes one-time credit packs per Firecrawl API",
+			"plan_credits":            *limit,
+			"extra_credits_remaining": extra,
+			"plan_credits_note":       "planCredits excludes one-time credit packs per Firecrawl API",
 		}
 		q.LimitValue = nil
 		q.Used = clampUsedNonNegative(used)
