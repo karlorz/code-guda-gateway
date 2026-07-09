@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"code-guda-gateway/internal/cooldown"
 	"code-guda-gateway/internal/providers"
+	"code-guda-gateway/internal/usage"
 )
 
 const tavilyPlanLimitStatus = 432
@@ -22,6 +24,13 @@ type KeySelector interface {
 	MarkFailureWithCooldown(keyID int64, status int, redactedMsg string, until *time.Time, reason *string) error
 }
 
+// AttemptRecorder is an optional best-effort sink for per-attempt debug rows.
+// When nil or disabled, Forward behavior is unchanged.
+type AttemptRecorder interface {
+	Enabled() bool
+	Record(AttemptLog) error
+}
+
 type Target struct {
 	BaseURL  string
 	Path     string
@@ -29,13 +38,17 @@ type Target struct {
 	Keys     KeySelector
 }
 
+// Options configures a Proxy. Client and AttemptRecorder are both optional;
+// AttemptRecorder is disabled by default (nil).
 type Options struct {
-	Client *http.Client
+	Client          *http.Client
+	AttemptRecorder AttemptRecorder
 }
 
 type Proxy struct {
 	client   *http.Client
 	settings cooldown.Settings
+	attempts AttemptRecorder
 }
 
 type Result struct {
@@ -49,7 +62,7 @@ func New(opts Options) *Proxy {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &Proxy{client: client, settings: cooldown.DefaultSettings()}
+	return &Proxy{client: client, settings: cooldown.DefaultSettings(), attempts: opts.AttemptRecorder}
 }
 
 // SetCooldownSettings configures retry limits and cooldown durations for forwarding.
@@ -78,6 +91,13 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 		maxAttempts = cooldown.DefaultMaxRetries
 	}
 
+	requestID := r.Header.Get("X-Request-ID")
+	if requestID == "" {
+		requestID = strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	routeFamily := usage.RouteFamilyFromPath(r.URL.Path)
+	path := r.URL.Path
+
 	var lastStatus int
 	var lastBody []byte
 	var lastHeader http.Header
@@ -98,6 +118,10 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 			return Result{Err: selErr, StatusCode: http.StatusInternalServerError}
 		}
 
+		// Minimal surface: record numeric key id only. Name/fingerprint stay nil;
+		// the admin pool endpoint maps id -> display metadata for the UI.
+		keyIDCopy := keyID
+
 		resp, err := p.do(r, target, key, body)
 		if err != nil {
 			coolDur := p.settings.Transient
@@ -107,7 +131,21 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 			until := now.Add(coolDur)
 			reason := "network_error"
 			_ = target.Keys.MarkFailureWithCooldown(keyID, 0, "network_error", &until, &reason)
-			if attempt == maxAttempts-1 {
+			terminal := attempt == maxAttempts-1
+			untilStr := until.UTC().Format(time.RFC3339Nano)
+			p.recordAttempt(AttemptLog{
+				RequestID:     requestID,
+				Provider:      target.Provider,
+				RouteFamily:   routeFamily,
+				Path:          path,
+				AttemptIndex:  attempt + 1,
+				ProviderKeyID: &keyIDCopy,
+				StatusClass:   "network_error",
+				Reason:        &reason,
+				CooldownUntil: &untilStr,
+				Terminal:      terminal,
+			})
+			if terminal {
 				http.Error(w, "upstream request failed", http.StatusBadGateway)
 				return Result{Err: err, StatusCode: http.StatusBadGateway, NetworkError: true}
 			}
@@ -130,6 +168,18 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 
 		if cooldown.ShouldMarkSuccess(resp.StatusCode) {
 			_ = target.Keys.MarkSuccess(keyID)
+			status := resp.StatusCode
+			p.recordAttempt(AttemptLog{
+				RequestID:      requestID,
+				Provider:       target.Provider,
+				RouteFamily:    routeFamily,
+				Path:           path,
+				AttemptIndex:   attempt + 1,
+				ProviderKeyID:  &keyIDCopy,
+				UpstreamStatus: &status,
+				StatusClass:    statusClass(status),
+				Terminal:       true,
+			})
 			writeResponse(w, resp.StatusCode, lastHeader, lastBody)
 			return Result{StatusCode: resp.StatusCode}
 		}
@@ -144,6 +194,9 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 			applyCooldown = true
 			retryAcrossKeys = true
 		}
+
+		var untilPtr *time.Time
+		var reasonPtr *string
 		if applyCooldown {
 			if resp.StatusCode == http.StatusTooManyRequests {
 				if ra, ok := cooldown.ParseRetryAfter(resp.Header.Get("Retry-After"), now); ok {
@@ -151,12 +204,36 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 				}
 			}
 			until := now.Add(coolDur)
+			untilPtr = &until
+			reasonPtr = &reason
 			_ = target.Keys.MarkFailureWithCooldown(keyID, resp.StatusCode, string(respBody), &until, &reason)
 		} else {
 			_ = target.Keys.MarkFailureWithCooldown(keyID, resp.StatusCode, string(respBody), nil, nil)
 		}
 
-		if !retryAcrossKeys || attempt >= maxAttempts-1 {
+		terminal := !retryAcrossKeys || attempt >= maxAttempts-1
+		status := resp.StatusCode
+		row := AttemptLog{
+			RequestID:      requestID,
+			Provider:       target.Provider,
+			RouteFamily:    routeFamily,
+			Path:           path,
+			AttemptIndex:   attempt + 1,
+			ProviderKeyID:  &keyIDCopy,
+			UpstreamStatus: &status,
+			StatusClass:    statusClass(status),
+			Terminal:       terminal,
+		}
+		if reasonPtr != nil {
+			row.Reason = reasonPtr
+		}
+		if untilPtr != nil {
+			untilStr := untilPtr.UTC().Format(time.RFC3339Nano)
+			row.CooldownUntil = &untilStr
+		}
+		p.recordAttempt(row)
+
+		if terminal {
 			writeResponse(w, lastStatus, lastHeader, lastBody)
 			return Result{StatusCode: lastStatus}
 		}
@@ -169,6 +246,23 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 
 	http.Error(w, "upstream request failed", http.StatusBadGateway)
 	return Result{Err: fmt.Errorf("upstream request failed"), StatusCode: http.StatusBadGateway}
+}
+
+// recordAttempt is best-effort: nil/disabled recorder and Record errors are ignored.
+func (p *Proxy) recordAttempt(row AttemptLog) {
+	if p.attempts == nil || !p.attempts.Enabled() {
+		return
+	}
+	_ = p.attempts.Record(row)
+}
+
+// statusClass maps an upstream status code to a coarse bucket string.
+// Uses Nxx for HTTP statuses; network errors use the literal "network_error".
+func statusClass(status int) string {
+	if status < 100 {
+		return fmt.Sprintf("%d", status)
+	}
+	return fmt.Sprintf("%dxx", status/100)
 }
 
 func (p *Proxy) do(r *http.Request, target Target, key string, body []byte) (*http.Response, error) {
