@@ -102,14 +102,23 @@ function detailNumber(details: ProviderQuota['details'] | ProviderKeyQuota['deta
 }
 
 function quotaRemainingLabel(quota: ProviderQuota | ProviderKeyQuota): string | null {
-  if (!quota.available || quota.remaining == null) return null;
-  if (quota.limit_value != null) return `${quota.remaining} / ${quota.limit_value} remaining`;
-  const plan = detailNumber(quota.details, 'plan_credits');
-  const extra = detailNumber(quota.details, 'extra_credits_remaining');
-  if (plan != null && extra != null && extra > 0) {
-    return `${quota.remaining} credits remaining (${plan} plan + ${extra} one-time)`;
+  if (!quota.available) return null;
+  if (quota.remaining != null) {
+    if (quota.limit_value != null) return `${quota.remaining} / ${quota.limit_value} remaining`;
+    const plan = detailNumber(quota.details, 'plan_credits');
+    const extra = detailNumber(quota.details, 'extra_credits_remaining');
+    if (plan != null && extra != null && extra > 0) {
+      return `${quota.remaining} credits remaining (${plan} plan + ${extra} one-time)`;
+    }
+    return `${quota.remaining} remaining`;
   }
-  return `${quota.remaining} remaining`;
+  // A quota row exists (key was refreshed) but the provider didn't return a
+  // computable remaining (e.g. Tavily has no top-level key.limit). Surface the
+  // usage we do have instead of falling back to "not refreshed".
+  if (quota.used != null) {
+    return quota.limit_value != null ? `used ${quota.used} / ${quota.limit_value}` : `used ${quota.used}`;
+  }
+  return null;
 }
 
 function formatChecked(iso: string): string {
@@ -223,7 +232,7 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
                     <Badge tone={statusTone(row.status)}>{row.status}</Badge>
                   </td>
                   <td className="py-2 pr-3 text-xs text-zinc-600">{cooldownReason || '—'}</td>
-                  <td className="py-2 pr-3 text-zinc-700">{remaining ?? 'not refreshed'}</td>
+                  <td className="py-2 pr-3 text-zinc-700">{remaining ?? (row.quota ? 'available' : 'not refreshed')}</td>
                   <td className="py-2 pr-3 text-xs text-zinc-500">
                     {row.quota?.checked_at ? formatChecked(row.quota.checked_at) : '—'}
                   </td>
