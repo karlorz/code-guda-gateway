@@ -39,10 +39,15 @@ export type ProviderKey = {
   archived_at?: string;
   CooldownUntil?: string;
   cooldown_until?: string;
+  cooldown_reason?: string;
   LastEventAt?: string;
   last_event_at?: string;
   LastEventSource?: string;
   last_event_source?: string;
+  last_used_at?: string;
+  last_success_at?: string;
+  last_error_at?: string;
+  last_error_status?: number;
 };
 
 export type ProviderSetting = { provider: string; base_url: string };
@@ -73,6 +78,41 @@ export type ProviderQuota = {
   expires_at?: string;
   message_redacted?: string;
   details?: Record<string, unknown>;
+};
+
+export type ProviderKeyQuota = {
+  provider_key_id: number;
+  provider: string;
+  available: boolean;
+  source: string;
+  used?: number;
+  limit_value?: number;
+  remaining?: number;
+  checked_at?: string;
+  expires_at?: string;
+  message_redacted?: string;
+  details?: Record<string, unknown>;
+};
+
+export type ProviderPoolRow = {
+  key: ProviderKey;
+  status: 'available' | 'cooling' | 'disabled' | 'archived' | 'not_refreshed';
+  quota?: ProviderKeyQuota;
+};
+
+export type ProviderPool = {
+  provider: string;
+  summary: {
+    provider: string;
+    key_count: number;
+    enabled_key_count: number;
+    available_key_count: number;
+    cooling_key_count: number;
+    refreshed_key_count: number;
+    known_remaining?: number;
+  };
+  items: ProviderPoolRow[];
+  page: { limit: number; offset: number; total: number };
 };
 
 export type UsageDaily = {

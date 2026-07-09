@@ -1,15 +1,27 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { RefreshCw, Save, TestTube2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, RefreshCw, Save, TestTube2 } from 'lucide-react';
+import { useState } from 'react';
 import { apiFetch } from '../../api/client';
-import type { ListResponse, ProviderHealth, ProviderKey, ProviderQuota, ProviderSetting } from '../../api/types';
+import type {
+  ListResponse,
+  ProviderHealth,
+  ProviderKey,
+  ProviderKeyQuota,
+  ProviderPool,
+  ProviderPoolRow,
+  ProviderQuota,
+  ProviderSetting,
+} from '../../api/types';
 import { Badge, Button, Field, Panel } from '../../components/ui';
+
+const POOL_PROVIDERS = ['grok', 'tavily', 'firecrawl'] as const;
+const PAGE_SIZE = 25;
 
 export function ProvidersPage() {
   const qc = useQueryClient();
   const settings = useQuery({ queryKey: ['provider-settings'], queryFn: () => apiFetch<ListResponse<ProviderSetting>>('/admin/api/provider-settings') });
   const health = useQuery({ queryKey: ['provider-health'], queryFn: () => apiFetch<ListResponse<ProviderHealth>>('/admin/api/provider-health') });
   const quotas = useQuery({ queryKey: ['provider-quotas'], queryFn: () => apiFetch<ListResponse<ProviderQuota>>('/admin/api/provider-quotas') });
-  const providerKeys = useQuery({ queryKey: ['provider-keys'], queryFn: () => apiFetch<ListResponse<ProviderKey>>('/admin/api/provider-keys') });
   const saveSetting = useMutation({
     mutationFn: ({ provider, baseURL }: { provider: string; baseURL: string }) =>
       apiFetch(`/admin/api/provider-settings/${provider}`, { method: 'PATCH', body: JSON.stringify({ base_url: baseURL }) }),
@@ -22,7 +34,8 @@ export function ProvidersPage() {
       void qc.invalidateQueries({ queryKey: ['provider-quotas'] });
     },
   });
-  const refreshingPath = postAction.isPending && postAction.variables ? postAction.variables : null;
+
+  const quotaByProvider = Object.fromEntries((quotas.data?.items ?? []).map((q) => [q.provider, q]));
 
   return (
     <div>
@@ -30,7 +43,11 @@ export function ProvidersPage() {
       <Panel title="Settings">
         <div className="grid gap-3">
           {(settings.data?.items ?? []).map((setting) => (
-            <ProviderSettingRow key={setting.provider} onSave={(baseURL) => saveSetting.mutate({ provider: setting.provider, baseURL })} setting={setting} />
+            <ProviderSettingRow
+              key={setting.provider}
+              onSave={(baseURL) => saveSetting.mutate({ provider: setting.provider, baseURL })}
+              setting={setting}
+            />
           ))}
         </div>
       </Panel>
@@ -54,16 +71,10 @@ export function ProvidersPage() {
           ))}
         </div>
       </Panel>
-      <Panel title="Quotas">
-        <div className="grid gap-3 md:grid-cols-3">
-          {(quotas.data?.items ?? []).map((quota) => (
-            <QuotaCard
-              key={quota.provider}
-              onRefresh={() => postAction.mutate(`/admin/api/provider-quotas/${quota.provider}/refresh`)}
-              providerKeys={providerKeys.data?.items ?? []}
-              quota={quota}
-              refreshing={refreshingPath === `/admin/api/provider-quotas/${quota.provider}/refresh`}
-            />
+      <Panel title="Provider Pools">
+        <div className="grid gap-6">
+          {POOL_PROVIDERS.map((provider) => (
+            <ProviderPoolSection key={provider} provider={provider} sampleQuota={quotaByProvider[provider]} />
           ))}
         </div>
       </Panel>
@@ -71,12 +82,26 @@ export function ProvidersPage() {
   );
 }
 
-function detailNumber(details: ProviderQuota['details'], key: string): number | undefined {
+function statusTone(status: ProviderPoolRow['status']) {
+  if (status === 'available') return 'good' as const;
+  if (status === 'cooling' || status === 'not_refreshed') return 'warn' as const;
+  return 'bad' as const;
+}
+
+function keyID(key: ProviderKey): number {
+  return key.id ?? key.ID ?? 0;
+}
+
+function keyName(key: ProviderKey): string {
+  return key.name ?? key.Name ?? '';
+}
+
+function detailNumber(details: ProviderQuota['details'] | ProviderKeyQuota['details'], key: string): number | undefined {
   const v = details?.[key];
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 }
 
-function quotaRemainingLabel(quota: ProviderQuota): string | null {
+function quotaRemainingLabel(quota: ProviderQuota | ProviderKeyQuota): string | null {
   if (!quota.available || quota.remaining == null) return null;
   if (quota.limit_value != null) return `${quota.remaining} / ${quota.limit_value} remaining`;
   const plan = detailNumber(quota.details, 'plan_credits');
@@ -87,67 +112,160 @@ function quotaRemainingLabel(quota: ProviderQuota): string | null {
   return `${quota.remaining} remaining`;
 }
 
-function QuotaCard({
-  quota,
-  onRefresh,
-  providerKeys,
-  refreshing,
-}: {
-  quota: ProviderQuota;
-  onRefresh: () => void;
-  providerKeys: ProviderKey[];
-  refreshing: boolean;
-}) {
-  const remainingLabel = quotaRemainingLabel(quota);
-  const scopedKeys = providerKeys.filter(
-    (key) =>
-      (key.provider ?? key.Provider) === quota.provider &&
-      (key.enabled ?? key.Enabled) &&
-      !(key.archived_at ?? key.ArchivedAt),
-  );
-  const quotaKey = scopedKeys.find((key) => (key.id ?? key.ID) === quota.provider_key_id);
-  const quotaKeyName = quotaKey?.name ?? quotaKey?.Name;
-
-  return (
-    <div className="border-t border-zinc-200 py-3">
-      <div className="flex items-center justify-between gap-2">
-        <strong className="capitalize">{quota.provider}</strong>
-        <Badge tone={quota.available ? 'good' : 'bad'}>{quota.available ? 'available' : 'not available'}</Badge>
-      </div>
-      {remainingLabel ? <p className="mt-2 text-sm font-medium text-zinc-800">{remainingLabel}</p> : null}
-      {quota.used != null ? <p className="text-sm text-zinc-600">Used: {quota.used}</p> : null}
-      <p className="mt-1 text-xs text-zinc-500">Source: {quota.source || '—'}</p>
-      {quota.provider_key_id ? (
-        <p className="text-xs text-zinc-500">Quota key: {quotaKeyName ? `${quotaKeyName} ` : ''}(#{quota.provider_key_id})</p>
-      ) : null}
-      {quota.provider_key_id && scopedKeys.length > 1 ? (
-        <p className="text-xs text-zinc-500">Quota refresh uses 1 of {scopedKeys.length} enabled keys.</p>
-      ) : null}
-      {quota.checked_at ? <p className="text-xs text-zinc-500">Checked: {formatChecked(quota.checked_at)}</p> : null}
-      {!quota.available && quota.message_redacted ? (
-        <p className="mt-2 text-sm text-red-700">{quota.message_redacted}</p>
-      ) : null}
-      <Button
-        aria-label={`Refresh quota for ${quota.provider}`}
-        className="mt-3"
-        disabled={refreshing}
-        onClick={onRefresh}
-        type="button"
-        variant="secondary"
-      >
-        <RefreshCw className={refreshing ? 'animate-spin' : ''} size={16} />
-        {refreshing ? 'Refreshing…' : 'Refresh'}
-      </Button>
-    </div>
-  );
-}
-
 function formatChecked(iso: string): string {
   try {
     return new Date(iso).toLocaleString();
   } catch {
     return iso;
   }
+}
+
+function providerTitle(provider: string): string {
+  return `${provider[0].toUpperCase()}${provider.slice(1)} Pool`;
+}
+
+function ProviderPoolSection({ provider, sampleQuota }: { provider: string; sampleQuota?: ProviderQuota }) {
+  const qc = useQueryClient();
+  const [offset, setOffset] = useState(0);
+  const pool = useQuery({
+    queryKey: ['provider-pools', provider, offset],
+    queryFn: () => apiFetch<ProviderPool>(`/admin/api/provider-pools/${provider}?limit=${PAGE_SIZE}&offset=${offset}`),
+  });
+
+  const invalidatePool = () => {
+    void qc.invalidateQueries({ queryKey: ['provider-pools', provider] });
+    void qc.invalidateQueries({ queryKey: ['provider-quotas'] });
+  };
+
+  const refreshSample = useMutation({
+    mutationFn: () => apiFetch(`/admin/api/provider-quotas/${provider}/refresh`, { method: 'POST' }),
+    onSuccess: invalidatePool,
+  });
+  const refreshAll = useMutation({
+    mutationFn: () => apiFetch(`/admin/api/provider-key-quotas/${provider}/refresh-all`, { method: 'POST' }),
+    onSuccess: invalidatePool,
+  });
+  const refreshOne = useMutation({
+    mutationFn: (id: number) => apiFetch(`/admin/api/provider-key-quotas/${id}/refresh`, { method: 'POST' }),
+    onSuccess: invalidatePool,
+  });
+
+  // Only render after data loads so tests waiting on the title also wait for pool fetch.
+  if (!pool.data) {
+    return null;
+  }
+
+  const summary = pool.data.summary;
+  const page = pool.data.page;
+  const total = page?.total ?? 0;
+  const canPrev = offset > 0;
+  const canNext = offset + PAGE_SIZE < total;
+
+  return (
+    <div className="border-t border-zinc-200 pt-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-zinc-950">{providerTitle(provider)}</h3>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            aria-label={`Refresh sample for ${provider}`}
+            disabled={refreshSample.isPending}
+            onClick={() => refreshSample.mutate()}
+            type="button"
+            variant="secondary"
+          >
+            <RefreshCw className={refreshSample.isPending ? 'animate-spin' : ''} size={14} />
+            Refresh sample
+          </Button>
+          <Button
+            aria-label={`Refresh all ${provider} keys`}
+            disabled={refreshAll.isPending}
+            onClick={() => refreshAll.mutate()}
+            type="button"
+            variant="secondary"
+          >
+            <RefreshCw className={refreshAll.isPending ? 'animate-spin' : ''} size={14} />
+            Refresh all
+          </Button>
+        </div>
+      </div>
+
+      {summary ? (
+        <p className="mt-2 text-sm text-zinc-600">
+          {`Enabled ${summary.enabled_key_count ?? 0} · Available ${summary.available_key_count ?? 0} · Cooling ${summary.cooling_key_count ?? 0} · Refreshed ${summary.refreshed_key_count ?? 0}${summary.known_remaining != null ? ` · KnownRemaining ${summary.known_remaining}` : ''}`}
+        </p>
+      ) : null}
+
+      {sampleQuota && !sampleQuota.available && sampleQuota.message_redacted ? (
+        <p className="mt-1 text-xs text-red-700">{sampleQuota.message_redacted}</p>
+      ) : null}
+
+      <div className="mt-3 overflow-x-auto">
+        <table className="w-full min-w-[640px] text-left text-sm">
+          <thead className="text-xs uppercase text-zinc-500">
+            <tr className="border-b border-zinc-200">
+              <th className="py-2 pr-3 font-medium">Name</th>
+              <th className="py-2 pr-3 font-medium">Status</th>
+              <th className="py-2 pr-3 font-medium">Cooldown</th>
+              <th className="py-2 pr-3 font-medium">Quota</th>
+              <th className="py-2 pr-3 font-medium">Checked</th>
+              <th className="py-2 font-medium" />
+            </tr>
+          </thead>
+          <tbody>
+            {(pool.data.items ?? []).map((row) => {
+              const id = keyID(row.key);
+              const remaining = row.quota ? quotaRemainingLabel(row.quota) : null;
+              const cooldownReason = row.key.cooldown_reason ?? '';
+              return (
+                <tr className="border-b border-zinc-100" key={id || keyName(row.key)}>
+                  <td className="py-2 pr-3 font-medium text-zinc-900">{keyName(row.key)}</td>
+                  <td className="py-2 pr-3">
+                    <Badge tone={statusTone(row.status)}>{row.status}</Badge>
+                  </td>
+                  <td className="py-2 pr-3 text-xs text-zinc-600">{cooldownReason || '—'}</td>
+                  <td className="py-2 pr-3 text-zinc-700">{remaining ?? 'not refreshed'}</td>
+                  <td className="py-2 pr-3 text-xs text-zinc-500">
+                    {row.quota?.checked_at ? formatChecked(row.quota.checked_at) : '—'}
+                  </td>
+                  <td className="py-2 text-right">
+                    <Button
+                      aria-label={`Refresh key ${id}`}
+                      disabled={refreshOne.isPending || !id}
+                      onClick={() => refreshOne.mutate(id)}
+                      type="button"
+                      variant="secondary"
+                    >
+                      <RefreshCw className={refreshOne.isPending && refreshOne.variables === id ? 'animate-spin' : ''} size={14} />
+                      Refresh
+                    </Button>
+                  </td>
+                </tr>
+              );
+            })}
+            {(pool.data.items?.length ?? 0) === 0 ? (
+              <tr>
+                <td className="py-3 text-sm text-zinc-500" colSpan={6}>No keys</td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-3 flex items-center gap-2">
+        <Button disabled={!canPrev} onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))} type="button" variant="secondary">
+          <ChevronLeft size={14} />
+          Prev
+        </Button>
+        <Button disabled={!canNext} onClick={() => setOffset((o) => o + PAGE_SIZE)} type="button" variant="secondary">
+          Next
+          <ChevronRight size={14} />
+        </Button>
+        <span className="text-xs text-zinc-500">
+          {total > 0 ? `${offset + 1}–${Math.min(offset + PAGE_SIZE, total)} of ${total}` : '0 of 0'}
+        </span>
+      </div>
+    </div>
+  );
 }
 
 function ProviderSettingRow({ setting, onSave }: { setting: ProviderSetting; onSave: (baseURL: string) => void }) {
