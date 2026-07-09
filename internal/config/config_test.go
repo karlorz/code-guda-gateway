@@ -23,6 +23,9 @@ func TestLoad_Defaults(t *testing.T) {
 	if !cfg.AdminCookieSecure {
 		t.Fatal("AdminCookieSecure default = false, want true")
 	}
+	if cfg.ProxyDebugAttempts != nil {
+		t.Fatal("ProxyDebugAttempts default = non-nil, want nil")
+	}
 }
 
 func TestLoad_NoGatewayKeysRequired(t *testing.T) {
@@ -81,5 +84,73 @@ func TestLoad_AdminCookieSecureDefaultAndOverride(t *testing.T) {
 	}
 	if cfg.AdminCookieSecure {
 		t.Fatal("AdminCookieSecure override = true, want false")
+	}
+}
+
+func TestLoad_ProxyDebugAttempts(t *testing.T) {
+	t.Parallel()
+
+	// unset -> nil
+	cfg, err := LoadFromLookup(func(string) (string, bool) {
+		return "", false
+	})
+	if err != nil {
+		t.Fatalf("LoadFromLookup unset: %v", err)
+	}
+	if cfg.ProxyDebugAttempts != nil {
+		t.Fatalf("ProxyDebugAttempts unset = %v, want nil", cfg.ProxyDebugAttempts)
+	}
+
+	// empty string -> nil
+	cfg, err = LoadFromLookup(func(key string) (string, bool) {
+		if key == "GUDA_PROXY_DEBUG_ATTEMPTS" {
+			return "  ", true
+		}
+		return "", false
+	})
+	if err != nil {
+		t.Fatalf("LoadFromLookup empty: %v", err)
+	}
+	if cfg.ProxyDebugAttempts != nil {
+		t.Fatalf("ProxyDebugAttempts empty = %v, want nil", cfg.ProxyDebugAttempts)
+	}
+
+	cases := []struct {
+		value string
+		want  bool
+	}{
+		{"true", true},
+		{"false", false},
+		{"1", true},
+		{"0", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		cfg, err := LoadFromLookup(func(key string) (string, bool) {
+			if key == "GUDA_PROXY_DEBUG_ATTEMPTS" {
+				return tc.value, true
+			}
+			return "", false
+		})
+		if err != nil {
+			t.Fatalf("LoadFromLookup %q: %v", tc.value, err)
+		}
+		if cfg.ProxyDebugAttempts == nil {
+			t.Fatalf("ProxyDebugAttempts %q = nil, want %v", tc.value, tc.want)
+		}
+		if *cfg.ProxyDebugAttempts != tc.want {
+			t.Fatalf("ProxyDebugAttempts %q = %v, want %v", tc.value, *cfg.ProxyDebugAttempts, tc.want)
+		}
+	}
+
+	// invalid -> error
+	_, err = LoadFromLookup(func(key string) (string, bool) {
+		if key == "GUDA_PROXY_DEBUG_ATTEMPTS" {
+			return "not-a-bool", true
+		}
+		return "", false
+	})
+	if err == nil {
+		t.Fatal("LoadFromLookup invalid: expected error")
 	}
 }

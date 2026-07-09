@@ -65,6 +65,7 @@ const (
 	settingCooldownTransient  = "cooldown_transient_seconds"
 	settingCooldownCredential = "cooldown_credential_seconds"
 	settingMaxRetries         = "max_retries"
+	settingProxyDebugAttempts = "proxy_debug_attempts"
 )
 
 // GetCooldownSettings loads service-wide cooldown and retry limits from the settings table.
@@ -195,4 +196,20 @@ func (r *SettingsRepo) SetGrok2APIAdminKey(masterKey []byte, key string) error {
 	}
 	val := hex.EncodeToString(enc)
 	return r.SetCooldownSetting("grok2api_admin_key_encrypted", val)
+}
+
+func (r *SettingsRepo) GetProxyDebugAttempts() (bool, error) {
+	val, err := r.getSettingString(settingProxyDebugAttempts, "false")
+	if err != nil {
+		return false, err
+	}
+	enabled, err := strconv.ParseBool(val)
+	if err != nil {
+		return false, nil
+	}
+	return enabled, nil
+}
+
+func (r *SettingsRepo) SetProxyDebugAttempts(enabled bool) error {
+	return r.SetCooldownSetting(settingProxyDebugAttempts, strconv.FormatBool(enabled))
 }

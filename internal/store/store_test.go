@@ -18,8 +18,10 @@ var expectedTables = []string{
 	"admin_sessions",
 	"gateway_keys",
 	"provider_keys",
+	"provider_key_quota_cache",
 	"provider_quota_cache",
 	"provider_settings",
+	"proxy_attempt_logs",
 	"audit_events",
 	"usage_daily",
 }
@@ -170,6 +172,36 @@ func TestMigrate_AdminUIV2Columns(t *testing.T) {
 		{table: "provider_keys", column: "last_event_http_status"},
 		{table: "provider_keys", column: "last_event_message_redacted"},
 		{table: "provider_quota_cache", column: "provider"},
+	}
+	for _, req := range required {
+		cols, err := tableColumnNames(s.DB(), req.table)
+		if err != nil {
+			t.Fatalf("%s: tableColumnNames: %v", req.table, err)
+		}
+		if !contains(cols, req.column) {
+			t.Fatalf("%s missing column %q; got %v", req.table, req.column, cols)
+		}
+	}
+}
+
+func TestMigrate_MultiKeyObservabilityTables(t *testing.T) {
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "gateway.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	required := []struct {
+		table  string
+		column string
+	}{
+		{table: "provider_key_quota_cache", column: "provider_key_id"},
+		{table: "provider_key_quota_cache", column: "details_json"},
+		{table: "proxy_attempt_logs", column: "request_id"},
+		{table: "proxy_attempt_logs", column: "attempt_index"},
+		{table: "proxy_attempt_logs", column: "terminal"},
 	}
 	for _, req := range required {
 		cols, err := tableColumnNames(s.DB(), req.table)

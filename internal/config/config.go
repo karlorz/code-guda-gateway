@@ -16,10 +16,11 @@ const (
 // Config holds bootstrap-only process settings (env or bootstrap.env).
 // Gateway keys and provider credentials live in SQLite, not here.
 type Config struct {
-	Addr              string
-	DBPath            string
-	MasterKeyPath     string
-	AdminCookieSecure bool
+	Addr               string
+	DBPath             string
+	MasterKeyPath      string
+	AdminCookieSecure  bool
+	ProxyDebugAttempts *bool
 }
 
 func Load() (Config, error) {
@@ -35,11 +36,20 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 		}
 		adminCookieSecure = parsed
 	}
+	var proxyDebugAttempts *bool
+	if v, ok := lookup("GUDA_PROXY_DEBUG_ATTEMPTS"); ok && strings.TrimSpace(v) != "" {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+		if err != nil {
+			return Config{}, fmt.Errorf("GUDA_PROXY_DEBUG_ATTEMPTS: %w", err)
+		}
+		proxyDebugAttempts = &parsed
+	}
 	cfg := Config{
-		Addr:              lookupDefault(lookup, "ADDR", defaultAddr),
-		DBPath:            lookupDefault(lookup, "DB_PATH", defaultDBPath),
-		MasterKeyPath:     lookupDefault(lookup, "GUDA_MASTER_KEY_PATH", defaultMasterKeyPath),
-		AdminCookieSecure: adminCookieSecure,
+		Addr:               lookupDefault(lookup, "ADDR", defaultAddr),
+		DBPath:             lookupDefault(lookup, "DB_PATH", defaultDBPath),
+		MasterKeyPath:      lookupDefault(lookup, "GUDA_MASTER_KEY_PATH", defaultMasterKeyPath),
+		AdminCookieSecure:  adminCookieSecure,
+		ProxyDebugAttempts: proxyDebugAttempts,
 	}
 	return cfg, nil
 }
