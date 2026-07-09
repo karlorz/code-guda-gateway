@@ -169,6 +169,7 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
   const total = page?.total ?? 0;
   const canPrev = offset > 0;
   const canNext = offset + PAGE_SIZE < total;
+  const showSampleQuotaError = summary.refreshed_key_count === 0 && sampleQuota && !sampleQuota.available && sampleQuota.message_redacted;
 
   return (
     <div className="border-t border-zinc-200 pt-4">
@@ -204,7 +205,7 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
         </p>
       ) : null}
 
-      {sampleQuota && !sampleQuota.available && sampleQuota.message_redacted ? (
+      {showSampleQuotaError ? (
         <p className="mt-1 text-xs text-red-700">{sampleQuota.message_redacted}</p>
       ) : null}
 

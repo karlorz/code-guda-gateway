@@ -18,4 +18,4 @@
 - Handoffs: `{REPO_ROOT}/logs/` (latest: `2026-07-09-handoff-admin-provider-quotas.md`)
 - Build: `{REPO_ROOT}/scripts/build.sh` (uses `-buildvcs=false` so it builds on non-git src dirs, e.g. staged deploy checkouts)
 - Bootstrap template: `{REPO_ROOT}/scripts/templates/bootstrap.env.example`
-- Current stable release: `v0.3.0-stable` (tag on `main`, live on kr01 `search.karldigi.dev`)
+- Current stable release: `v0.3.1-stable` (tag on `main`, live on kr01 `search.karldigi.dev`)

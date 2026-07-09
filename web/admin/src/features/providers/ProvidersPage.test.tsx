@@ -133,6 +133,67 @@ describe('ProvidersPage pools', () => {
     expect(screen.getByText('427 / 1000 remaining')).toBeInTheDocument();
   });
 
+  it('does not show provider-wide quota errors when pool key quotas are refreshed', async () => {
+    vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/admin/api/provider-settings') return { items: [] };
+      if (path === '/admin/api/provider-health') return { items: [] };
+      if (path === '/admin/api/provider-quotas') {
+        return {
+          items: [
+            {
+              provider: 'grok',
+              available: false,
+              source: 'unsupported',
+              checked_at: '2026-07-09T00:00:00Z',
+              expires_at: '2026-07-09T00:05:00Z',
+              message_redacted: 'upstream quota not available',
+            },
+          ],
+        };
+      }
+      if (path === '/admin/api/provider-pools/grok?limit=25&offset=0') {
+        return {
+          provider: 'grok',
+          summary: {
+            provider: 'grok',
+            key_count: 1,
+            enabled_key_count: 1,
+            available_key_count: 1,
+            cooling_key_count: 0,
+            refreshed_key_count: 1,
+            known_remaining: 310018,
+          },
+          items: [
+            {
+              status: 'available',
+              key: { id: 7, provider: 'grok', name: 'grok2api', fingerprint: 'aabbcc', enabled: true },
+              quota: {
+                provider_key_id: 7,
+                provider: 'grok',
+                available: true,
+                source: 'grok2api_admin_tokens',
+                remaining: 310018,
+                limit_value: 364150,
+                checked_at: '2026-07-09T10:14:07Z',
+              },
+            },
+          ],
+          page: { limit: 25, offset: 0, total: 1 },
+        };
+      }
+      if (path.startsWith('/admin/api/provider-pools/')) {
+        return { provider: path.split('/')[4].split('?')[0], summary: {}, items: [], page: { limit: 25, offset: 0, total: 0 } };
+      }
+      throw new Error(`unexpected path ${path}`);
+    });
+
+    renderWithClient(<ProvidersPage />);
+    expect(await screen.findByText('Grok Pool')).toBeInTheDocument();
+    expect(screen.getByText(/KnownRemaining 310018/)).toBeInTheDocument();
+    expect(screen.getByText('310018 / 364150 remaining')).toBeInTheDocument();
+    expect(screen.queryByText('upstream quota not available')).not.toBeInTheDocument();
+  });
+
   it('shows usage not "not refreshed" when quota row exists but remaining is null', async () => {
     // Tavily's real API returns used + account_plan_* in details but no
     // top-level key.limit, so the normalizer leaves remaining/limit_value
