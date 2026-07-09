@@ -52,7 +52,7 @@ func TestAttemptLogRepo_RetentionKeepsNewest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if rows.Page.Total != 3 || len(rows.Items) != 3 || rows.Items[0].AttemptIndex != 3 || rows.Items[2].AttemptIndex != 5 {
+	if rows.Page.Total != 3 || len(rows.Items) != 3 || rows.Items[0].AttemptIndex != 5 || rows.Items[2].AttemptIndex != 3 {
 		t.Fatalf("retention rows = %#v", rows)
 	}
 }

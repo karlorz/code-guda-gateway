@@ -12,7 +12,7 @@ import type {
   ProviderQuota,
   ProviderSetting,
 } from '../../api/types';
-import { Badge, Button, Field, Panel } from '../../components/ui';
+import { Badge, Button, Field, Panel, valueOf } from '../../components/ui';
 
 const POOL_PROVIDERS = ['grok', 'tavily', 'firecrawl'] as const;
 const PAGE_SIZE = 25;
@@ -215,7 +215,7 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
             {(pool.data.items ?? []).map((row) => {
               const id = keyID(row.key);
               const remaining = row.quota ? quotaRemainingLabel(row.quota) : null;
-              const cooldownReason = row.key.cooldown_reason ?? '';
+              const cooldownReason = valueOf<string>(row.key as Record<string, unknown>, 'CooldownReason', 'cooldown_reason', '');
               return (
                 <tr className="border-b border-zinc-100" key={id || keyName(row.key)}>
                   <td className="py-2 pr-3 font-medium text-zinc-900">{keyName(row.key)}</td>

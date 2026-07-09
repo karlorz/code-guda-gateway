@@ -133,6 +133,35 @@ describe('ProvidersPage pools', () => {
     expect(screen.getByText('427 / 1000 remaining')).toBeInTheDocument();
   });
 
+  it('reads cooldown reason from PascalCase Go JSON', async () => {
+    // Go's DisplayProviderKey has no json tags, so the API emits PascalCase
+    // (CooldownReason). valueOf must fall back to it when snake_case is absent.
+    vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/admin/api/provider-settings' || path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
+      if (path === '/admin/api/provider-pools/tavily?limit=25&offset=0') {
+        return {
+          provider: 'tavily',
+          summary: { provider: 'tavily', key_count: 1, enabled_key_count: 1, available_key_count: 0, cooling_key_count: 1, refreshed_key_count: 0 },
+          items: [
+            {
+              status: 'cooling',
+              key: { ID: 9, Provider: 'tavily', Name: 'tavily-pascal', Fingerprint: 'ff00ff', Enabled: true, CooldownReason: 'plan_limit_exceeded' },
+              quota: null,
+            },
+          ],
+          page: { limit: 25, offset: 0, total: 1 },
+        };
+      }
+      if (path.startsWith('/admin/api/provider-pools/')) {
+        return { provider: path.split('/')[4].split('?')[0], summary: {}, items: [], page: { limit: 25, offset: 0, total: 0 } };
+      }
+      throw new Error(`unexpected path ${path}`);
+    });
+    renderWithClient(<ProvidersPage />);
+    expect(await screen.findByText('tavily-pascal')).toBeInTheDocument();
+    expect(screen.getByText('plan_limit_exceeded')).toBeInTheDocument();
+  });
+
   it('refreshes all keys for one provider', async () => {
     renderWithClient(<ProvidersPage />);
     await screen.findByText('Tavily Pool');

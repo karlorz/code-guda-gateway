@@ -157,9 +157,9 @@ func (r *AttemptLogRepo) Record(row AttemptLog) error {
 	return nil
 }
 
-// List returns a page of attempt logs ordered by id ascending (oldest-first
-// within the retained window). After retention prune, this surfaces the
-// chronological attempt sequence for debug inspection.
+// List returns a page of attempt logs ordered by id descending (newest-first).
+// The retained window already keeps only the newest N rows; List surfaces the
+// most recent attempts first for live retry-sequence debugging.
 func (r *AttemptLogRepo) List(filter AttemptLogFilter) (AttemptLogPage, error) {
 	var page AttemptLogPage
 	if r == nil || r.db == nil {
@@ -190,14 +190,14 @@ func (r *AttemptLogRepo) List(filter AttemptLogFilter) (AttemptLogPage, error) {
 		return page, fmt.Errorf("count attempt logs: %w", err)
 	}
 
-	// ORDER BY id ASC keeps the chronological attempt sequence within the
-	// retained newest window (retention prune already dropped older rows).
+	// ORDER BY id DESC returns newest attempts first (live retry sequences).
+	// Retention prune already keeps only the newest N rows.
 	q := `
 		SELECT id, occurred_at, request_id, provider, route_family, path, attempt_index,
 			provider_key_id, provider_key_name, provider_key_fingerprint,
 			upstream_status, status_class, reason, cooldown_until, terminal, message_redacted
 		FROM proxy_attempt_logs` + where + `
-		ORDER BY id ASC
+		ORDER BY id DESC
 		LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
 	rows, err := r.db.Query(q, args...)
