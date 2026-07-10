@@ -69,6 +69,22 @@ const listItemSeparate = {
   QuotaKeyPrefix: 'g2a-',
 };
 
+/** Demoted endpoint: cooldown/last_failed_at set; base URL must not be rewritten on quota-only edits. */
+const listItemDemoted = {
+  ID: 45,
+  Provider: 'grok',
+  Name: 'demoted-primary',
+  KeyPrefix: 'xai-',
+  Enabled: true,
+  BaseURL: 'https://new-api.example/v1',
+  QuotaMode: 'disabled',
+  QuotaFlow: 'grok2api_admin',
+  QuotaKeyConfigured: false,
+  last_failed_at: '2026-07-10T12:00:00Z',
+  cooldown_until: '2026-07-10T13:00:00Z',
+  cooldown_reason: 'upstream_5xx',
+};
+
 function mockDefaultEndpoints(items: unknown[] = [listItem, listItemAlt]) {
   vi.mocked(client.apiFetch).mockImplementation(async (path: string, init?: RequestInit) => {
     const method = init?.method;
@@ -299,5 +315,65 @@ describe('Provider Endpoints navigation and page', () => {
       expect(vi.mocked(client.apiFetch)).toHaveBeenCalled();
     });
     expect(screen.getByText('primary')).toBeInTheDocument();
+  });
+
+  it('skips update-base-url on quota-only edit so demotion is preserved', async () => {
+    mockDefaultEndpoints([listItemDemoted]);
+    renderWithClient(<ProviderKeysPage />);
+    await screen.findByText('demoted-primary');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    const dialog = await screen.findByRole('dialog', { name: /edit endpoint/i });
+
+    // Leave base URL unchanged; only change quota mode.
+    fireEvent.change(within(dialog).getByLabelText(/quota mode/i), {
+      target: { value: 'endpoint_credentials' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith(
+        '/admin/api/provider-endpoints/45/update-quota',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            mode: 'endpoint_credentials',
+            flow: 'grok2api_admin',
+            base_url: '',
+          }),
+        }),
+      );
+    });
+
+    const paths = vi.mocked(client.apiFetch).mock.calls.map(([path]) => path);
+    expect(paths).not.toContain('/admin/api/provider-endpoints/45/update-base-url');
+    expect(paths).not.toContain('/admin/api/provider-endpoints/45/rotate-key');
+    expect(paths).not.toContain('/admin/api/provider-endpoints/45/rotate-quota-key');
+  });
+
+  it('calls update-base-url only when the inference base URL changed', async () => {
+    mockDefaultEndpoints([listItemDemoted]);
+    renderWithClient(<ProviderKeysPage />);
+    await screen.findByText('demoted-primary');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    const dialog = await screen.findByRole('dialog', { name: /edit endpoint/i });
+
+    fireEvent.change(within(dialog).getByLabelText(/^base url$/i), {
+      target: { value: 'https://new-api.example/v2' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith(
+        '/admin/api/provider-endpoints/45/update-base-url',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ base_url: 'https://new-api.example/v2' }),
+        }),
+      );
+    });
+
+    // Quota unchanged → update-quota must not run.
+    const paths = vi.mocked(client.apiFetch).mock.calls.map(([path]) => path);
+    expect(paths).not.toContain('/admin/api/provider-endpoints/45/update-quota');
   });
 });

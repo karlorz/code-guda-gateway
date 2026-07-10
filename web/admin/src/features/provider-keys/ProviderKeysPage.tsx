@@ -30,6 +30,10 @@ function summarizeQuota(record: Record<string, unknown>): string {
   return mode || '—';
 }
 
+function endpointField<T>(endpoint: ProviderKey, camel: string, snake: string, fallback: T): T {
+  return valueOf<T>(endpoint as Record<string, unknown>, camel, snake, fallback);
+}
+
 export function ProviderKeysPage() {
   const qc = useQueryClient();
   const [sheet, setSheet] = useState<'create' | ProviderKey | null>(null);
@@ -90,25 +94,44 @@ export function ProviderKeysPage() {
       key?: string;
       quota: EndpointQuotaInput;
       quota_key?: string;
+      current: {
+        base_url: string;
+        quota_mode: string;
+        quota_flow: string;
+        quota_base_url: string;
+      };
     }) => {
-      await apiFetch(`${ENDPOINTS_PATH}/${input.id}/update-base-url`, {
-        method: 'POST',
-        body: JSON.stringify({ base_url: input.base_url }),
-      });
+      const nextBase = input.base_url.trim();
+      const prevBase = input.current.base_url.trim();
+      // UpdateBaseURL clears cooldown/demotion — only call when URL actually changed.
+      if (nextBase !== prevBase) {
+        await apiFetch(`${ENDPOINTS_PATH}/${input.id}/update-base-url`, {
+          method: 'POST',
+          body: JSON.stringify({ base_url: nextBase }),
+        });
+      }
       if (input.key?.trim()) {
         await apiFetch(`${ENDPOINTS_PATH}/${input.id}/rotate-key`, {
           method: 'POST',
           body: JSON.stringify({ key: input.key }),
         });
       }
-      await apiFetch(`${ENDPOINTS_PATH}/${input.id}/update-quota`, {
-        method: 'POST',
-        body: JSON.stringify({
-          mode: input.quota.mode,
-          flow: input.quota.flow,
-          base_url: input.quota.base_url ?? '',
-        }),
-      });
+
+      const nextQuotaURL = (input.quota.base_url ?? '').trim();
+      const quotaChanged =
+        input.quota.mode !== input.current.quota_mode ||
+        input.quota.flow !== input.current.quota_flow ||
+        nextQuotaURL !== input.current.quota_base_url.trim();
+      if (quotaChanged) {
+        await apiFetch(`${ENDPOINTS_PATH}/${input.id}/update-quota`, {
+          method: 'POST',
+          body: JSON.stringify({
+            mode: input.quota.mode,
+            flow: input.quota.flow,
+            base_url: nextQuotaURL,
+          }),
+        });
+      }
       if (input.quota_key?.trim()) {
         await apiFetch(`${ENDPOINTS_PATH}/${input.id}/rotate-quota-key`, {
           method: 'POST',
@@ -227,7 +250,6 @@ export function ProviderKeysPage() {
             await createEndpoint.mutateAsync(input);
           }}
           pending={createEndpoint.isPending}
-          settings={settings.data?.items}
         />
       ) : null}
 
@@ -238,7 +260,15 @@ export function ProviderKeysPage() {
           onClose={() => setSheet(null)}
           onCreate={async () => undefined}
           onUpdate={async (input) => {
-            await saveEdit.mutateAsync(input);
+            await saveEdit.mutateAsync({
+              ...input,
+              current: {
+                base_url: endpointField(editing, 'BaseURL', 'base_url', ''),
+                quota_mode: endpointField(editing, 'QuotaMode', 'quota_mode', ''),
+                quota_flow: endpointField(editing, 'QuotaFlow', 'quota_flow', ''),
+                quota_base_url: endpointField(editing, 'QuotaBaseURL', 'quota_base_url', '') || '',
+              },
+            });
           }}
           pending={saveEdit.isPending}
         />
