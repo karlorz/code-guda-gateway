@@ -23,6 +23,16 @@ export type GatewayKey = {
 
 export type GatewayKeyCreateResponse = { key: GatewayKey; raw_key: string };
 
+export type QuotaMode = 'disabled' | 'endpoint_credentials' | 'separate_credentials';
+export type QuotaFlow = 'grok2api_admin' | 'tavily_usage' | 'firecrawl_credit_usage';
+
+export type EndpointQuotaInput = {
+  mode: QuotaMode;
+  flow: QuotaFlow;
+  base_url?: string;
+  key?: string;
+};
+
 export type ProviderKey = {
   ID?: number;
   id?: number;
@@ -30,6 +40,8 @@ export type ProviderKey = {
   provider?: string;
   Name?: string;
   name?: string;
+  BaseURL?: string;
+  base_url?: string;
   KeyPrefix?: string;
   key_prefix?: string;
   Fingerprint?: string;
@@ -51,6 +63,18 @@ export type ProviderKey = {
   last_success_at?: string;
   last_error_at?: string;
   last_error_status?: number;
+  QuotaMode?: QuotaMode;
+  quota_mode?: QuotaMode;
+  QuotaFlow?: QuotaFlow;
+  quota_flow?: QuotaFlow;
+  QuotaBaseURL?: string | null;
+  quota_base_url?: string | null;
+  QuotaKeyConfigured?: boolean;
+  quota_key_configured?: boolean;
+  QuotaKeyPrefix?: string | null;
+  quota_key_prefix?: string | null;
+  QuotaKeyFingerprint?: string | null;
+  quota_key_fingerprint?: string | null;
 };
 
 export type ProviderSetting = { provider: string; base_url: string };
@@ -95,6 +119,20 @@ export type ProviderKeyQuota = {
   expires_at?: string;
   message_redacted?: string;
   details?: Record<string, unknown>;
+};
+
+/** Operational quota display independent of inference pool status. */
+export type QuotaOperationalState = 'ok' | 'disabled' | 'not_configured' | 'not_refreshed' | 'unavailable';
+
+export type RefreshAllKeyQuotasResult = {
+  provider: string;
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  skipped_cooldown?: number;
+  skipped_disabled: number;
+  skipped_archived?: number;
+  skipped_not_configured?: number;
 };
 
 export type ProviderPoolRow = {

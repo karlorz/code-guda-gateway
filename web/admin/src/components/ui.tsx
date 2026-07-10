@@ -64,7 +64,12 @@ export function Dialog({
 }) {
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-zinc-950/30 p-4">
-      <div className="w-full max-w-lg rounded-lg bg-white p-5 shadow-xl">
+      <div
+        aria-label={title}
+        aria-modal="true"
+        className="w-full max-w-lg rounded-lg bg-white p-5 shadow-xl"
+        role="dialog"
+      >
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold">{title}</h2>
           <button aria-label="Close" className="rounded p-1 hover:bg-zinc-100" onClick={onClose} type="button">

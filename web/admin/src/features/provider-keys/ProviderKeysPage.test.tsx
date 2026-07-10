@@ -1,7 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { ProviderKeysPage } from './ProviderKeysPage';
+import { AdminLayout } from '../../routes/AdminLayout';
 import * as client from '../../api/client';
 
 vi.mock('../../api/client', async (importOriginal) => {
@@ -9,9 +11,24 @@ vi.mock('../../api/client', async (importOriginal) => {
   return { ...actual, apiFetch: vi.fn() };
 });
 
+vi.mock('../../api/session', () => ({
+  useSession: () => ({
+    authenticated: true,
+    loading: false,
+    login: vi.fn(),
+    logout: vi.fn(),
+    reset: vi.fn(),
+  }),
+  SessionProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
 function renderWithClient(ui: React.ReactElement) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter>{ui}</MemoryRouter>
+    </QueryClientProvider>,
+  );
 }
 
 const listItem = {
@@ -20,81 +37,273 @@ const listItem = {
   Name: 'primary',
   KeyPrefix: 'xai-',
   Enabled: true,
+  BaseURL: 'https://api.x.ai/v1',
+  QuotaMode: 'disabled',
+  QuotaFlow: 'grok2api_admin',
+  QuotaKeyConfigured: false,
 };
 
-describe('ProviderKeysPage mutations', () => {
+const listItemAlt = {
+  ID: 43,
+  Provider: 'tavily',
+  Name: 'tv-proxy',
+  KeyPrefix: 'tvly-',
+  Enabled: true,
+  BaseURL: 'https://proxy.example/tavily',
+  QuotaMode: 'endpoint_credentials',
+  QuotaFlow: 'tavily_usage',
+  QuotaKeyConfigured: false,
+};
+
+const listItemSeparate = {
+  ID: 44,
+  Provider: 'grok',
+  Name: 'new-api-sg',
+  KeyPrefix: 'xai-',
+  Enabled: true,
+  BaseURL: 'https://new-api.example/v1',
+  QuotaMode: 'separate_credentials',
+  QuotaFlow: 'grok2api_admin',
+  QuotaBaseURL: 'https://grok2api.example',
+  QuotaKeyConfigured: true,
+  QuotaKeyPrefix: 'g2a-',
+};
+
+/** Demoted endpoint: cooldown/last_failed_at set; base URL must not be rewritten on quota-only edits. */
+const listItemDemoted = {
+  ID: 45,
+  Provider: 'grok',
+  Name: 'demoted-primary',
+  KeyPrefix: 'xai-',
+  Enabled: true,
+  BaseURL: 'https://new-api.example/v1',
+  QuotaMode: 'disabled',
+  QuotaFlow: 'grok2api_admin',
+  QuotaKeyConfigured: false,
+  last_failed_at: '2026-07-10T12:00:00Z',
+  cooldown_until: '2026-07-10T13:00:00Z',
+  cooldown_reason: 'upstream_5xx',
+};
+
+function mockDefaultEndpoints(items: unknown[] = [listItem, listItemAlt]) {
+  vi.mocked(client.apiFetch).mockImplementation(async (path: string, init?: RequestInit) => {
+    const method = init?.method;
+    if (path === '/admin/api/provider-endpoints' && !method) {
+      return { items, page: { limit: 25, offset: 0 } };
+    }
+    if (path === '/admin/api/provider-settings' && !method) {
+      return {
+        items: [
+          { provider: 'grok', base_url: 'https://api.x.ai/v1' },
+          { provider: 'tavily', base_url: 'https://api.tavily.com' },
+          { provider: 'firecrawl', base_url: 'https://api.firecrawl.dev' },
+        ],
+      };
+    }
+    if (path === '/admin/api/provider-endpoints' && method === 'POST') {
+      return listItem;
+    }
+    if (path.startsWith('/admin/api/provider-settings/') && method === 'PATCH') {
+      return { status: 'ok' };
+    }
+    if (path.startsWith('/admin/api/provider-endpoints/')) {
+      return { status: 'ok' };
+    }
+    throw new Error(`unexpected ${path} ${method ?? 'GET'}`);
+  });
+}
+
+describe('Provider Endpoints navigation and page', () => {
   afterEach(() => {
     cleanup();
   });
 
   beforeEach(() => {
     vi.mocked(client.apiFetch).mockReset();
-    vi.mocked(client.apiFetch).mockImplementation(async (path: string, init?: RequestInit) => {
-      const method = init?.method;
-      if (path === '/admin/api/provider-keys' && !method) {
-        return { items: [listItem], page: { limit: 25, offset: 0 } };
-      }
-      if (path === '/admin/api/provider-keys' && method === 'POST') {
-        return listItem;
-      }
-      if (path.startsWith('/admin/api/provider-keys/')) {
-        return { status: 'ok' };
-      }
-      throw new Error(`unexpected ${path} ${method ?? 'GET'}`);
+    mockDefaultEndpoints();
+  });
+
+  it('navigation label says Provider Endpoints', () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={['/provider-keys']}>
+          <AdminLayout />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(screen.getByRole('link', { name: /provider endpoints/i })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /^provider keys$/i })).not.toBeInTheDocument();
+  });
+
+  it('page heading says Provider Endpoints', async () => {
+    renderWithClient(<ProviderKeysPage />);
+    expect(await screen.findByRole('heading', { name: 'Provider Endpoints' })).toBeInTheDocument();
+  });
+
+  it('opens endpoint create in a side sheet', async () => {
+    renderWithClient(<ProviderKeysPage />);
+    await screen.findByText('primary');
+    fireEvent.click(screen.getByRole('button', { name: /add endpoint/i }));
+    const dialog = await screen.findByRole('dialog', { name: /create endpoint/i });
+    expect(dialog).toBeInTheDocument();
+    expect(within(dialog).getByText(/identity/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/inference route/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/quota source/i)).toBeInTheDocument();
+  });
+
+  it('explains that endpoint name does not define routing priority', async () => {
+    renderWithClient(<ProviderKeysPage />);
+    await screen.findByText('primary');
+    expect(screen.getByText(/does not define routing priority/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /add endpoint/i }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/does not define routing priority/i)).toBeInTheDocument();
+  });
+
+  it('submits nested quota configuration to provider-endpoints', async () => {
+    renderWithClient(<ProviderKeysPage />);
+    await screen.findByText('primary');
+    fireEvent.click(screen.getByRole('button', { name: /add endpoint/i }));
+    const dialog = await screen.findByRole('dialog', { name: /create endpoint/i });
+
+    fireEvent.change(within(dialog).getByLabelText(/^name$/i), { target: { value: 'new-ep' } });
+    fireEvent.change(within(dialog).getByLabelText(/^base url$/i), { target: { value: 'https://custom.example/v1' } });
+    const keyInput = within(dialog).getByLabelText(/^key$/i);
+    expect(keyInput).toHaveAttribute('type', 'password');
+    fireEvent.change(keyInput, { target: { value: 'xai-secret-create-key-abcdef' } });
+    fireEvent.change(within(dialog).getByLabelText(/quota mode/i), { target: { value: 'separate_credentials' } });
+    fireEvent.change(within(dialog).getByLabelText(/quota base url/i), {
+      target: { value: 'https://grok2api.example' },
+    });
+    fireEvent.change(within(dialog).getByLabelText(/^quota key$/i), {
+      target: { value: 'g2a-admin-quota-secret-key-2222' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: /create endpoint/i }));
+
+    await waitFor(() => {
+      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith(
+        '/admin/api/provider-endpoints',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            provider: 'grok',
+            name: 'new-ep',
+            base_url: 'https://custom.example/v1',
+            key: 'xai-secret-create-key-abcdef',
+            quota: {
+              mode: 'separate_credentials',
+              flow: 'grok2api_admin',
+              base_url: 'https://grok2api.example',
+              key: 'g2a-admin-quota-secret-key-2222',
+            },
+          }),
+        }),
+      );
     });
   });
 
-  it('calls PATCH enable/disable with correct body', async () => {
+  it('summarizes inference and quota configuration without primary or backup roles', async () => {
+    mockDefaultEndpoints([listItem, listItemAlt, listItemSeparate]);
+    renderWithClient(<ProviderKeysPage />);
+    expect(await screen.findByText('https://api.x.ai/v1')).toBeInTheDocument();
+    expect(screen.getByText('https://proxy.example/tavily')).toBeInTheDocument();
+    expect(screen.getAllByText(/inference/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/disabled/i)).toBeInTheDocument();
+    expect(screen.getByText(/use inference url and key/i)).toBeInTheDocument();
+    expect(screen.getByText(/separate credentials/i)).toBeInTheDocument();
+    expect(screen.queryByText(/primary role/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/backup role/i)).not.toBeInTheDocument();
+  });
+
+  it('shows creation defaults collapsed below the add action', async () => {
+    renderWithClient(<ProviderKeysPage />);
+    await screen.findByText('primary');
+    const defaultsToggle = screen.getByRole('button', { name: /new endpoint defaults/i });
+    expect(defaultsToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByLabelText(/default base url for new endpoints/i)).not.toBeInTheDocument();
+    fireEvent.click(defaultsToggle);
+    expect(defaultsToggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getAllByLabelText(/default base url for new endpoints/i).length).toBeGreaterThan(0);
+  });
+
+  it('states defaults affect future endpoints only', async () => {
+    renderWithClient(<ProviderKeysPage />);
+    await screen.findByText('primary');
+    fireEvent.click(screen.getByRole('button', { name: /new endpoint defaults/i }));
+    expect(screen.getByText(/defaults affect future endpoints only/i)).toBeInTheDocument();
+  });
+
+  it('links to Provider Monitoring', async () => {
+    renderWithClient(<ProviderKeysPage />);
+    const link = await screen.findByRole('link', { name: /provider monitoring/i });
+    expect(link).toHaveAttribute('href', '/providers');
+  });
+
+  it('table shows mixed row-owned base URLs', async () => {
+    renderWithClient(<ProviderKeysPage />);
+    expect(await screen.findByText('https://api.x.ai/v1')).toBeInTheDocument();
+    expect(screen.getByText('https://proxy.example/tavily')).toBeInTheDocument();
+  });
+
+  it('keeps enable and archive controls', async () => {
+    mockDefaultEndpoints([listItem]);
+    renderWithClient(<ProviderKeysPage />);
+    await screen.findByText('primary');
+    expect(screen.getByRole('button', { name: 'Disable' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Archive' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+  });
+
+  it('calls PATCH enable/disable on canonical endpoint path', async () => {
+    mockDefaultEndpoints([listItem]);
     renderWithClient(<ProviderKeysPage />);
     await screen.findByText('primary');
     fireEvent.click(screen.getByRole('button', { name: 'Disable' }));
     await waitFor(() => {
-      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-keys/42', {
+      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-endpoints/42', {
         method: 'PATCH',
         body: JSON.stringify({ enabled: false }),
       });
     });
   });
 
-  it('calls POST reset-cooldown and archive', async () => {
+  it('calls POST archive on canonical endpoint path', async () => {
+    mockDefaultEndpoints([listItem]);
     renderWithClient(<ProviderKeysPage />);
     await screen.findByText('primary');
-    fireEvent.click(screen.getByRole('button', { name: 'Reset cool+order' }));
-    await waitFor(() => {
-      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-keys/42/reset-cooldown', { method: 'POST', body: undefined });
-    });
     fireEvent.click(screen.getByRole('button', { name: 'Archive' }));
     await waitFor(() => {
-      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-keys/42/archive', { method: 'POST', body: undefined });
+      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-endpoints/42/archive', {
+        method: 'POST',
+        body: undefined,
+      });
     });
   });
 
   it('calls POST restore for archived row', async () => {
-    vi.mocked(client.apiFetch).mockImplementation(async (path: string, init?: RequestInit) => {
-      const method = init?.method;
-      if (path === '/admin/api/provider-keys' && !method) {
-        return { items: [{ ...listItem, archived_at: '2026-01-01T00:00:00Z' }], page: { limit: 25, offset: 0 } };
-      }
-      if (path.startsWith('/admin/api/provider-keys/')) {
-        return { status: 'ok' };
-      }
-      throw new Error(`unexpected ${path}`);
-    });
+    mockDefaultEndpoints([{ ...listItem, archived_at: '2026-01-01T00:00:00Z' }]);
     renderWithClient(<ProviderKeysPage />);
     await screen.findByRole('button', { name: 'Restore' });
     fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
     await waitFor(() => {
-      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-keys/42/restore', { method: 'POST', body: undefined });
+      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-endpoints/42/restore', {
+        method: 'POST',
+        body: undefined,
+      });
     });
   });
 
   it('does not crash when action mutation fails', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string, init?: RequestInit) => {
       const method = init?.method;
-      if (path === '/admin/api/provider-keys' && !method) {
+      if (path === '/admin/api/provider-endpoints' && !method) {
         return { items: [listItem], page: { limit: 25, offset: 0 } };
       }
-      if (path.startsWith('/admin/api/provider-keys/')) {
+      if (path === '/admin/api/provider-settings' && !method) {
+        return { items: [] };
+      }
+      if (path.startsWith('/admin/api/provider-endpoints/')) {
         throw new Error('network');
       }
       throw new Error(`unexpected ${path}`);
@@ -106,5 +315,65 @@ describe('ProviderKeysPage mutations', () => {
       expect(vi.mocked(client.apiFetch)).toHaveBeenCalled();
     });
     expect(screen.getByText('primary')).toBeInTheDocument();
+  });
+
+  it('skips update-base-url on quota-only edit so demotion is preserved', async () => {
+    mockDefaultEndpoints([listItemDemoted]);
+    renderWithClient(<ProviderKeysPage />);
+    await screen.findByText('demoted-primary');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    const dialog = await screen.findByRole('dialog', { name: /edit endpoint/i });
+
+    // Leave base URL unchanged; only change quota mode.
+    fireEvent.change(within(dialog).getByLabelText(/quota mode/i), {
+      target: { value: 'endpoint_credentials' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith(
+        '/admin/api/provider-endpoints/45/update-quota',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            mode: 'endpoint_credentials',
+            flow: 'grok2api_admin',
+            base_url: '',
+          }),
+        }),
+      );
+    });
+
+    const paths = vi.mocked(client.apiFetch).mock.calls.map(([path]) => path);
+    expect(paths).not.toContain('/admin/api/provider-endpoints/45/update-base-url');
+    expect(paths).not.toContain('/admin/api/provider-endpoints/45/rotate-key');
+    expect(paths).not.toContain('/admin/api/provider-endpoints/45/rotate-quota-key');
+  });
+
+  it('calls update-base-url only when the inference base URL changed', async () => {
+    mockDefaultEndpoints([listItemDemoted]);
+    renderWithClient(<ProviderKeysPage />);
+    await screen.findByText('demoted-primary');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    const dialog = await screen.findByRole('dialog', { name: /edit endpoint/i });
+
+    fireEvent.change(within(dialog).getByLabelText(/^base url$/i), {
+      target: { value: 'https://new-api.example/v2' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith(
+        '/admin/api/provider-endpoints/45/update-base-url',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ base_url: 'https://new-api.example/v2' }),
+        }),
+      );
+    });
+
+    // Quota unchanged → update-quota must not run.
+    const paths = vi.mocked(client.apiFetch).mock.calls.map(([path]) => path);
+    expect(paths).not.toContain('/admin/api/provider-endpoints/45/update-quota');
   });
 });

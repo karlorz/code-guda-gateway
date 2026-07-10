@@ -563,3 +563,668 @@ func TestCLI_RecoveryWithoutService(t *testing.T) {
 		t.Fatalf("verify: %q", verifyOut)
 	}
 }
+
+func TestProviderEndpointAdd_RequiresBaseURLAndMasksSecret(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	secret := "tvly-cli-endpoint-secret-abcdef"
+	baseURL := "https://proxy.example/tavily"
+	stdout, stderr, code := runCLI(t, dbPath, masterPath, secret+"\n",
+		"provider-endpoint", "add",
+		"--provider", "tavily",
+		"--name", "ep1",
+		"--base-url", baseURL,
+	)
+	if code != 0 {
+		t.Fatalf("add exit %d stderr=%s stdout=%s", code, stderr, stdout)
+	}
+	if strings.Contains(stdout, secret) {
+		t.Fatalf("stdout leaked secret: %q", stdout)
+	}
+	if !strings.Contains(stdout, "base_url=") && !strings.Contains(stdout, "proxy.example/tavily") {
+		t.Fatalf("stdout missing base_url: %q", stdout)
+	}
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, err := repo.ListAll()
+	if err != nil || len(all) != 1 {
+		t.Fatalf("list: len=%d err=%v", len(all), err)
+	}
+	if !strings.Contains(all[0].BaseURL, "proxy.example/tavily") {
+		t.Fatalf("stored BaseURL=%q", all[0].BaseURL)
+	}
+}
+
+func TestProviderEndpointList_ShowsBaseURLColumn(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	secret := "xai-list-endpoint-key-123456"
+	_, _, code := runCLI(t, dbPath, masterPath, secret+"\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "g1",
+		"--base-url", "https://api.x.ai/v1",
+	)
+	if code != 0 {
+		t.Fatalf("add exit %d", code)
+	}
+	list, _, code := runCLI(t, dbPath, masterPath, "", "provider-endpoint", "list")
+	if code != 0 {
+		t.Fatalf("list exit %d", code)
+	}
+	if strings.Contains(list, secret) {
+		t.Fatal("list leaked secret")
+	}
+	if !strings.Contains(list, "BASE_URL") {
+		t.Fatalf("list missing BASE_URL column: %q", list)
+	}
+	if !strings.Contains(list, "api.x.ai") {
+		t.Fatalf("list missing base url value: %q", list)
+	}
+}
+
+func TestProviderEndpoint_SetBaseURLAndRotateKey(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	oldKey := "xai-old-cli-key-1111111111"
+	stdout, _, code := runCLI(t, dbPath, masterPath, oldKey+"\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "rot",
+		"--base-url", "https://api.x.ai/v1",
+	)
+	if code != 0 {
+		t.Fatalf("add exit %d out=%s", code, stdout)
+	}
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, _ := repo.ListAll()
+	if len(all) != 1 {
+		t.Fatalf("keys %d", len(all))
+	}
+	id := all[0].ID
+	idStr := strconv.FormatInt(id, 10)
+
+	newURL := "https://custom.cli.example/v1"
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "provider-endpoint", "set-base-url", "--id", idStr, "--url", newURL); c != 0 {
+		t.Fatal("set-base-url")
+	}
+	got, _ := repo.Get(id)
+	if got.BaseURL != newURL {
+		t.Fatalf("BaseURL=%q want %q", got.BaseURL, newURL)
+	}
+
+	newKey := "xai-new-cli-key-2222222222"
+	rotOut, _, c := runCLI(t, dbPath, masterPath, newKey+"\n", "provider-endpoint", "rotate-key", "--id", idStr)
+	if c != 0 {
+		t.Fatalf("rotate-key exit %d out=%s", c, rotOut)
+	}
+	if strings.Contains(rotOut, oldKey) || strings.Contains(rotOut, newKey) {
+		t.Fatal("rotate-key output leaked secret")
+	}
+	raw, err := repo.RawKey(id)
+	if err != nil {
+		t.Fatalf("RawKey: %v", err)
+	}
+	if raw != newKey {
+		t.Fatalf("stored=%q want %q", raw, newKey)
+	}
+}
+
+func TestLegacyProviderKey_AddStillUsesDefaultBaseURL(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	secret := "xai-legacy-cli-key-33333333"
+	if _, _, c := runCLI(t, dbPath, masterPath, secret+"\n", "provider-key", "add", "--provider", "grok", "--name", "legacy"); c != 0 {
+		t.Fatal("provider-key add")
+	}
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := openDB(t, dbPath)
+	repo := providers.NewKeyRepo(db, mk)
+	defaultURL, err := providers.NewSettingsRepo(db).GetBaseURL(providers.ProviderGrok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, _ := repo.ListAll()
+	if len(all) != 1 {
+		t.Fatalf("keys %d", len(all))
+	}
+	if all[0].BaseURL != defaultURL {
+		t.Fatalf("BaseURL=%q want default %q", all[0].BaseURL, defaultURL)
+	}
+}
+
+func TestProviderEndpoint_AndLegacyProviderKey_SameRowMutations(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	secret := "xai-same-row-cli-key-444444"
+	if _, _, c := runCLI(t, dbPath, masterPath, secret+"\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "same",
+		"--base-url", "https://api.x.ai/v1",
+	); c != 0 {
+		t.Fatal("provider-endpoint add")
+	}
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, _ := repo.ListAll()
+	id := all[0].ID
+	idStr := strconv.FormatInt(id, 10)
+
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "provider-key", "disable", "--id", idStr); c != 0 {
+		t.Fatal("legacy disable")
+	}
+	got, _ := repo.Get(id)
+	if got.Enabled {
+		t.Fatal("still enabled")
+	}
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "provider-endpoint", "enable", "--id", idStr); c != 0 {
+		t.Fatal("canonical enable")
+	}
+	got, _ = repo.Get(id)
+	if !got.Enabled {
+		t.Fatal("still disabled")
+	}
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "provider-key", "demote", "--id", idStr); c != 0 {
+		t.Fatal("legacy demote")
+	}
+	got, _ = repo.Get(id)
+	if got.LastFailedAt == nil {
+		t.Fatal("expected last_failed_at")
+	}
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "provider-endpoint", "reset-selection", "--id", idStr); c != 0 {
+		t.Fatal("canonical reset-selection")
+	}
+	got, _ = repo.Get(id)
+	if got.LastFailedAt != nil {
+		t.Fatal("last_failed_at still set")
+	}
+}
+
+func TestProviderEndpoint_AuditNoSecrets(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	secret := "tvly-cli-audit-secret-zzzz"
+	if _, _, c := runCLI(t, dbPath, masterPath, secret+"\n",
+		"provider-endpoint", "add",
+		"--provider", "tavily",
+		"--name", "aud",
+		"--base-url", "https://api.tavily.com",
+	); c != 0 {
+		t.Fatal("add")
+	}
+	mk, _ := loadMaster(t, masterPath)
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, _ := repo.ListAll()
+	idStr := strconv.FormatInt(all[0].ID, 10)
+	newKey := "tvly-cli-audit-rotated-yyyy"
+	if _, _, c := runCLI(t, dbPath, masterPath, newKey+"\n", "provider-endpoint", "rotate-key", "--id", idStr); c != 0 {
+		t.Fatal("rotate-key")
+	}
+	events, err := audit.NewAuditRepo(openDB(t, dbPath)).List(audit.ListFilter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var details strings.Builder
+	actions := map[string]bool{}
+	for _, ev := range events {
+		actions[ev.Action] = true
+		details.WriteString(ev.DetailRedacted)
+		details.WriteString("\n")
+	}
+	if !actions["provider_endpoint.add"] && !actions["provider_key.add"] {
+		t.Fatalf("missing add audit in %#v", actions)
+	}
+	detail := details.String()
+	if strings.Contains(detail, secret) || strings.Contains(detail, newKey) {
+		t.Fatalf("audit detail leaked secret: %q", detail)
+	}
+}
+
+// TestSeedProviderKeysScript_PassesURLAndKeepsSecretsOffArgv asserts the shared-base
+// seed script uses canonical provider-endpoint add with an explicit --base-url for
+// every row and never places raw keys on argv (stdin only).
+func TestSeedProviderKeysScript_PassesURLAndKeepsSecretsOffArgv(t *testing.T) {
+	// Resolve seed script relative to module root (this package is cmd/guda-gateway-admin).
+	root := filepath.Clean(filepath.Join("..", ".."))
+	scriptPath := filepath.Join(root, "scripts", "seed-provider-keys.sh")
+	raw, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read seed script: %v", err)
+	}
+	src := string(raw)
+
+	if !strings.Contains(src, "provider-endpoint") || !strings.Contains(src, "add") {
+		t.Fatal("seed script must call provider-endpoint add")
+	}
+	if !strings.Contains(src, "--base-url") {
+		t.Fatal("seed script must pass --base-url into every created row")
+	}
+	// Prefer canonical command; legacy provider-key add is not enough for explicit URLs.
+	if strings.Contains(src, "provider-key add") {
+		t.Fatal("seed script still uses legacy provider-key add; switch to provider-endpoint add --base-url")
+	}
+	// Keys must flow via stdin (printf | admin), never as --key / trailing argv.
+	if strings.Contains(src, "--key ") || strings.Contains(src, "--api-key") {
+		t.Fatal("seed script must not pass raw keys as CLI flags")
+	}
+	if !strings.Contains(src, "printf") || !strings.Contains(src, "|") {
+		t.Fatal("seed script must pipe keys via stdin")
+	}
+	// Env secret names must not be interpolated into the admin argv string beyond
+	// the local key variable that is only written to the pipe.
+	for _, line := range strings.Split(src, "\n") {
+		if strings.Contains(line, "provider-endpoint") && strings.Contains(line, "GROK_API_KEY") {
+			t.Fatalf("raw env key appears on provider-endpoint argv line: %s", line)
+		}
+		if strings.Contains(line, "provider-endpoint") && strings.Contains(line, "FIRECRAWL_API_KEY") {
+			t.Fatalf("raw env key appears on provider-endpoint argv line: %s", line)
+		}
+		if strings.Contains(line, "provider-endpoint") && strings.Contains(line, "TAVILY_API_KEYS") {
+			t.Fatalf("raw env key appears on provider-endpoint argv line: %s", line)
+		}
+	}
+}
+
+// TestSeedStyleSharedBase_CreatesRowsWithBaseURLAndNoSecretLeak simulates the
+// shared-base seed path: one explicit base URL per provider, key on stdin only.
+func TestSeedStyleSharedBase_CreatesRowsWithBaseURLAndNoSecretLeak(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+
+	type row struct {
+		provider, name, baseURL, secret string
+	}
+	rows := []row{
+		{"grok", "grok2api", providers.DefaultGrokBaseURL, "xai-seed-style-secret-grok111"},
+		{"firecrawl", "gh01", providers.DefaultFirecrawlBaseURL, "fc-seed-style-secret-fire222"},
+		{"tavily", "tavily-1", providers.DefaultTavilyBaseURL, "tvly-seed-style-secret-tav333"},
+		{"tavily", "tavily-2", providers.DefaultTavilyBaseURL, "tvly-seed-style-secret-tav444"},
+	}
+	var combinedOut strings.Builder
+	for _, r := range rows {
+		stdout, stderr, code := runCLI(t, dbPath, masterPath, r.secret+"\n",
+			"provider-endpoint", "add",
+			"--provider", r.provider,
+			"--name", r.name,
+			"--base-url", r.baseURL,
+		)
+		if code != 0 {
+			t.Fatalf("add %s/%s exit %d stderr=%s stdout=%s", r.provider, r.name, code, stderr, stdout)
+		}
+		combinedOut.WriteString(stdout)
+		combinedOut.WriteString(stderr)
+		if strings.Contains(stdout, r.secret) || strings.Contains(stderr, r.secret) {
+			t.Fatalf("output leaked secret for %s/%s", r.provider, r.name)
+		}
+	}
+
+	list, _, code := runCLI(t, dbPath, masterPath, "", "provider-endpoint", "list")
+	if code != 0 {
+		t.Fatalf("list exit %d", code)
+	}
+	combinedOut.WriteString(list)
+	for _, r := range rows {
+		if strings.Contains(list, r.secret) || strings.Contains(combinedOut.String(), r.secret) {
+			t.Fatalf("list/output leaked secret for %s", r.name)
+		}
+	}
+
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, err := repo.ListAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != len(rows) {
+		t.Fatalf("rows=%d want %d", len(all), len(rows))
+	}
+	byName := map[string]string{}
+	for _, d := range all {
+		byName[d.Provider+"/"+d.Name] = d.BaseURL
+		if strings.TrimSpace(d.BaseURL) == "" {
+			t.Fatalf("empty base_url for %s/%s", d.Provider, d.Name)
+		}
+	}
+	for _, r := range rows {
+		got, ok := byName[r.provider+"/"+r.name]
+		if !ok {
+			t.Fatalf("missing row %s/%s", r.provider, r.name)
+		}
+		if got != r.baseURL {
+			t.Fatalf("%s/%s base_url=%q want %q", r.provider, r.name, got, r.baseURL)
+		}
+	}
+}
+
+func TestProviderEndpointAdd_WithSeparateQuotaReadsTwoSecretsSecurely(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+
+	infKey := "xai-cli-inf-secret-aaaaaaaa"
+	quotaKey := "g2a-cli-quota-secret-bbbbbbbb"
+	quotaFile := filepath.Join(t.TempDir(), "quota.key")
+	if err := os.WriteFile(quotaFile, []byte("  "+quotaKey+"  \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	quotaBase := "https://grok2api.example/admin"
+
+	stdout, stderr, code := runCLI(t, dbPath, masterPath, infKey+"\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "sep-quota",
+		"--base-url", "https://new-api.example/v1",
+		"--quota-mode", "separate_credentials",
+		"--quota-flow", "grok2api_admin",
+		"--quota-base-url", quotaBase,
+		"--quota-key-file", quotaFile,
+	)
+	if code != 0 {
+		t.Fatalf("add exit %d stderr=%s stdout=%s", code, stderr, stdout)
+	}
+	combined := stdout + stderr
+	if strings.Contains(combined, infKey) || strings.Contains(combined, quotaKey) {
+		t.Fatalf("output leaked secrets: %q", combined)
+	}
+	if !strings.Contains(stdout, "quota_mode=separate_credentials") {
+		t.Fatalf("stdout missing quota mode: %q", stdout)
+	}
+
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, err := repo.ListAll()
+	if err != nil || len(all) != 1 {
+		t.Fatalf("list: len=%d err=%v", len(all), err)
+	}
+	got := all[0]
+	if got.QuotaMode != providers.QuotaSeparateCredentials {
+		t.Fatalf("QuotaMode=%q", got.QuotaMode)
+	}
+	if got.QuotaFlow != providers.QuotaFlowGrok2APIAdmin {
+		t.Fatalf("QuotaFlow=%q", got.QuotaFlow)
+	}
+	if got.QuotaBaseURL == nil || *got.QuotaBaseURL != quotaBase {
+		t.Fatalf("QuotaBaseURL=%v", got.QuotaBaseURL)
+	}
+	if !got.QuotaKeyConfigured {
+		t.Fatal("QuotaKeyConfigured=false")
+	}
+	resolved, err := repo.ResolveEndpointQuota(got.ID)
+	if err != nil {
+		t.Fatalf("ResolveEndpointQuota: %v", err)
+	}
+	if resolved.APIKey != quotaKey {
+		t.Fatalf("quota key=%q want %q", resolved.APIKey, quotaKey)
+	}
+	rawInf, err := repo.RawKey(got.ID)
+	if err != nil {
+		t.Fatalf("RawKey: %v", err)
+	}
+	if rawInf != infKey {
+		t.Fatalf("inference key=%q want %q", rawInf, infKey)
+	}
+
+	// separate without --quota-key-file must fail
+	_, stderr2, code2 := runCLI(t, dbPath, masterPath, "xai-other-inf-key-cccccccc\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "sep-missing-file",
+		"--base-url", "https://new-api.example/v1",
+		"--quota-mode", "separate_credentials",
+		"--quota-flow", "grok2api_admin",
+		"--quota-base-url", quotaBase,
+	)
+	if code2 == 0 {
+		t.Fatal("separate without --quota-key-file should fail")
+	}
+	if !strings.Contains(stderr2, "quota-key-file") {
+		t.Fatalf("stderr want quota-key-file hint: %q", stderr2)
+	}
+}
+
+func TestProviderEndpointSetQuota(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	secret := "xai-set-quota-inf-key-111111"
+	stdout, _, code := runCLI(t, dbPath, masterPath, secret+"\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "setq",
+		"--base-url", "https://new-api.example/v1",
+	)
+	if code != 0 {
+		t.Fatalf("add exit %d out=%s", code, stdout)
+	}
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, _ := repo.ListAll()
+	idStr := strconv.FormatInt(all[0].ID, 10)
+	quotaBase := "https://g2a-quota.example/admin"
+
+	// Switch to separate without key (metadata only; key via rotate later)
+	setOut, setErr, c := runCLI(t, dbPath, masterPath, "",
+		"provider-endpoint", "set-quota",
+		"--id", idStr,
+		"--mode", "separate_credentials",
+		"--flow", "grok2api_admin",
+		"--base-url", quotaBase,
+	)
+	if c != 0 {
+		t.Fatalf("set-quota exit %d stderr=%s stdout=%s", c, setErr, setOut)
+	}
+	if strings.Contains(setOut+setErr, secret) {
+		t.Fatal("set-quota leaked inference secret")
+	}
+	got, _ := repo.Get(all[0].ID)
+	if got.QuotaMode != providers.QuotaSeparateCredentials {
+		t.Fatalf("mode=%q", got.QuotaMode)
+	}
+	if got.QuotaBaseURL == nil || *got.QuotaBaseURL != quotaBase {
+		t.Fatalf("quota base=%v", got.QuotaBaseURL)
+	}
+
+	// Switch back to disabled
+	if _, _, c := runCLI(t, dbPath, masterPath, "",
+		"provider-endpoint", "set-quota",
+		"--id", idStr,
+		"--mode", "disabled",
+		"--flow", "grok2api_admin",
+	); c != 0 {
+		t.Fatal("set-quota disabled")
+	}
+	got, _ = repo.Get(all[0].ID)
+	if got.QuotaMode != providers.QuotaDisabled {
+		t.Fatalf("mode after disable=%q", got.QuotaMode)
+	}
+	if got.QuotaBaseURL != nil {
+		t.Fatalf("quota base should be cleared, got %v", got.QuotaBaseURL)
+	}
+
+	// Invalid mode should fail
+	_, invErr, invCode := runCLI(t, dbPath, masterPath, "",
+		"provider-endpoint", "set-quota",
+		"--id", idStr,
+		"--mode", "not_a_mode",
+		"--flow", "grok2api_admin",
+	)
+	if invCode == 0 {
+		t.Fatal("invalid mode should fail")
+	}
+	if invErr == "" {
+		t.Fatal("expected error message for invalid mode")
+	}
+}
+
+func TestProviderEndpointRotateQuotaKey_UsesStdin(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+
+	infKey := "xai-rot-quota-inf-key-222222"
+	quotaKey := "g2a-rot-quota-initial-333333"
+	quotaFile := filepath.Join(t.TempDir(), "q.key")
+	if err := os.WriteFile(quotaFile, []byte(quotaKey+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, c := runCLI(t, dbPath, masterPath, infKey+"\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "rotq",
+		"--base-url", "https://new-api.example/v1",
+		"--quota-mode", "separate_credentials",
+		"--quota-flow", "grok2api_admin",
+		"--quota-base-url", "https://g2a.example/admin",
+		"--quota-key-file", quotaFile,
+	); c != 0 {
+		t.Fatal("add with separate quota")
+	}
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, _ := repo.ListAll()
+	idStr := strconv.FormatInt(all[0].ID, 10)
+
+	newQuota := "g2a-rot-quota-rotated-444444"
+	rotOut, rotErr, c := runCLI(t, dbPath, masterPath, newQuota+"\n",
+		"provider-endpoint", "rotate-quota-key", "--id", idStr,
+	)
+	if c != 0 {
+		t.Fatalf("rotate-quota-key exit %d stderr=%s stdout=%s", c, rotErr, rotOut)
+	}
+	combined := rotOut + rotErr
+	for _, s := range []string{infKey, quotaKey, newQuota} {
+		if strings.Contains(combined, s) {
+			t.Fatalf("rotate-quota-key output leaked %q: %q", s, combined)
+		}
+	}
+	if !strings.Contains(rotOut, "quota_key_prefix=") && !strings.Contains(rotOut, "prefix=") {
+		t.Fatalf("rotate output missing safe prefix: %q", rotOut)
+	}
+	resolved, err := repo.ResolveEndpointQuota(all[0].ID)
+	if err != nil {
+		t.Fatalf("ResolveEndpointQuota: %v", err)
+	}
+	if resolved.APIKey != newQuota {
+		t.Fatalf("stored quota key=%q want %q", resolved.APIKey, newQuota)
+	}
+	// Inference key untouched
+	rawInf, err := repo.RawKey(all[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawInf != infKey {
+		t.Fatalf("inference key changed: %q", rawInf)
+	}
+}
+
+func TestProviderEndpointList_ShowsSafeQuotaMetadataOnly(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+
+	infKey := "xai-list-quota-inf-secret-5555"
+	quotaKey := "g2a-list-quota-secret-666666"
+	quotaFile := filepath.Join(t.TempDir(), "list-q.key")
+	if err := os.WriteFile(quotaFile, []byte(quotaKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, c := runCLI(t, dbPath, masterPath, infKey+"\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "listq",
+		"--base-url", "https://new-api.example/v1",
+		"--quota-mode", "separate_credentials",
+		"--quota-flow", "grok2api_admin",
+		"--quota-base-url", "https://g2a-list.example/admin",
+		"--quota-key-file", quotaFile,
+	); c != 0 {
+		t.Fatal("add")
+	}
+
+	list, stderr, code := runCLI(t, dbPath, masterPath, "", "provider-endpoint", "list")
+	if code != 0 {
+		t.Fatalf("list exit %d stderr=%s", code, stderr)
+	}
+	combined := list + stderr
+	if strings.Contains(combined, infKey) || strings.Contains(combined, quotaKey) {
+		t.Fatalf("list leaked secrets: %q", combined)
+	}
+	for _, col := range []string{"QUOTA_MODE", "QUOTA_FLOW", "QUOTA_BASE_URL", "QUOTA_CONFIGURED"} {
+		if !strings.Contains(list, col) {
+			t.Fatalf("list missing column %s: %q", col, list)
+		}
+	}
+	if !strings.Contains(list, "separate_credentials") {
+		t.Fatalf("list missing mode value: %q", list)
+	}
+	if !strings.Contains(list, "grok2api_admin") {
+		t.Fatalf("list missing flow value: %q", list)
+	}
+	if !strings.Contains(list, "g2a-list.example") {
+		t.Fatalf("list missing quota base url: %q", list)
+	}
+	// Ciphertext must never appear
+	db := openDB(t, dbPath)
+	var encQuota []byte
+	_ = db.QueryRow(`SELECT encrypted_quota_key FROM provider_keys LIMIT 1`).Scan(&encQuota)
+	if len(encQuota) > 0 && strings.Contains(list, string(encQuota)) {
+		t.Fatal("list leaked encrypted_quota_key ciphertext")
+	}
+}
+
+func TestLegacyGrokQuotaHelp_IsDeprecatedButAvailable(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+
+	// Help text marks legacy Grok quota surface as deprecated
+	_, helpErr, code := runCLI(t, dbPath, masterPath, "", "help")
+	if code != 0 {
+		t.Fatalf("help exit %d", code)
+	}
+	if !strings.Contains(helpErr, "deprecated") {
+		t.Fatalf("help missing deprecated note for legacy grok quota: %q", helpErr)
+	}
+	if !strings.Contains(helpErr, "set-quota-mode") && !strings.Contains(helpErr, "grok") {
+		t.Fatalf("help missing legacy grok quota commands: %q", helpErr)
+	}
+
+	// Commands still work
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "grok", "set-quota-mode", "grok2api_admin"); c != 0 {
+		t.Fatal("legacy set-quota-mode must remain available")
+	}
+	out, _, c := runCLI(t, dbPath, masterPath, "", "grok", "get-quota-mode")
+	if c != 0 || strings.TrimSpace(out) != "grok2api_admin" {
+		t.Fatalf("legacy get-quota-mode: code=%d out=%q", c, out)
+	}
+
+	// Usage line for empty grok also mentions deprecation when possible
+	_, grokUsage, _ := runCLI(t, dbPath, masterPath, "", "grok")
+	if !strings.Contains(grokUsage, "set-quota-mode") {
+		t.Fatalf("grok usage missing set-quota-mode: %q", grokUsage)
+	}
+	if !strings.Contains(strings.ToLower(grokUsage), "deprecated") {
+		t.Fatalf("grok usage should note deprecation: %q", grokUsage)
+	}
+}

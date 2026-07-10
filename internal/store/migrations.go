@@ -40,6 +40,14 @@ var migrations = []migration{
 		id:  "0007",
 		sql: migration0007,
 	},
+	{
+		id:  "0008",
+		sql: migration0008,
+	},
+	{
+		id:  "0009",
+		sql: migration0009,
+	},
 }
 
 const migration0002 = `
@@ -130,6 +138,51 @@ const migration0007 = `
 ALTER TABLE provider_keys ADD COLUMN last_failed_at TEXT;
 CREATE INDEX IF NOT EXISTS idx_provider_keys_select
   ON provider_keys(provider, enabled, last_failed_at, id);
+`
+
+// base_url turns every provider_keys row into an atomic endpoint pair. Existing
+// rows snapshot the configured provider default, falling back to compiled URLs.
+const migration0008 = `
+ALTER TABLE provider_keys ADD COLUMN base_url TEXT NOT NULL DEFAULT '';
+
+UPDATE provider_keys
+SET base_url = COALESCE(
+  (SELECT NULLIF(TRIM(provider_settings.base_url), '')
+   FROM provider_settings
+   WHERE provider_settings.provider = provider_keys.provider),
+  CASE provider
+    WHEN 'grok' THEN 'https://api.x.ai/v1'
+    WHEN 'tavily' THEN 'https://api.tavily.com'
+    WHEN 'firecrawl' THEN 'https://api.firecrawl.dev/v2'
+    ELSE ''
+  END
+)
+WHERE base_url = '';
+`
+
+// Endpoint quota sidecars: optional per-row quota mode/flow and separately
+// encrypted credentials. Defaults: Grok disabled; Tavily/Firecrawl share
+// inference credentials. Never copies provider-global Grok admin secrets.
+const migration0009 = `
+ALTER TABLE provider_keys ADD COLUMN quota_mode TEXT NOT NULL DEFAULT 'disabled';
+ALTER TABLE provider_keys ADD COLUMN quota_flow TEXT NOT NULL DEFAULT '';
+ALTER TABLE provider_keys ADD COLUMN quota_base_url TEXT;
+ALTER TABLE provider_keys ADD COLUMN encrypted_quota_key TEXT;
+ALTER TABLE provider_keys ADD COLUMN quota_key_prefix TEXT;
+ALTER TABLE provider_keys ADD COLUMN quota_key_fingerprint TEXT;
+
+UPDATE provider_keys SET
+  quota_mode = CASE provider
+    WHEN 'tavily' THEN 'endpoint_credentials'
+    WHEN 'firecrawl' THEN 'endpoint_credentials'
+    ELSE 'disabled'
+  END,
+  quota_flow = CASE provider
+    WHEN 'grok' THEN 'grok2api_admin'
+    WHEN 'tavily' THEN 'tavily_usage'
+    WHEN 'firecrawl' THEN 'firecrawl_credit_usage'
+    ELSE ''
+  END;
 `
 
 const migration0001 = `

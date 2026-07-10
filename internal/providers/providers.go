@@ -16,6 +16,10 @@ var (
 	ErrUnknownProvider = errors.New("providers: unknown provider")
 	ErrNoEnabledKey    = errors.New("providers: no enabled provider key available")
 	ErrDuplicateName   = errors.New("providers: provider key name already exists for provider")
+	// ErrInvalidBaseURL is returned when an operator-supplied base URL fails NormalizeBaseURL.
+	ErrInvalidBaseURL = errors.New("providers: invalid base URL")
+	// ErrProviderKeyNotFound is returned when a provider_keys row id does not exist.
+	ErrProviderKeyNotFound = errors.New("providers: provider key not found")
 )
 
 func validateProvider(p string) error {

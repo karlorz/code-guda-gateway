@@ -1335,3 +1335,713 @@ func TestProviderKeys_ResetSelectionAndDemote(t *testing.T) {
 		t.Fatal("expected last_failed_at after demote")
 	}
 }
+
+func TestProviderEndpoint_CreateListWithBaseURL(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	rawKey := "tvly-endpoint-create-secret-abcdef"
+	baseURL := "https://proxy.example/tavily"
+	body := `{"provider":"tavily","name":"ep-primary","base_url":"` + baseURL + `","key":"` + rawKey + `"}`
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-endpoints", body, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	createBody := rec.Body.String()
+	if strings.Contains(createBody, rawKey) {
+		t.Fatal("create response leaked raw key")
+	}
+	if !strings.Contains(createBody, "proxy.example/tavily") {
+		t.Fatalf("create missing base url: %s", createBody)
+	}
+	var created providers.DisplayProviderKey
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("create json: %v", err)
+	}
+	if created.ID == 0 || created.BaseURL == "" {
+		t.Fatalf("created = %#v", created)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/provider-endpoints?provider=tavily", nil)
+	req.AddCookie(c)
+	listRec := httptest.NewRecorder()
+	app.ServeHTTP(listRec, req)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listRec.Code, listRec.Body.String())
+	}
+	listBody := listRec.Body.String()
+	if strings.Contains(listBody, rawKey) {
+		t.Fatal("list leaked raw key")
+	}
+	if !strings.Contains(listBody, "proxy.example/tavily") {
+		t.Fatalf("list missing base url field: %s", listBody)
+	}
+	if !strings.Contains(listBody, "ep-primary") {
+		t.Fatalf("list missing name: %s", listBody)
+	}
+}
+
+func TestProviderEndpoint_UpdateBaseURL(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	d, err := keyRepo.AddEndpoint(providers.ProviderGrok, "url-row", "https://api.x.ai/v1", "xai-url-update-key-12345678")
+	if err != nil {
+		t.Fatalf("AddEndpoint: %v", err)
+	}
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	newURL := "https://custom-endpoint.example/v1"
+	path := "/admin/api/provider-endpoints/" + strconv.FormatInt(d.ID, 10) + "/update-base-url"
+	rec := serveMutatingAdmin(app, http.MethodPost, path, `{"base_url":"`+newURL+`"}`, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update-base-url status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got, err := keyRepo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.BaseURL != newURL {
+		t.Fatalf("BaseURL=%q want %q", got.BaseURL, newURL)
+	}
+}
+
+func TestProviderEndpoint_RotateKeyNoSecretLeak(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	oldKey := "xai-old-rotate-key-1111111111"
+	newKey := "xai-new-rotate-key-2222222222"
+	d, err := keyRepo.AddEndpoint(providers.ProviderGrok, "rot", "https://api.x.ai/v1", oldKey)
+	if err != nil {
+		t.Fatalf("AddEndpoint: %v", err)
+	}
+	oldFP := d.Fingerprint
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	path := "/admin/api/provider-endpoints/" + strconv.FormatInt(d.ID, 10) + "/rotate-key"
+	rec := serveMutatingAdmin(app, http.MethodPost, path, `{"key":"`+newKey+`"}`, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rotate-key status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	respBody := rec.Body.String()
+	if strings.Contains(respBody, oldKey) || strings.Contains(respBody, newKey) {
+		t.Fatal("rotate-key response leaked raw key")
+	}
+	got, err := keyRepo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Fingerprint == oldFP {
+		t.Fatal("fingerprint unchanged after rotate")
+	}
+	raw, err := keyRepo.RawKey(d.ID)
+	if err != nil {
+		t.Fatalf("RawKey: %v", err)
+	}
+	if raw != newKey {
+		t.Fatalf("stored key = %q want %q", raw, newKey)
+	}
+}
+
+func TestProviderEndpoint_AuditNeverLeaksSecret(t *testing.T) {
+	app, auth, _, _, st, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	rawKey := "tvly-audit-secret-key-zzzzzzzz"
+	body := `{"provider":"tavily","name":"aud-ep","base_url":"https://api.tavily.com","key":"` + rawKey + `"}`
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-endpoints", body, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var created providers.DisplayProviderKey
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	newKey := "tvly-rotated-audit-secret-yyyy"
+	rotPath := "/admin/api/provider-endpoints/" + strconv.FormatInt(created.ID, 10) + "/rotate-key"
+	rotRec := serveMutatingAdmin(app, http.MethodPost, rotPath, `{"key":"`+newKey+`"}`, csrf, c)
+	if rotRec.Code != http.StatusOK {
+		t.Fatalf("rotate status=%d", rotRec.Code)
+	}
+	urlPath := "/admin/api/provider-endpoints/" + strconv.FormatInt(created.ID, 10) + "/update-base-url"
+	urlRec := serveMutatingAdmin(app, http.MethodPost, urlPath, `{"base_url":"https://proxy.tavily.example"}`, csrf, c)
+	if urlRec.Code != http.StatusOK {
+		t.Fatalf("update-base-url status=%d", urlRec.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/audit-events", nil)
+	req.AddCookie(c)
+	listRec := httptest.NewRecorder()
+	app.ServeHTTP(listRec, req)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("audit list status=%d", listRec.Code)
+	}
+	auditBody := listRec.Body.String()
+	if strings.Contains(auditBody, rawKey) || strings.Contains(auditBody, newKey) {
+		t.Fatal("audit leaked raw key material")
+	}
+	if !strings.Contains(auditBody, "provider_endpoint") && !strings.Contains(auditBody, "provider_key") {
+		t.Fatalf("expected endpoint/key audit actions: %s", truncate(auditBody, 400))
+	}
+	rows, err := audit.NewAuditRepo(st.DB()).List(audit.ListFilter{})
+	if err != nil {
+		t.Fatalf("audit list: %v", err)
+	}
+	for _, ev := range rows {
+		if strings.Contains(ev.DetailRedacted, rawKey) || strings.Contains(ev.DetailRedacted, newKey) {
+			t.Fatalf("audit detail leaked secret: %q", ev.DetailRedacted)
+		}
+	}
+}
+
+func TestLegacyProviderKey_CreateUsesProviderDefaultBaseURL(t *testing.T) {
+	app, auth, _, keyRepo, st, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	defaultURL, err := providers.NewSettingsRepo(st.DB()).GetBaseURL(providers.ProviderGrok)
+	if err != nil {
+		t.Fatalf("GetBaseURL: %v", err)
+	}
+	rawKey := "xai-legacy-default-key-99999999"
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-keys",
+		`{"provider":"grok","name":"legacy-def","key":"`+rawKey+`"}`, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("legacy create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), rawKey) {
+		t.Fatal("legacy create leaked raw key")
+	}
+	var created providers.DisplayProviderKey
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	got, err := keyRepo.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.BaseURL != defaultURL {
+		t.Fatalf("BaseURL=%q want default %q", got.BaseURL, defaultURL)
+	}
+}
+
+func TestProviderEndpoint_AndLegacyProviderKey_SameStableRowID(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	rawKey := "xai-shared-row-key-aaaaaaaa"
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-endpoints",
+		`{"provider":"grok","name":"shared-row","base_url":"https://api.x.ai/v1","key":"`+rawKey+`"}`, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var created providers.DisplayProviderKey
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	id := created.ID
+	idStr := strconv.FormatInt(id, 10)
+
+	recDis := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/provider-keys/"+idStr, `{"enabled":false}`, csrf, c)
+	if recDis.Code != http.StatusOK {
+		t.Fatalf("legacy disable status=%d", recDis.Code)
+	}
+	got, err := keyRepo.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Enabled {
+		t.Fatal("row still enabled after legacy disable")
+	}
+
+	recEn := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/provider-endpoints/"+idStr, `{"enabled":true}`, csrf, c)
+	if recEn.Code != http.StatusOK {
+		t.Fatalf("canonical enable status=%d body=%s", recEn.Code, recEn.Body.String())
+	}
+	got, err = keyRepo.Get(id)
+	if err != nil {
+		t.Fatalf("Get2: %v", err)
+	}
+	if !got.Enabled {
+		t.Fatal("row still disabled after canonical enable")
+	}
+
+	recDem := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-keys/"+idStr+"/demote", "", csrf, c)
+	if recDem.Code != http.StatusOK {
+		t.Fatalf("legacy demote status=%d", recDem.Code)
+	}
+	got, _ = keyRepo.Get(id)
+	if got.LastFailedAt == nil {
+		t.Fatal("expected last_failed_at after demote")
+	}
+	recReset := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-endpoints/"+idStr+"/reset-selection", "", csrf, c)
+	if recReset.Code != http.StatusOK {
+		t.Fatalf("canonical reset-selection status=%d", recReset.Code)
+	}
+	got, _ = keyRepo.Get(id)
+	if got.LastFailedAt != nil {
+		t.Fatal("last_failed_at still set after reset-selection")
+	}
+}
+
+func TestProviderEndpoint_CreateInvalidURLReturns400(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	cases := []string{
+		"https://user:pass@example.com/v1",
+		"https://example.com/v1?api_key=x",
+		"https://example.com/v1#frag",
+	}
+	for i, bad := range cases {
+		name := "bad-" + strconv.Itoa(i)
+		body := `{"provider":"tavily","name":"` + name + `","base_url":"` + bad + `","key":"tvly-bad-url-key-aaaaaaaa"}`
+		rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-endpoints", body, csrf, c)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("create bad URL %q status=%d body=%s", bad, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestProviderEndpoint_UpdateBaseURLInvalidReturns400(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	d, err := keyRepo.AddEndpoint(providers.ProviderGrok, "url-bad", "https://api.x.ai/v1", "xai-url-bad-key-12345678")
+	if err != nil {
+		t.Fatalf("AddEndpoint: %v", err)
+	}
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	path := "/admin/api/provider-endpoints/" + strconv.FormatInt(d.ID, 10) + "/update-base-url"
+	rec := serveMutatingAdmin(app, http.MethodPost, path, `{"base_url":"https://user:pass@host.example/v1"}`, csrf, c)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("update-base-url invalid status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got, err := keyRepo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.BaseURL != "https://api.x.ai/v1" {
+		t.Fatalf("BaseURL mutated on validation failure: %q", got.BaseURL)
+	}
+}
+
+func TestProviderSettingsPatch_InvalidURLReturns400(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	rec := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/provider-settings/tavily",
+		`{"base_url":"https://user:pass@evil.example/v1"}`, csrf, c)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("settings patch invalid status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "bad_request") && !strings.Contains(rec.Body.String(), "user") {
+		// structured bad_request preferred; message may mention user info
+		if !strings.Contains(rec.Body.String(), "invalid") && !strings.Contains(rec.Body.String(), "user") {
+			t.Logf("body=%s", rec.Body.String())
+		}
+	}
+}
+
+func TestProviderEndpointCreate_WithSeparateGrokQuota(t *testing.T) {
+	app, auth, _, keyRepo, st, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+
+	infKey := "xai-inf-create-separate-quota-1111"
+	quotaKey := "g2a-admin-quota-secret-key-2222"
+	quotaURL := "https://grok2api.example"
+	body := `{
+		"provider":"grok",
+		"name":"new-api-sg",
+		"base_url":"https://new-api.example/v1",
+		"key":"` + infKey + `",
+		"quota":{
+			"mode":"separate_credentials",
+			"flow":"grok2api_admin",
+			"base_url":"` + quotaURL + `",
+			"key":"` + quotaKey + `"
+		}
+	}`
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-endpoints", body, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	respBody := rec.Body.String()
+	if strings.Contains(respBody, infKey) || strings.Contains(respBody, quotaKey) {
+		t.Fatal("create response leaked raw inference or quota key")
+	}
+	var encQuota []byte
+	if err := st.DB().QueryRow(`SELECT encrypted_quota_key FROM provider_keys WHERE name = ?`, "new-api-sg").Scan(&encQuota); err != nil {
+		t.Fatalf("query encrypted_quota_key: %v", err)
+	}
+	if len(encQuota) == 0 {
+		t.Fatal("expected encrypted quota key stored")
+	}
+	if strings.Contains(respBody, string(encQuota)) {
+		t.Fatal("create response leaked quota ciphertext")
+	}
+
+	var created providers.DisplayProviderKey
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if created.ID == 0 {
+		t.Fatal("missing id")
+	}
+	if created.QuotaMode != providers.QuotaSeparateCredentials {
+		t.Fatalf("QuotaMode=%q", created.QuotaMode)
+	}
+	if created.QuotaFlow != providers.QuotaFlowGrok2APIAdmin {
+		t.Fatalf("QuotaFlow=%q", created.QuotaFlow)
+	}
+	if !created.QuotaKeyConfigured {
+		t.Fatal("expected QuotaKeyConfigured")
+	}
+	if created.QuotaBaseURL == nil || *created.QuotaBaseURL != quotaURL {
+		t.Fatalf("QuotaBaseURL=%v want %q", created.QuotaBaseURL, quotaURL)
+	}
+	if created.QuotaKeyPrefix == nil || *created.QuotaKeyPrefix == "" {
+		t.Fatal("expected quota key prefix")
+	}
+	if created.QuotaKeyFingerprint == nil || *created.QuotaKeyFingerprint == "" {
+		t.Fatal("expected quota key fingerprint")
+	}
+
+	got, err := keyRepo.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.QuotaMode != providers.QuotaSeparateCredentials {
+		t.Fatalf("stored QuotaMode=%q", got.QuotaMode)
+	}
+	resolved, err := keyRepo.ResolveEndpointQuota(created.ID)
+	if err != nil {
+		t.Fatalf("ResolveEndpointQuota: %v", err)
+	}
+	if resolved.APIKey != quotaKey {
+		t.Fatalf("resolved quota key mismatch")
+	}
+	if resolved.BaseURL != quotaURL {
+		t.Fatalf("resolved quota URL=%q", resolved.BaseURL)
+	}
+	inf, err := keyRepo.RawKey(created.ID)
+	if err != nil {
+		t.Fatalf("RawKey: %v", err)
+	}
+	if inf != infKey {
+		t.Fatalf("inference key mismatch")
+	}
+}
+
+func TestProviderEndpointCreate_DefaultQuotaModes(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+
+	cases := []struct {
+		provider string
+		name     string
+		baseURL  string
+		key      string
+		wantMode providers.QuotaMode
+		wantFlow providers.QuotaFlow
+	}{
+		{providers.ProviderGrok, "def-grok", "https://api.x.ai/v1", "xai-default-quota-mode-key-111", providers.QuotaDisabled, providers.QuotaFlowGrok2APIAdmin},
+		{providers.ProviderTavily, "def-tvly", "https://api.tavily.com", "tvly-default-quota-mode-key-aa", providers.QuotaEndpointCredentials, providers.QuotaFlowTavilyUsage},
+		{providers.ProviderFirecrawl, "def-fc", "https://api.firecrawl.dev", "fc-default-quota-mode-key-bbbb", providers.QuotaEndpointCredentials, providers.QuotaFlowFirecrawlCreditUsage},
+	}
+	for _, tc := range cases {
+		body := `{"provider":"` + tc.provider + `","name":"` + tc.name + `","base_url":"` + tc.baseURL + `","key":"` + tc.key + `"}`
+		rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-endpoints", body, csrf, c)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s create status=%d body=%s", tc.provider, rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), tc.key) {
+			t.Fatalf("%s create leaked key", tc.provider)
+		}
+		var created providers.DisplayProviderKey
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatalf("%s json: %v", tc.provider, err)
+		}
+		if created.QuotaMode != tc.wantMode {
+			t.Fatalf("%s QuotaMode=%q want %q", tc.provider, created.QuotaMode, tc.wantMode)
+		}
+		if created.QuotaFlow != tc.wantFlow {
+			t.Fatalf("%s QuotaFlow=%q want %q", tc.provider, created.QuotaFlow, tc.wantFlow)
+		}
+		got, err := keyRepo.Get(created.ID)
+		if err != nil {
+			t.Fatalf("%s Get: %v", tc.provider, err)
+		}
+		if got.QuotaMode != tc.wantMode || got.QuotaFlow != tc.wantFlow {
+			t.Fatalf("%s stored mode/flow = %q/%q want %q/%q", tc.provider, got.QuotaMode, got.QuotaFlow, tc.wantMode, tc.wantFlow)
+		}
+	}
+}
+
+func TestProviderEndpointUpdateQuota_RejectsInvalidModeFlowAndURL(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	d, err := keyRepo.AddEndpoint(providers.ProviderGrok, "uq-bad", "https://api.x.ai/v1", "xai-update-quota-bad-key-1111")
+	if err != nil {
+		t.Fatalf("AddEndpoint: %v", err)
+	}
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	base := "/admin/api/provider-endpoints/" + strconv.FormatInt(d.ID, 10) + "/update-quota"
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"bad mode", `{"mode":"not_a_mode","flow":"grok2api_admin"}`},
+		{"bad flow", `{"mode":"disabled","flow":"tavily_usage"}`},
+		{"bad url", `{"mode":"separate_credentials","flow":"grok2api_admin","base_url":"https://user:pass@host.example"}`},
+		{"secret rejected", `{"mode":"disabled","flow":"grok2api_admin","key":"should-not-be-accepted-here"}`},
+	}
+	for _, tc := range cases {
+		rec := serveMutatingAdmin(app, http.MethodPost, base, tc.body, csrf, c)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status=%d body=%s", tc.name, rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "should-not-be-accepted-here") {
+			t.Fatalf("%s: error body leaked key", tc.name)
+		}
+	}
+
+	// Valid update to separate credentials (metadata only; no key yet).
+	okRec := serveMutatingAdmin(app, http.MethodPost, base,
+		`{"mode":"separate_credentials","flow":"grok2api_admin","base_url":"https://grok2api.example"}`, csrf, c)
+	if okRec.Code != http.StatusOK {
+		t.Fatalf("valid update status=%d body=%s", okRec.Code, okRec.Body.String())
+	}
+	got, err := keyRepo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.QuotaMode != providers.QuotaSeparateCredentials {
+		t.Fatalf("QuotaMode=%q", got.QuotaMode)
+	}
+	if got.QuotaBaseURL == nil || *got.QuotaBaseURL != "https://grok2api.example" {
+		t.Fatalf("QuotaBaseURL=%v", got.QuotaBaseURL)
+	}
+	if got.QuotaKeyConfigured {
+		t.Fatal("update-quota must not set a quota key")
+	}
+}
+
+func TestProviderEndpointRotateQuotaKey_NoSecretLeak(t *testing.T) {
+	app, auth, _, keyRepo, st, _ := openAdminApp(t)
+	oldQuota := "g2a-old-quota-rotate-key-111111"
+	newQuota := "g2a-new-quota-rotate-key-222222"
+	infKey := "xai-rotate-quota-inf-key-333333"
+	d, err := keyRepo.AddEndpointWithQuota(providers.ProviderGrok, "rq-api", "https://new-api.example/v1", infKey, providers.EndpointQuotaInput{
+		Mode:    providers.QuotaSeparateCredentials,
+		Flow:    providers.QuotaFlowGrok2APIAdmin,
+		BaseURL: "https://grok2api.example",
+		RawKey:  oldQuota,
+	})
+	if err != nil {
+		t.Fatalf("AddEndpointWithQuota: %v", err)
+	}
+	oldFP := ""
+	if d.QuotaKeyFingerprint != nil {
+		oldFP = *d.QuotaKeyFingerprint
+	}
+
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	path := "/admin/api/provider-endpoints/" + strconv.FormatInt(d.ID, 10) + "/rotate-quota-key"
+	rec := serveMutatingAdmin(app, http.MethodPost, path, `{"key":"`+newQuota+`"}`, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rotate-quota-key status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	respBody := rec.Body.String()
+	if strings.Contains(respBody, oldQuota) || strings.Contains(respBody, newQuota) || strings.Contains(respBody, infKey) {
+		t.Fatal("rotate-quota-key response leaked secrets")
+	}
+	var encQuota []byte
+	if err := st.DB().QueryRow(`SELECT encrypted_quota_key FROM provider_keys WHERE id = ?`, d.ID).Scan(&encQuota); err != nil {
+		t.Fatalf("query enc: %v", err)
+	}
+	if strings.Contains(respBody, string(encQuota)) {
+		t.Fatal("rotate-quota-key response leaked ciphertext")
+	}
+
+	got, err := keyRepo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.QuotaKeyFingerprint == nil || *got.QuotaKeyFingerprint == oldFP {
+		t.Fatal("quota fingerprint unchanged after rotate")
+	}
+	resolved, err := keyRepo.ResolveEndpointQuota(d.ID)
+	if err != nil {
+		t.Fatalf("ResolveEndpointQuota: %v", err)
+	}
+	if resolved.APIKey != newQuota {
+		t.Fatalf("stored quota key = %q", resolved.APIKey)
+	}
+	inf, err := keyRepo.RawKey(d.ID)
+	if err != nil {
+		t.Fatalf("RawKey: %v", err)
+	}
+	if inf != infKey {
+		t.Fatalf("inference key changed: %q", inf)
+	}
+}
+
+func TestProviderEndpointList_ExposesOnlySafeQuotaMetadata(t *testing.T) {
+	app, auth, _, keyRepo, st, _ := openAdminApp(t)
+	infKey := "xai-list-safe-inf-key-aaaaaaaa"
+	quotaKey := "g2a-list-safe-quota-key-bbbbbb"
+	d, err := keyRepo.AddEndpointWithQuota(providers.ProviderGrok, "list-safe", "https://new-api.example/v1", infKey, providers.EndpointQuotaInput{
+		Mode:    providers.QuotaSeparateCredentials,
+		Flow:    providers.QuotaFlowGrok2APIAdmin,
+		BaseURL: "https://grok2api.example",
+		RawKey:  quotaKey,
+	})
+	if err != nil {
+		t.Fatalf("AddEndpointWithQuota: %v", err)
+	}
+	var encKey, encQuota []byte
+	if err := st.DB().QueryRow(`SELECT encrypted_key, encrypted_quota_key FROM provider_keys WHERE id = ?`, d.ID).Scan(&encKey, &encQuota); err != nil {
+		t.Fatalf("query enc: %v", err)
+	}
+
+	c, _ := authenticatedAdminSession(t, app, auth)
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/provider-endpoints?provider=grok", nil)
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, secret := range []string{infKey, quotaKey, string(encKey), string(encQuota)} {
+		if secret != "" && strings.Contains(body, secret) {
+			t.Fatal("list leaked raw secret or ciphertext")
+		}
+	}
+	for _, forbidden := range []string{"encrypted_key", "encrypted_quota_key", "EncryptedKey", "EncryptedQuotaKey"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("list contains forbidden field %q", forbidden)
+		}
+	}
+	if !strings.Contains(body, string(providers.QuotaSeparateCredentials)) && !strings.Contains(body, "QuotaMode") {
+		t.Fatalf("list missing quota mode: %s", truncate(body, 400))
+	}
+	if !strings.Contains(body, "grok2api.example") {
+		t.Fatalf("list missing quota base url: %s", truncate(body, 400))
+	}
+	if d.QuotaKeyPrefix != nil && !strings.Contains(body, *d.QuotaKeyPrefix) {
+		t.Fatalf("list missing quota prefix: %s", truncate(body, 400))
+	}
+}
+
+func TestProviderEndpointQuotaMutations_RequireCSRF(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	d, err := keyRepo.AddEndpointWithQuota(providers.ProviderGrok, "csrf-q", "https://new-api.example/v1", "xai-csrf-quota-inf-11111111", providers.EndpointQuotaInput{
+		Mode:    providers.QuotaSeparateCredentials,
+		Flow:    providers.QuotaFlowGrok2APIAdmin,
+		BaseURL: "https://grok2api.example",
+		RawKey:  "g2a-csrf-quota-key-22222222",
+	})
+	if err != nil {
+		t.Fatalf("AddEndpointWithQuota: %v", err)
+	}
+	c := loginSession(t, app, initToken(t, auth))
+	idStr := strconv.FormatInt(d.ID, 10)
+
+	paths := []struct {
+		path string
+		body string
+	}{
+		{"/admin/api/provider-endpoints", `{"provider":"grok","name":"csrf-create","base_url":"https://api.x.ai/v1","key":"xai-csrf-create-key-zzzzzzzz","quota":{"mode":"disabled","flow":"grok2api_admin"}}`},
+		{"/admin/api/provider-endpoints/" + idStr + "/update-quota", `{"mode":"disabled","flow":"grok2api_admin"}`},
+		{"/admin/api/provider-endpoints/" + idStr + "/rotate-quota-key", `{"key":"g2a-csrf-new-quota-key-333333"}`},
+	}
+	for _, tc := range paths {
+		rec := serveMutatingAdmin(app, http.MethodPost, tc.path, tc.body, "", c)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s without CSRF status=%d want 403 body=%s", tc.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestLegacyGrokQuotaSettings_RemainAvailableThroughCompatibilityRoutes(t *testing.T) {
+	app, auth, _, keyRepo, st, mk := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	settings := providers.NewSettingsRepo(st.DB())
+
+	// Provider-global Grok settings remain writable/readable (deprecated v0.4.x surface).
+	if err := settings.SetGrokQuotaMode("grok2api_admin"); err != nil {
+		t.Fatalf("SetGrokQuotaMode: %v", err)
+	}
+	if err := settings.SetGrok2APIAdminBaseURL("https://legacy-grok2api.example"); err != nil {
+		t.Fatalf("SetGrok2APIAdminBaseURL: %v", err)
+	}
+	if err := settings.SetGrok2APIAdminKey(mk, "legacy-admin-key-not-in-http"); err != nil {
+		t.Fatalf("SetGrok2APIAdminKey: %v", err)
+	}
+
+	// Canonical base-url compatibility routes still work.
+	rec := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/providers/grok",
+		`{"base_url":"https://new-api-compat.example/v1"}`, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch providers/grok status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/providers/grok", nil)
+	req.AddCookie(c)
+	getRec := httptest.NewRecorder()
+	app.ServeHTTP(getRec, req)
+	if getRec.Code != http.StatusOK || !strings.Contains(getRec.Body.String(), "new-api-compat.example") {
+		t.Fatalf("get providers/grok: status=%d body=%s", getRec.Code, getRec.Body.String())
+	}
+
+	// Endpoint sidecar create must not clobber provider-global Grok quota settings.
+	createBody := `{
+		"provider":"grok",
+		"name":"sidecar-does-not-touch-global",
+		"base_url":"https://new-api.example/v1",
+		"key":"xai-compat-sidecar-inf-key-1111",
+		"quota":{
+			"mode":"separate_credentials",
+			"flow":"grok2api_admin",
+			"base_url":"https://sidecar-quota.example",
+			"key":"g2a-sidecar-quota-key-2222"
+		}
+	}`
+	createRec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-endpoints", createBody, csrf, c)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", createRec.Code, createRec.Body.String())
+	}
+
+	mode, err := settings.GetGrokQuotaMode()
+	if err != nil {
+		t.Fatalf("GetGrokQuotaMode: %v", err)
+	}
+	if mode != "grok2api_admin" {
+		t.Fatalf("global quota mode mutated: %q", mode)
+	}
+	adminURL, err := settings.GetGrok2APIAdminBaseURL()
+	if err != nil {
+		t.Fatalf("GetGrok2APIAdminBaseURL: %v", err)
+	}
+	if adminURL != "https://legacy-grok2api.example" {
+		t.Fatalf("global admin base URL mutated: %q", adminURL)
+	}
+	adminKey, err := settings.GetGrok2APIAdminKey(mk)
+	if err != nil {
+		t.Fatalf("GetGrok2APIAdminKey: %v", err)
+	}
+	if adminKey != "legacy-admin-key-not-in-http" {
+		t.Fatalf("global admin key mutated")
+	}
+
+	// Legacy provider-keys create still works and applies default quota config.
+	legacyRec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-keys",
+		`{"provider":"grok","name":"legacy-compat-row","key":"xai-legacy-compat-key-99999999"}`, csrf, c)
+	if legacyRec.Code != http.StatusOK {
+		t.Fatalf("legacy provider-keys create status=%d body=%s", legacyRec.Code, legacyRec.Body.String())
+	}
+	var legacy providers.DisplayProviderKey
+	if err := json.Unmarshal(legacyRec.Body.Bytes(), &legacy); err != nil {
+		t.Fatalf("legacy json: %v", err)
+	}
+	got, err := keyRepo.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get legacy: %v", err)
+	}
+	if got.QuotaMode != providers.QuotaDisabled {
+		t.Fatalf("legacy create QuotaMode=%q want disabled", got.QuotaMode)
+	}
+
+	// Ensure no HTTP response leaked the legacy admin key.
+	if strings.Contains(createRec.Body.String(), "legacy-admin-key-not-in-http") ||
+		strings.Contains(getRec.Body.String(), "legacy-admin-key-not-in-http") {
+		t.Fatal("HTTP response leaked global admin key")
+	}
+}

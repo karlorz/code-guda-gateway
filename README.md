@@ -60,10 +60,15 @@ See `scripts/templates/bootstrap.env.example` for a secret-free template.
 guda-gateway-admin db migrate
 guda-gateway-admin token init          # save the printed token once
 guda-gateway-admin gateway-key create --name groksearch
-guda-gateway-admin provider-key add --provider grok --name primary   # key via stdin
-guda-gateway-admin provider-key add --provider tavily --name primary
-guda-gateway-admin provider-key add --provider firecrawl --name primary
-# Optional: set upstream base URLs via CLI settings commands or the admin UI.
+# Canonical: each row is an atomic (base_url, key) endpoint pair (key via stdin).
+guda-gateway-admin provider-endpoint add --provider grok --name primary \
+  --base-url https://api.x.ai/v1
+guda-gateway-admin provider-endpoint add --provider tavily --name primary \
+  --base-url https://api.tavily.com
+guda-gateway-admin provider-endpoint add --provider firecrawl --name primary \
+  --base-url https://api.firecrawl.dev/v2
+# Optional: change provider *defaults* for future creates via settings CLI or admin UI.
+# Existing rows keep their own base_url; defaults never re-route live traffic.
 
 go build -o guda-gateway ./cmd/guda-gateway
 ./guda-gateway
@@ -118,9 +123,12 @@ MK=/etc/code-guda-gateway/master.key
 
 "$ADM" --db "$DB" --master-key "$MK" token init
 "$ADM" --db "$DB" --master-key "$MK" gateway-key create --name groksearch
-printf '%s' "$GROK_UPSTREAM_API_KEY" | "$ADM" --db "$DB" --master-key "$MK" provider-key add --provider grok --name primary
-printf '%s' "$TAVILY_API_KEY" | "$ADM" --db "$DB" --master-key "$MK" provider-key add --provider tavily --name primary
-printf '%s' "$FIRECRAWL_API_KEY" | "$ADM" --db "$DB" --master-key "$MK" provider-key add --provider firecrawl --name primary
+printf '%s' "$GROK_UPSTREAM_API_KEY" | "$ADM" --db "$DB" --master-key "$MK" \
+  provider-endpoint add --provider grok --name primary --base-url https://api.x.ai/v1
+printf '%s' "$TAVILY_API_KEY" | "$ADM" --db "$DB" --master-key "$MK" \
+  provider-endpoint add --provider tavily --name primary --base-url https://api.tavily.com
+printf '%s' "$FIRECRAWL_API_KEY" | "$ADM" --db "$DB" --master-key "$MK" \
+  provider-endpoint add --provider firecrawl --name primary --base-url https://api.firecrawl.dev/v2
 ```
 
 Operational checks:
@@ -251,7 +259,8 @@ go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_P
 go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" \
   token init --save-env ~/.secrets/guda-gateway.env
 go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" gateway-key create --name dev
-# Paste provider secrets on stdin when prompted for provider-key add.
+# Paste provider secrets on stdin when prompted for provider-endpoint add
+# (requires --base-url; see Provider endpoint pairs).
 
 GUDA_ADMIN_COOKIE_SECURE=false go run ./cmd/guda-gateway
 ```
@@ -277,7 +286,8 @@ export GUDA_MASTER_KEY_PATH=/tmp/guda-gateway-master.key
 go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" db migrate
 go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" token init
 go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" gateway-key create --name dev
-# Paste provider secrets on stdin when prompted for provider-key add.
+# Paste provider secrets on stdin when prompted for provider-endpoint add
+# (requires --base-url; see Provider endpoint pairs).
 
 go run ./cmd/guda-gateway
 ```
@@ -285,13 +295,18 @@ go run ./cmd/guda-gateway
 ### Master key rotation
 
 If the master key file is replaced or rotated, all provider keys encrypted
-with the old key become undecryptable. Re-seed provider keys with:
+with the old key become undecryptable. Re-seed endpoint pairs with:
 
 ```bash
 printf '%s' "<provider-key>" | ./guda-gateway-admin \
   --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_PATH" \
-  provider-key add --provider <provider> --name <name>
+  provider-endpoint add --provider <provider> --name <name> --base-url <url>
 ```
+
+Or use `./scripts/seed-provider-keys.sh` after exporting env secrets; it calls
+`provider-endpoint add` with an explicit `--base-url` (from `$GROK_BASE_URL` /
+`$TAVILY_BASE_URL` / `$FIRECRAWL_BASE_URL` or the compiled default) and pipes
+keys on stdin only.
 
 The React admin UI lives in `web/admin`. During local frontend work, run the Go
 server and Vite dev server separately:
@@ -318,28 +333,243 @@ Smoke test (replace `<gateway-key>` with the value printed by `gateway-key creat
 curl -sS -H 'Authorization: Bearer <gateway-key>' http://127.0.0.1:8080/healthz
 ```
 
-## Provider key selection and cooldown
+## Provider endpoint pairs
+
+Every upstream credential is an **atomic endpoint pair**: one row owns both its
+`base_url` and encrypted API key. Runtime selection (`SelectEndpoint`) returns
+that pair together so retries never cross-wire key A to URL B.
+
+**Endpoint names are identifiers only** — they do not establish primary/backup
+roles or pool priority. Selection is sticky-winner + failure demotion (see
+below), ordered by demotion state and row id, never by name.
+
+### Creating pairs
+
+Canonical CLI (key on stdin only; never pass secrets as argv):
+
+```bash
+printf '%s' "$RAW_KEY" | guda-gateway-admin provider-endpoint add \
+  --provider grok|tavily|firecrawl \
+  --name NAME \
+  --base-url https://upstream.example/path
+```
+
+Canonical admin API: `POST /admin/api/provider-endpoints` with JSON
+`{provider, name, base_url, key}`. The raw key is accepted only on create/rotate
+and is never returned in list or UI responses.
+
+Other operations:
+
+| Action | CLI | Admin API |
+|---|---|---|
+| List | `provider-endpoint list` | `GET /admin/api/provider-endpoints` |
+| Edit URL | `provider-endpoint set-base-url --id ID --url URL` | `POST .../update-base-url` |
+| Rotate key | `provider-endpoint rotate-key --id ID` (stdin) | `POST .../rotate-key` |
+| Enable/disable/archive | `provider-endpoint enable\|disable\|archive\|... --id ID` | matching routes |
+
+Changing a row's base URL or rotating its key clears that row's cooldown and
+demotion (prior failure state described the old pair) while preserving row ID,
+counters, and quota history.
+
+### Provider defaults
+
+`provider_settings.base_url` (and admin **Provider Endpoints** → collapsed
+**New endpoint defaults**) is only a **creation default** for new rows (and for
+the legacy `provider-key add` compatibility path). Changing a provider default
+does **not** mutate existing endpoint rows and does not re-route live traffic.
+
+Compiled defaults when settings are unset:
+
+| Provider | Default base URL |
+|---|---|
+| grok | `https://api.x.ai/v1` |
+| tavily | `https://api.tavily.com` |
+| firecrawl | `https://api.firecrawl.dev/v2` |
+
+Shared-base seeding (`scripts/seed-provider-keys.sh`) passes an explicit
+`--base-url` on every create (env override `GROK_BASE_URL` /
+`TAVILY_BASE_URL` / `FIRECRAWL_BASE_URL`, else the compiled default). Keys are
+piped on stdin; heterogeneous multi-URL setups are repeated CLI calls, not
+parallel URL/key arrays.
+
+### Migration 0008
+
+Migration `0008` adds `provider_keys.base_url TEXT NOT NULL DEFAULT ''` and
+backfills each existing row from its provider's configured default, falling
+back to the compiled default. Row IDs and encrypted key material are unchanged.
+After migration, every row is a self-contained endpoint pair.
+
+### URL validation
+
+`NormalizeBaseURL` rejects:
+
+- non-`http`/`https` schemes
+- missing host
+- embedded userinfo (credentials in the URL)
+- query strings
+- fragments
+
+Trailing slashes are stripped; configured path prefixes are preserved.
+
+### Compatibility aliases (`v0.4.x`)
+
+Canonical surfaces land in the `v0.4.0` line:
+
+- CLI: `provider-endpoint …`
+- API: `/admin/api/provider-endpoints…`
+- Admin UI: **Provider Endpoints** (defaults labeled separately)
+
+Key-named aliases remain through **`v0.4.x`** and are not removed before
+**`v0.5.0`**:
+
+- CLI: `provider-key add|list|…` (add snapshots the provider default base URL)
+- API: `/admin/api/provider-keys…` (create without `base_url` uses the default)
+- Stable row IDs and compatibility JSON identifiers
+
+Compatibility mutations delegate to the same service as the canonical commands.
+
+## Endpoint quota sidecars
+
+Each endpoint row also owns an optional **quota sidecar** — configuration for
+how (or whether) plan/credit usage is refreshed for that row. Inference routing
+and quota refresh are independent:
+
+```text
+Inference: SelectEndpoint(provider) -> row base_url + inference key
+           -> cooldown / last_failed_at demotion on cool-policy failures
+
+Quota:     ResolveEndpointQuota(id) -> mode/flow + credentials
+           -> updates provider_key_quota_cache only
+```
+
+**Quota failures never cool, demote, disable, or reorder inference endpoints.**
+Inference failures never erase quota configuration or cache history.
+
+### Quota modes and flows
+
+| Mode | Credentials used | When to use |
+|---|---|---|
+| `disabled` | none | No quota refresh (Grok create default) |
+| `endpoint_credentials` | row inference `base_url` + key | Tavily/Firecrawl create default |
+| `separate_credentials` | `quota_base_url` + encrypted quota key | Grok via New API inference + owning Grok2API admin |
+
+| Flow | Provider |
+|---|---|
+| `grok2api_admin` | grok |
+| `tavily_usage` | tavily |
+| `firecrawl_credit_usage` | firecrawl |
+
+Creation defaults (migration `0009` backfill matches these):
+
+| Provider | Quota mode | Quota flow |
+|---|---|---|
+| Grok | `disabled` | `grok2api_admin` |
+| Tavily | `endpoint_credentials` | `tavily_usage` |
+| Firecrawl | `endpoint_credentials` | `firecrawl_credit_usage` |
+
+Grok often routes **inference** through a New API URL/token while **quota** must
+hit the matching Grok2API admin URL and admin key for that deployment. Use
+`separate_credentials` so each Grok endpoint row keeps its own quota URL/key and
+two rows cannot cross-use credentials.
+
+Tavily and Firecrawl normally reuse the same URL and key used for inference
+(`endpoint_credentials`).
+
+### Configuring quota (CLI)
+
+```bash
+# Create Grok with separate quota (inference key on stdin; quota key via file or
+# second prompt — never as argv):
+printf '%s' "$INF_KEY" | guda-gateway-admin provider-endpoint add \
+  --provider grok --name new-api-sg \
+  --base-url https://new-api.example/v1 \
+  --quota-mode separate_credentials \
+  --quota-flow grok2api_admin \
+  --quota-base-url https://grok2api.example \
+  --quota-key-file /path/to/quota.key
+
+# Change mode/flow/URL without rotating secrets:
+guda-gateway-admin provider-endpoint set-quota \
+  --id ID --mode separate_credentials --flow grok2api_admin \
+  --base-url https://grok2api.example
+
+# Rotate only the separate quota key (stdin):
+printf '%s' "$QUOTA_KEY" | guda-gateway-admin provider-endpoint rotate-quota-key --id ID
+
+# List includes safe quota metadata only (mode, flow, URL, configured flag, prefix):
+guda-gateway-admin provider-endpoint list
+```
+
+Admin API:
+
+| Action | Route |
+|---|---|
+| Create with nested `quota` | `POST /admin/api/provider-endpoints` |
+| Update mode/flow/URL | `POST /admin/api/provider-endpoints/{id}/update-quota` |
+| Rotate separate quota key | `POST /admin/api/provider-endpoints/{id}/rotate-quota-key` |
+
+List responses expose only safe fields: mode, flow, normalized quota URL, whether
+a separate key is configured, and prefix/fingerprint. Raw and encrypted keys are
+never returned.
+
+Switching away from `separate_credentials` deletes quota ciphertext and identity
+metadata. Switching back requires entering a new quota key.
+
+### Admin UI: configuration vs monitoring
+
+| Page | Route | Responsibility |
+|---|---|---|
+| **Provider Endpoints** | `/admin/provider-keys` | Create/edit endpoints, inference URL/key, quota mode/flow/URL, rotate keys, enable/disable/archive/delete, creation defaults |
+| **Provider Monitoring** | `/admin/providers` | Health tests, pool order/cooldown, inference vs quota status, refresh-one/refresh-all, Promote/Demote/Reset — **no** URL/credential/lifecycle editors |
+
+Quota operational vocabulary on monitoring: `disabled`, `not_configured`,
+`not_refreshed`, `available` / `ok`, or `refresh_failed` / `unavailable`.
+Refresh-all skips disabled quota sidecars and reports refreshed, failed, and
+skipped-disabled counts.
+
+### Legacy global Grok quota (`v0.4.x` compatibility)
+
+Provider-global Grok quota settings (`grok set-quota-mode`,
+`grok set-admin-base-url`, `grok set-admin-key`, and related admin APIs) remain
+readable and mutable through **`v0.4.x`** but are **deprecated**. They are
+**not** assigned to endpoint rows by migration `0009` and are **not** used by
+canonical per-endpoint quota refresh. Prefer `provider-endpoint set-quota` /
+`rotate-quota-key` (or the Provider Endpoints UI). Removal is not before
+**`v0.5.0`**.
+
+### Migration 0009
+
+Adds per-row `quota_mode`, `quota_flow`, `quota_base_url`, `encrypted_quota_key`,
+`quota_key_prefix`, and `quota_key_fingerprint`. Backfill sets provider defaults
+above; no row receives the legacy global Grok2API admin URL or key. Inference
+columns, row IDs, cooldowns, and demotion state are unchanged.
+
+## Provider endpoint selection and cooldown
 
 Runtime selection is **sticky winner + failure demotion**, not classic
 round-robin:
 
-1. Eligible keys: enabled, not archived, not actively cooling
+1. Eligible endpoints: enabled, not archived, not actively cooling
    (`cooldown_until` null or past).
 2. Order: never-failed first (`last_failed_at IS NULL`), then oldest
    `last_failed_at`, then lowest `id`.
 3. Cool-policy failures (429, Tavily plan-limit **432**, 5xx/408, 401/403,
-   network) set cooldown **and** `last_failed_at = now` so the key sorts to
+   network) set cooldown **and** `last_failed_at = now` so the pair sorts to
    the end after cool expires.
 4. Success clears demotion (`last_failed_at = NULL`).
 5. Defaults: rate/plan cool **60s**, transient **30s**, credential **1h**,
    `max_retries` **3** (overridable via SQLite settings).
+
+Quota cache state is **not** an input to selection. A row with zero remaining
+plan quota may still be selected for inference; operators use monitoring refresh
+and pool demotion/cooldown tools as needed.
 
 Tavily upstream **432** is stored as key health `plan_limit_exceeded` and
 mapped to client **429** `tavily_plan_limit_exceeded` only if all attempts fail.
 
 ### Admin pool controls
 
-On **Providers** (per-provider pool table) and **Provider Keys**:
+On **Provider Monitoring** (per-provider pool table) and **Provider Endpoints**:
 
 | Action | Effect |
 |---|---|
@@ -348,12 +578,12 @@ On **Providers** (per-provider pool table) and **Provider Keys**:
 | **Demote** | Sets `last_failed_at=now` (no cooldown) |
 | **Order** column | `front pack` vs `demoted · <time>` |
 
-CLI:
+CLI (canonical; `provider-key` aliases work the same through `v0.4.x`):
 
 ```bash
-guda-gateway-admin provider-key reset-cooldown --id ID
-guda-gateway-admin provider-key reset-selection --id ID
-guda-gateway-admin provider-key demote --id ID
+guda-gateway-admin provider-endpoint reset-cooldown --id ID
+guda-gateway-admin provider-endpoint reset-selection --id ID
+guda-gateway-admin provider-endpoint demote --id ID
 ```
 
 Pool STATUS `available` means enabled + not cooling + has a quota row. It does
@@ -367,7 +597,12 @@ Binary: `guda-gateway-admin`. Shared flags (before subcommand):
 - `--master-key` (default `/etc/code-guda-gateway/master.key`)
 
 Subcommands include `db migrate`, `token init|rotate|verify`, `gateway-key`,
-`provider-key` (including `reset-cooldown`, `reset-selection`, `demote`),
+`provider-endpoint` (canonical: add with `--base-url` and optional quota flags,
+list, set-base-url, rotate-key, set-quota, rotate-quota-key, reset-cooldown,
+reset-selection, demote, …),
+`provider-key` (compatibility alias through `v0.4.x`),
+`grok` (legacy global Grok settings; global quota subcommands deprecated through
+`v0.4.x`),
 `settings`, `audit`, and `usage` — run with no args for usage.
 `token init` and `token rotate` print the raw admin token once; pass
 `--save-env ~/.secrets/guda-gateway.env` in local dev to also persist

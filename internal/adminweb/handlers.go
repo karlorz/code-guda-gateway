@@ -47,6 +47,25 @@ type Handler struct {
 	api       http.Handler
 }
 
+// endpointQuotaRequest is the nested quota payload for create and update-quota.
+// Key is accepted only on create (separate_credentials); update-quota rejects it.
+type endpointQuotaRequest struct {
+	Mode    providers.QuotaMode `json:"mode"`
+	Flow    providers.QuotaFlow `json:"flow"`
+	BaseURL string              `json:"base_url"`
+	Key     string              `json:"key,omitempty"`
+}
+
+// endpointCreateRequest is the canonical POST /admin/api/provider-endpoints body.
+type endpointCreateRequest struct {
+	Provider string                `json:"provider"`
+	Name     string                `json:"name"`
+	BaseURL  string                `json:"base_url"`
+	Key      string                `json:"key"`
+	APIKey   string                `json:"api_key"`
+	Quota    *endpointQuotaRequest `json:"quota,omitempty"`
+}
+
 // New returns an http.Handler mounting admin routes.
 func New(d Deps) http.Handler {
 	tpl, err := template.ParseFS(templateFS, "templates/*.html")
@@ -225,6 +244,32 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 		h.handleGatewayKeysRevoke(w, r)
 	case strings.HasPrefix(path, "/admin/api/gateway-keys/") && r.Method == http.MethodDelete:
 		h.handleGatewayKeysDelete(w, r)
+	case path == "/admin/api/provider-endpoints" && r.Method == http.MethodGet:
+		h.handleProviderKeysList(w, r)
+	case path == "/admin/api/provider-endpoints" && r.Method == http.MethodPost:
+		h.handleProviderEndpointsCreate(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-endpoints/") && strings.HasSuffix(path, "/update-base-url") && r.Method == http.MethodPost:
+		h.handleProviderEndpointsUpdateBaseURL(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-endpoints/") && strings.HasSuffix(path, "/rotate-key") && r.Method == http.MethodPost:
+		h.handleProviderEndpointsRotateKey(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-endpoints/") && strings.HasSuffix(path, "/update-quota") && r.Method == http.MethodPost:
+		h.handleProviderEndpointsUpdateQuota(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-endpoints/") && strings.HasSuffix(path, "/rotate-quota-key") && r.Method == http.MethodPost:
+		h.handleProviderEndpointsRotateQuotaKey(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-endpoints/") && strings.HasSuffix(path, "/reset-cooldown") && r.Method == http.MethodPost:
+		h.handleProviderEndpointAction(w, r, "/reset-cooldown", h.deps.ProviderKeys.ResetCooldown)
+	case strings.HasPrefix(path, "/admin/api/provider-endpoints/") && strings.HasSuffix(path, "/reset-selection") && r.Method == http.MethodPost:
+		h.handleProviderEndpointAction(w, r, "/reset-selection", h.deps.ProviderKeys.ResetSelection)
+	case strings.HasPrefix(path, "/admin/api/provider-endpoints/") && strings.HasSuffix(path, "/demote") && r.Method == http.MethodPost:
+		h.handleProviderEndpointAction(w, r, "/demote", h.deps.ProviderKeys.DemoteToEnd)
+	case strings.HasPrefix(path, "/admin/api/provider-endpoints/") && strings.HasSuffix(path, "/archive") && r.Method == http.MethodPost:
+		h.handleProviderEndpointAction(w, r, "/archive", h.deps.ProviderKeys.Archive)
+	case strings.HasPrefix(path, "/admin/api/provider-endpoints/") && strings.HasSuffix(path, "/restore") && r.Method == http.MethodPost:
+		h.handleProviderEndpointAction(w, r, "/restore", h.deps.ProviderKeys.RestoreArchived)
+	case strings.HasPrefix(path, "/admin/api/provider-endpoints/") && r.Method == http.MethodPatch:
+		h.handleProviderEndpointsPatch(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-endpoints/") && r.Method == http.MethodDelete:
+		h.handleProviderEndpointsDelete(w, r)
 	case path == "/admin/api/provider-keys" && r.Method == http.MethodGet:
 		h.handleProviderKeysList(w, r)
 	case path == "/admin/api/provider-keys" && r.Method == http.MethodPost:
@@ -509,14 +554,26 @@ func (h *Handler) handleProviderKeysCreate(w http.ResponseWriter, r *http.Reques
 		Provider string `json:"provider"`
 		Name     string `json:"name"`
 		Key      string `json:"key"`
+		APIKey   string `json:"api_key"`
+		BaseURL  string `json:"base_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	display, err := h.deps.ProviderKeys.Add(body.Provider, body.Name, body.Key)
+	rawKey := body.Key
+	if rawKey == "" {
+		rawKey = body.APIKey
+	}
+	var display providers.DisplayProviderKey
+	var err error
+	if strings.TrimSpace(body.BaseURL) != "" {
+		display, err = h.deps.ProviderKeys.AddEndpoint(body.Provider, body.Name, body.BaseURL, rawKey)
+	} else {
+		display, err = h.deps.ProviderKeys.Add(body.Provider, body.Name, rawKey)
+	}
 	if err != nil {
-		if errors.Is(err, providers.ErrDuplicateName) || errors.Is(err, providers.ErrUnknownProvider) {
+		if errors.Is(err, providers.ErrDuplicateName) || errors.Is(err, providers.ErrUnknownProvider) || errors.Is(err, providers.ErrInvalidBaseURL) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -531,6 +588,357 @@ func (h *Handler) handleProviderKeysCreate(w http.ResponseWriter, r *http.Reques
 		Detail:     "provider=" + body.Provider + ";name=" + body.Name,
 	})
 	writeJSON(w, http.StatusOK, display)
+}
+
+func (h *Handler) handleProviderEndpointsCreate(w http.ResponseWriter, r *http.Request) {
+	var body endpointCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	rawKey := body.Key
+	if rawKey == "" {
+		rawKey = body.APIKey
+	}
+	if strings.TrimSpace(body.BaseURL) == "" || body.Provider == "" || body.Name == "" || rawKey == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	var display providers.DisplayProviderKey
+	var err error
+	if body.Quota != nil {
+		display, err = h.deps.ProviderKeys.AddEndpointWithQuota(body.Provider, body.Name, body.BaseURL, rawKey, providers.EndpointQuotaInput{
+			Mode:    body.Quota.Mode,
+			Flow:    body.Quota.Flow,
+			BaseURL: body.Quota.BaseURL,
+			RawKey:  body.Quota.Key,
+		})
+	} else {
+		display, err = h.deps.ProviderKeys.AddEndpoint(body.Provider, body.Name, body.BaseURL, rawKey)
+	}
+	if err != nil {
+		if errors.Is(err, providers.ErrDuplicateName) || errors.Is(err, providers.ErrUnknownProvider) ||
+			errors.Is(err, providers.ErrInvalidBaseURL) || errors.Is(err, providers.ErrInvalidQuotaConfig) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	detail := "provider=" + body.Provider + ";name=" + body.Name + ";base_url=" + display.BaseURL +
+		";quota_mode=" + string(display.QuotaMode) + ";quota_flow=" + string(display.QuotaFlow)
+	if display.QuotaBaseURL != nil {
+		detail += ";quota_base_url=" + *display.QuotaBaseURL
+	}
+	_ = h.deps.Audit.Record(audit.AuditEvent{
+		ActorKind:  "admin_web",
+		Action:     "provider_endpoint.add",
+		TargetKind: "provider_endpoint",
+		TargetID:   strconv.FormatInt(display.ID, 10),
+		Detail:     detail,
+	})
+	writeJSON(w, http.StatusOK, display)
+}
+
+func (h *Handler) handleProviderEndpointsUpdateBaseURL(w http.ResponseWriter, r *http.Request) {
+	id, err := parseActionID(r.URL.Path, "/admin/api/provider-endpoints/", "/update-base-url")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	var body struct {
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BaseURL) == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	row, err := h.deps.ProviderKeys.Get(id)
+	if err != nil {
+		if errors.Is(err, providers.ErrProviderKeyNotFound) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", "provider endpoint not found")
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if err := h.deps.ProviderKeys.UpdateBaseURL(id, body.BaseURL); err != nil {
+		if errors.Is(err, providers.ErrInvalidBaseURL) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		if errors.Is(err, providers.ErrProviderKeyNotFound) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", "provider endpoint not found")
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	updated, err := h.deps.ProviderKeys.Get(id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	_ = h.deps.Audit.Record(audit.AuditEvent{
+		ActorKind:  "admin_web",
+		Action:     "provider_endpoint.update_base_url",
+		TargetKind: "provider_endpoint",
+		TargetID:   strconv.FormatInt(id, 10),
+		Detail:     "provider=" + row.Provider + ";name=" + row.Name + ";base_url=" + updated.BaseURL,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "base_url": updated.BaseURL})
+}
+
+func (h *Handler) handleProviderEndpointsRotateKey(w http.ResponseWriter, r *http.Request) {
+	id, err := parseActionID(r.URL.Path, "/admin/api/provider-endpoints/", "/rotate-key")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	var body struct {
+		Key    string `json:"key"`
+		APIKey string `json:"api_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	rawKey := body.Key
+	if rawKey == "" {
+		rawKey = body.APIKey
+	}
+	if rawKey == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	row, err := h.deps.ProviderKeys.Get(id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if err := h.deps.ProviderKeys.RotateKey(id, rawKey); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	updated, err := h.deps.ProviderKeys.Get(id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	_ = h.deps.Audit.Record(audit.AuditEvent{
+		ActorKind:  "admin_web",
+		Action:     "provider_endpoint.rotate_key",
+		TargetKind: "provider_endpoint",
+		TargetID:   strconv.FormatInt(id, 10),
+		Detail:     "provider=" + row.Provider + ";name=" + row.Name + ";fingerprint=" + updated.Fingerprint,
+	})
+	// Never return raw key material.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "ok",
+		"id":          updated.ID,
+		"key_prefix":  updated.KeyPrefix,
+		"fingerprint": updated.Fingerprint,
+	})
+}
+
+func (h *Handler) handleProviderEndpointsUpdateQuota(w http.ResponseWriter, r *http.Request) {
+	id, err := parseActionID(r.URL.Path, "/admin/api/provider-endpoints/", "/update-quota")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	var body endpointQuotaRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	// update-quota is metadata-only; reject secret field so operators use rotate-quota-key.
+	if strings.TrimSpace(body.Key) != "" {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "update-quota does not accept a key; use rotate-quota-key")
+		return
+	}
+	row, err := h.deps.ProviderKeys.Get(id)
+	if err != nil {
+		if errors.Is(err, providers.ErrProviderKeyNotFound) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", "provider endpoint not found")
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if err := h.deps.ProviderKeys.UpdateEndpointQuota(id, providers.EndpointQuotaInput{
+		Mode:    body.Mode,
+		Flow:    body.Flow,
+		BaseURL: body.BaseURL,
+	}); err != nil {
+		if errors.Is(err, providers.ErrInvalidQuotaConfig) || errors.Is(err, providers.ErrInvalidBaseURL) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		if errors.Is(err, providers.ErrProviderKeyNotFound) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", "provider endpoint not found")
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	updated, err := h.deps.ProviderKeys.Get(id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	detail := "provider=" + row.Provider + ";name=" + row.Name +
+		";quota_mode=" + string(updated.QuotaMode) + ";quota_flow=" + string(updated.QuotaFlow)
+	if updated.QuotaBaseURL != nil {
+		detail += ";quota_base_url=" + *updated.QuotaBaseURL
+	}
+	_ = h.deps.Audit.Record(audit.AuditEvent{
+		ActorKind:  "admin_web",
+		Action:     "provider_endpoint.update_quota",
+		TargetKind: "provider_endpoint",
+		TargetID:   strconv.FormatInt(id, 10),
+		Detail:     detail,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":                "ok",
+		"id":                    updated.ID,
+		"quota_mode":            updated.QuotaMode,
+		"quota_flow":            updated.QuotaFlow,
+		"quota_base_url":        updated.QuotaBaseURL,
+		"quota_key_configured":  updated.QuotaKeyConfigured,
+		"quota_key_prefix":      updated.QuotaKeyPrefix,
+		"quota_key_fingerprint": updated.QuotaKeyFingerprint,
+	})
+}
+
+func (h *Handler) handleProviderEndpointsRotateQuotaKey(w http.ResponseWriter, r *http.Request) {
+	id, err := parseActionID(r.URL.Path, "/admin/api/provider-endpoints/", "/rotate-quota-key")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	var body struct {
+		Key string `json:"key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	if strings.TrimSpace(body.Key) == "" {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "key required")
+		return
+	}
+	row, err := h.deps.ProviderKeys.Get(id)
+	if err != nil {
+		if errors.Is(err, providers.ErrProviderKeyNotFound) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", "provider endpoint not found")
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if err := h.deps.ProviderKeys.RotateEndpointQuotaKey(id, body.Key); err != nil {
+		if errors.Is(err, providers.ErrInvalidQuotaConfig) || errors.Is(err, providers.ErrProviderKeyNotFound) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	updated, err := h.deps.ProviderKeys.Get(id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	fp := ""
+	if updated.QuotaKeyFingerprint != nil {
+		fp = *updated.QuotaKeyFingerprint
+	}
+	_ = h.deps.Audit.Record(audit.AuditEvent{
+		ActorKind:  "admin_web",
+		Action:     "provider_endpoint.rotate_quota_key",
+		TargetKind: "provider_endpoint",
+		TargetID:   strconv.FormatInt(id, 10),
+		Detail:     "provider=" + row.Provider + ";name=" + row.Name + ";quota_fingerprint=" + fp,
+	})
+	// Never return raw key material.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":                "ok",
+		"id":                    updated.ID,
+		"quota_key_prefix":      updated.QuotaKeyPrefix,
+		"quota_key_fingerprint": updated.QuotaKeyFingerprint,
+		"quota_key_configured":  updated.QuotaKeyConfigured,
+	})
+}
+
+func (h *Handler) handleProviderEndpointsPatch(w http.ResponseWriter, r *http.Request) {
+	id, err := parseProviderEndpointID(r.URL.Path)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Enabled *bool  `json:"enabled"`
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	switch {
+	case strings.TrimSpace(body.BaseURL) != "":
+		if err := h.deps.ProviderKeys.UpdateBaseURL(id, body.BaseURL); err != nil {
+			if errors.Is(err, providers.ErrInvalidBaseURL) {
+				writeAPIError(w, http.StatusBadRequest, "bad_request", err.Error())
+				return
+			}
+			if errors.Is(err, providers.ErrProviderKeyNotFound) {
+				writeAPIError(w, http.StatusBadRequest, "bad_request", "provider endpoint not found")
+				return
+			}
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	case body.Enabled != nil && *body.Enabled:
+		err = h.deps.ProviderKeys.Enable(id)
+	case body.Enabled != nil && !*body.Enabled:
+		err = h.deps.ProviderKeys.Disable(id)
+	default:
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) handleProviderEndpointsDelete(w http.ResponseWriter, r *http.Request) {
+	id, err := parseProviderEndpointID(r.URL.Path)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := h.deps.ProviderKeys.Delete(id); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) handleProviderEndpointAction(w http.ResponseWriter, r *http.Request, suffix string, action func(int64) error) {
+	id, err := parseActionID(r.URL.Path, "/admin/api/provider-endpoints/", suffix)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	if err := action(id); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) handleProviderKeysPatch(w http.ResponseWriter, r *http.Request) {
@@ -622,6 +1030,10 @@ func (h *Handler) handleGrokPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.deps.Settings.SetBaseURL(providers.ProviderGrok, body.BaseURL); err != nil {
+		if errors.Is(err, providers.ErrInvalidBaseURL) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -657,6 +1069,10 @@ func (h *Handler) handleProviderSettingsPatch(w http.ResponseWriter, r *http.Req
 	if err := h.deps.Settings.SetBaseURL(provider, body.BaseURL); err != nil {
 		if errors.Is(err, providers.ErrUnknownProvider) {
 			writeAPIError(w, http.StatusBadRequest, "bad_request", "unknown provider")
+			return
+		}
+		if errors.Is(err, providers.ErrInvalidBaseURL) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -902,6 +1318,15 @@ func parseIDSuffix(path, prefix string) (int64, error) {
 
 func parseProviderKeyID(path string) (int64, error) {
 	path = strings.TrimPrefix(path, "/admin/api/provider-keys/")
+	path = strings.TrimSuffix(path, "/")
+	if i := strings.Index(path, "/"); i >= 0 {
+		path = path[:i]
+	}
+	return strconv.ParseInt(path, 10, 64)
+}
+
+func parseProviderEndpointID(path string) (int64, error) {
+	path = strings.TrimPrefix(path, "/admin/api/provider-endpoints/")
 	path = strings.TrimSuffix(path, "/")
 	if i := strings.Index(path, "/"); i >= 0 {
 		path = path[:i]

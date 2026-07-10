@@ -85,15 +85,22 @@ type KeyQuotaRefreshResult struct {
 
 // RefreshAllKeyQuotasResult aggregates RefreshAllKeys outcomes for one provider.
 type RefreshAllKeyQuotasResult struct {
-	Provider        string                  `json:"provider"`
-	Attempted       int                     `json:"attempted"`
-	Succeeded       int                     `json:"succeeded"`
-	Failed          int                     `json:"failed"`
-	SkippedCooldown int                     `json:"skipped_cooldown"`
-	SkippedDisabled int                     `json:"skipped_disabled"`
-	SkippedArchived int                     `json:"skipped_archived"`
-	KeyResults      []KeyQuotaRefreshResult `json:"key_results"`
+	Provider             string                  `json:"provider"`
+	Attempted            int                     `json:"attempted"`
+	Succeeded            int                     `json:"succeeded"`
+	Failed               int                     `json:"failed"`
+	SkippedCooldown      int                     `json:"skipped_cooldown"`
+	SkippedDisabled      int                     `json:"skipped_disabled"`
+	SkippedArchived      int                     `json:"skipped_archived"`
+	SkippedNotConfigured int                     `json:"skipped_not_configured"`
+	KeyResults           []KeyQuotaRefreshResult `json:"key_results"`
 }
+
+// Quota operational snapshot sources for non-HTTP outcomes.
+const (
+	QuotaSourceDisabled      = "quota_disabled"
+	QuotaSourceNotConfigured = "quota_not_configured"
+)
 
 func (r *QuotaRefresher) Refresh(ctx context.Context, provider string) (QuotaCache, error) {
 	if err := validateProvider(provider); err != nil {
@@ -119,23 +126,18 @@ func (r *QuotaRefresher) Refresh(ctx context.Context, provider string) (QuotaCac
 	}
 }
 
-// RefreshKey fetches quota for one specific provider key and upserts provider_key_quota_cache.
-// Does not call SelectKey; the admin chose the exact row.
-// On decrypt/HTTP/parse failure returns an available=false snapshot with nil error
-// (matches provider-level Refresh failure philosophy), unless Upsert itself fails.
+// RefreshKey fetches quota for one specific provider endpoint using its quota
+// sidecar (ResolveEndpointQuota). Does not call SelectKey; the admin chose the
+// exact row. On decrypt/HTTP/parse failure returns an available=false snapshot
+// with nil error (matches provider-level Refresh failure philosophy), unless
+// Upsert itself fails. Never mutates inference routing columns
+// (last_failed_at, cooldown, enabled, archived, order).
 func (r *QuotaRefresher) RefreshKey(ctx context.Context, providerKeyID int64) (ProviderKeyQuota, error) {
 	display, err := r.ProviderKeys.Get(providerKeyID)
 	if err != nil {
 		return ProviderKeyQuota{}, err
 	}
-	var q ProviderKeyQuota
-	raw, err := r.ProviderKeys.RawKey(providerKeyID)
-	if err != nil {
-		q = keyQuotaFailure(display, "quota_refresh", err)
-	} else {
-		qc := r.refreshProviderWithRawKey(ctx, display.Provider, providerKeyID, raw)
-		q = providerKeyQuotaFromCache(providerKeyID, qc)
-	}
+	q := r.refreshKeyFromSidecar(ctx, display)
 	if r.KeyQuotas != nil {
 		if err := r.KeyQuotas.Upsert(q); err != nil {
 			return ProviderKeyQuota{}, err
@@ -144,8 +146,41 @@ func (r *QuotaRefresher) RefreshKey(ctx context.Context, providerKeyID int64) (P
 	return q, nil
 }
 
-// RefreshAllKeys walks every key for a provider, skipping archived/disabled/cooling rows,
-// and RefreshKey's the rest.
+// refreshKeyFromSidecar resolves the owning endpoint's quota credentials and
+// dispatches the configured flow. Disabled / not-configured return operational
+// snapshots without HTTP.
+func (r *QuotaRefresher) refreshKeyFromSidecar(ctx context.Context, display DisplayProviderKey) ProviderKeyQuota {
+	now := r.nowUTC()
+	checked := now.Format(time.RFC3339Nano)
+	expires := now.Add(quotaCacheTTL).Format(time.RFC3339Nano)
+
+	resolved, err := r.ProviderKeys.ResolveEndpointQuota(display.ID)
+	switch {
+	case errors.Is(err, ErrQuotaDisabled):
+		return operationalProviderKeyQuota(display, QuotaSourceDisabled, "quota refresh disabled for this endpoint", checked, expires)
+	case errors.Is(err, ErrQuotaNotConfigured):
+		return operationalProviderKeyQuota(display, QuotaSourceNotConfigured, "quota credentials not configured for this endpoint", checked, expires)
+	case err != nil:
+		return keyQuotaFailure(display, "quota_resolution", checked, expires, err)
+	}
+
+	var qc QuotaCache
+	switch resolved.Flow {
+	case QuotaFlowGrok2APIAdmin:
+		qc = r.refreshGrok2APIEndpoint(ctx, resolved, checked, expires)
+	case QuotaFlowTavilyUsage:
+		qc = r.refreshTavilyEndpoint(ctx, resolved, checked, expires)
+	case QuotaFlowFirecrawlCreditUsage:
+		qc = r.refreshFirecrawlEndpoint(ctx, resolved, checked, expires)
+	default:
+		return keyQuotaFailure(display, "quota_flow", checked, expires, ErrInvalidQuotaConfig)
+	}
+	return providerKeyQuotaFromCache(display.ID, qc)
+}
+
+// RefreshAllKeys walks every key for a provider, skipping archived/disabled/cooling
+// rows and quota sidecars that are disabled or not configured, then refreshes
+// the rest. Reuses List display rows (no extra Get) before ResolveEndpointQuota.
 func (r *QuotaRefresher) RefreshAllKeys(ctx context.Context, provider string) (RefreshAllKeyQuotasResult, error) {
 	var out RefreshAllKeyQuotasResult
 	out.Provider = provider
@@ -167,9 +202,27 @@ func (r *QuotaRefresher) RefreshAllKeys(ctx context.Context, provider string) (R
 			out.KeyResults = append(out.KeyResults, KeyQuotaRefreshResult{ProviderKeyID: key.ID, Provider: provider, SkippedReason: &reason})
 			continue
 		}
+		// Quota sidecar operational skips (distinct from inference enable/disable).
+		if key.QuotaMode == QuotaDisabled {
+			reason := "quota_disabled"
+			out.SkippedDisabled++
+			out.KeyResults = append(out.KeyResults, KeyQuotaRefreshResult{ProviderKeyID: key.ID, Provider: provider, SkippedReason: &reason})
+			continue
+		}
+		if key.QuotaMode == QuotaSeparateCredentials && !key.QuotaKeyConfigured {
+			reason := "quota_not_configured"
+			out.SkippedNotConfigured++
+			out.KeyResults = append(out.KeyResults, KeyQuotaRefreshResult{ProviderKeyID: key.ID, Provider: provider, SkippedReason: &reason})
+			continue
+		}
 		out.Attempted++
-		q, err := r.RefreshKey(ctx, key.ID)
-		if err != nil || !q.Available {
+		q := r.refreshKeyFromSidecar(ctx, key)
+		if r.KeyQuotas != nil {
+			if err := r.KeyQuotas.Upsert(q); err != nil {
+				return out, err
+			}
+		}
+		if !q.Available {
 			out.Failed++
 		} else {
 			out.Succeeded++
@@ -179,45 +232,52 @@ func (r *QuotaRefresher) RefreshAllKeys(ctx context.Context, provider string) (R
 	return out, nil
 }
 
-// refreshProviderWithRawKey runs the provider-specific quota endpoint using a known raw key.
-// For Tavily/Firecrawl this hits the per-key usage endpoint with that bearer.
-// For Grok, per-key raw keys are not used for quota (admin token path); we attribute the
-// admin-token pool snapshot to the chosen key id so a ProviderKeyQuota row still lands.
-func (r *QuotaRefresher) refreshProviderWithRawKey(ctx context.Context, provider string, keyID int64, rawKey string) QuotaCache {
-	now := r.nowUTC()
-	checked := now.Format(time.RFC3339Nano)
-	expires := now.Add(quotaCacheTTL).Format(time.RFC3339Nano)
+// refreshTavilyEndpoint performs Tavily /usage using resolved endpoint quota credentials.
+func (r *QuotaRefresher) refreshTavilyEndpoint(ctx context.Context, resolved ResolvedEndpointQuota, checked, expires string) QuotaCache {
+	ep := SelectedEndpoint{ID: resolved.EndpointID, Provider: resolved.Provider, BaseURL: resolved.BaseURL, APIKey: resolved.APIKey}
+	return r.refreshProviderHTTPWithEndpoint(ctx, ProviderTavily, "tavily_usage", "/usage", checked, expires, ep, func(id *int64, body []byte) QuotaCache {
+		var payload tavilyUsageResponse
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return quotaMalformed(ProviderTavily, "tavily_usage", checked, expires, id)
+		}
+		return normalizeTavilyUsage(ProviderTavily, id, checked, expires, payload)
+	})
+}
 
-	switch provider {
-	case ProviderTavily:
-		return r.refreshProviderHTTPWithKey(ctx, ProviderTavily, "tavily_usage", "/usage", checked, expires, keyID, rawKey, func(id *int64, body []byte) QuotaCache {
-			var payload tavilyUsageResponse
-			if err := json.Unmarshal(body, &payload); err != nil {
-				return quotaMalformed(ProviderTavily, "tavily_usage", checked, expires, id)
-			}
-			return normalizeTavilyUsage(ProviderTavily, id, checked, expires, payload)
-		})
-	case ProviderFirecrawl:
-		return r.refreshProviderHTTPWithKey(ctx, ProviderFirecrawl, "firecrawl_credit_usage", "/team/credit-usage", checked, expires, keyID, rawKey, func(id *int64, body []byte) QuotaCache {
-			var payload firecrawlCreditUsageResponse
-			if err := json.Unmarshal(body, &payload); err != nil {
-				return quotaMalformed(ProviderFirecrawl, "firecrawl_credit_usage", checked, expires, id)
-			}
-			return normalizeFirecrawlCreditUsage(ProviderFirecrawl, id, checked, expires, payload)
-		})
-	case ProviderGrok:
-		// Grok quota is admin-token based, not per provider_keys raw key.
-		// Reuse the existing admin path and attribute the result to this key id.
-		qc, _ := r.refreshGrok2API(ctx, checked, expires)
-		qc.ProviderKeyID = &keyID
-		return qc
-	default:
-		return quotaFailure(provider, "quota_refresh", checked, expires, &keyID, ErrUnknownProvider)
+// refreshFirecrawlEndpoint performs Firecrawl credit-usage using resolved credentials.
+func (r *QuotaRefresher) refreshFirecrawlEndpoint(ctx context.Context, resolved ResolvedEndpointQuota, checked, expires string) QuotaCache {
+	ep := SelectedEndpoint{ID: resolved.EndpointID, Provider: resolved.Provider, BaseURL: resolved.BaseURL, APIKey: resolved.APIKey}
+	return r.refreshProviderHTTPWithEndpoint(ctx, ProviderFirecrawl, "firecrawl_credit_usage", "/team/credit-usage", checked, expires, ep, func(id *int64, body []byte) QuotaCache {
+		var payload firecrawlCreditUsageResponse
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return quotaMalformed(ProviderFirecrawl, "firecrawl_credit_usage", checked, expires, id)
+		}
+		return normalizeFirecrawlCreditUsage(ProviderFirecrawl, id, checked, expires, payload)
+	})
+}
+
+// refreshGrok2APIEndpoint performs Grok2API admin token quota using the owning
+// endpoint's separate admin URL and quota key (not provider Settings).
+func (r *QuotaRefresher) refreshGrok2APIEndpoint(ctx context.Context, resolved ResolvedEndpointQuota, checked, expires string) QuotaCache {
+	keyID := resolved.EndpointID
+	return r.fetchGrok2APIAdminTokens(ctx, resolved.BaseURL, resolved.APIKey, &keyID, checked, expires, true)
+}
+
+func operationalProviderKeyQuota(display DisplayProviderKey, source, message, checked, expires string) ProviderKeyQuota {
+	msg := message
+	return ProviderKeyQuota{
+		ProviderKeyID:   display.ID,
+		Provider:        display.Provider,
+		Source:          source,
+		Available:       false,
+		CheckedAt:       checked,
+		ExpiresAt:       expires,
+		MessageRedacted: &msg,
 	}
 }
 
 func providerKeyQuotaFromCache(providerKeyID int64, qc QuotaCache) ProviderKeyQuota {
-	q := ProviderKeyQuota{
+	return ProviderKeyQuota{
 		ProviderKeyID:   providerKeyID,
 		Provider:        qc.Provider,
 		Source:          qc.Source,
@@ -232,7 +292,6 @@ func providerKeyQuotaFromCache(providerKeyID int64, qc QuotaCache) ProviderKeyQu
 		MessageRedacted: qc.MessageRedacted,
 		Details:         qc.Details,
 	}
-	return q
 }
 
 func (r *QuotaRefresher) nowUTC() time.Time {
@@ -243,10 +302,7 @@ func (r *QuotaRefresher) nowUTC() time.Time {
 	return nowFn().UTC()
 }
 
-func keyQuotaFailure(display DisplayProviderKey, source string, err error) ProviderKeyQuota {
-	now := time.Now().UTC()
-	checked := now.Format(time.RFC3339Nano)
-	expires := now.Add(quotaCacheTTL).Format(time.RFC3339Nano)
+func keyQuotaFailure(display DisplayProviderKey, source, checked, expires string, err error) ProviderKeyQuota {
 	qc := quotaFailure(display.Provider, source, checked, expires, &display.ID, err)
 	return providerKeyQuotaFromCache(display.ID, qc)
 }
@@ -278,28 +334,35 @@ func (r *QuotaRefresher) refreshGrok2API(ctx context.Context, checked, expires s
 		}
 	}
 
+	return r.fetchGrok2APIAdminTokens(ctx, base, adminKey, nil, checked, expires, false), nil
+}
+
+// fetchGrok2APIAdminTokens POSTs best-effort batch refresh then GETs /admin/api/tokens.
+// When recordEvent is true and keyID is non-nil, writes MarkLastEvent only (never demotion).
+func (r *QuotaRefresher) fetchGrok2APIAdminTokens(ctx context.Context, base, adminKey string, keyID *int64, checked, expires string, recordEvent bool) QuotaCache {
 	adminBase := strings.TrimRight(base, "/")
 
-	// 1. POST /admin/api/batch/refresh?all_manageable=true (best-effort: forces
-	// upstream quota refresh but may time out or reject; we still read tokens below).
+	// 1. POST /admin/api/batch/refresh?all_manageable=true (best-effort).
 	batchURL := adminBase + "/admin/api/batch/refresh?all_manageable=true"
 	if _, _, err := r.postJSON(ctx, batchURL, adminKey, []byte(`{"tokens":[]}`)); err != nil {
-		// Non-fatal: continue to read cached tokens from /admin/api/tokens.
+		// Non-fatal: continue to read tokens.
 	}
 
 	// 2. GET /admin/api/tokens
 	tokensURL := adminBase + "/admin/api/tokens"
 	body, status, err := r.requestHTTP(ctx, http.MethodGet, tokensURL, adminKey)
+	if recordEvent && keyID != nil {
+		r.recordQuotaEvent(*keyID, status, err)
+	}
 	if err != nil {
-		return quotaHTTPFailure(ProviderGrok, "grok2api_admin_tokens", checked, expires, nil, status, err), nil
+		return quotaHTTPFailure(ProviderGrok, "grok2api_admin_tokens", checked, expires, keyID, status, err)
 	}
 
-	// 3. Normalize
 	var payload grok2APITokensResponse
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return quotaMalformed(ProviderGrok, "grok2api_admin_tokens", checked, expires, nil), nil
+		return quotaMalformed(ProviderGrok, "grok2api_admin_tokens", checked, expires, keyID)
 	}
-	return normalizeGrok2APITokens(ProviderGrok, nil, checked, expires, payload), nil
+	return normalizeGrok2APITokens(ProviderGrok, keyID, checked, expires, payload)
 }
 
 func grokAdminRequiredQuota(checked, expires string) QuotaCache {
@@ -346,27 +409,27 @@ func (r *QuotaRefresher) refreshProviderHTTP(
 	provider, source, pathSuffix, checked, expires string,
 	parse func(keyID *int64, body []byte) QuotaCache,
 ) (QuotaCache, error) {
-	keyID, rawKey, err := r.ProviderKeys.SelectKey(provider)
+	ep, err := r.ProviderKeys.SelectEndpoint(provider)
 	if err != nil {
 		return quotaFailure(provider, source, checked, expires, nil, err), nil
 	}
-	return r.refreshProviderHTTPWithKey(ctx, provider, source, pathSuffix, checked, expires, keyID, rawKey, parse), nil
+	return r.refreshProviderHTTPWithEndpoint(ctx, provider, source, pathSuffix, checked, expires, ep, parse), nil
 }
 
-// refreshProviderHTTPWithKey performs the quota HTTP call with a known raw key (no SelectKey).
-func (r *QuotaRefresher) refreshProviderHTTPWithKey(
+// refreshProviderHTTPWithEndpoint performs the quota HTTP call using the row-owned
+// BaseURL and APIKey from the same SelectedEndpoint (no Settings.GetBaseURL).
+func (r *QuotaRefresher) refreshProviderHTTPWithEndpoint(
 	ctx context.Context,
 	provider, source, pathSuffix, checked, expires string,
-	keyID int64,
-	rawKey string,
+	ep SelectedEndpoint,
 	parse func(keyID *int64, body []byte) QuotaCache,
 ) QuotaCache {
-	base, err := r.Settings.GetBaseURL(provider)
+	keyID := ep.ID
+	url, err := JoinEndpointURL(ep.BaseURL, pathSuffix, "")
 	if err != nil {
 		return quotaFailure(provider, source, checked, expires, &keyID, err)
 	}
-	url := strings.TrimRight(base, "/") + pathSuffix
-	body, status, err := r.getJSON(ctx, url, rawKey)
+	body, status, err := r.getJSON(ctx, url, ep.APIKey)
 	r.recordQuotaEvent(keyID, status, err)
 	if err != nil {
 		return quotaHTTPFailure(provider, source, checked, expires, &keyID, status, err)

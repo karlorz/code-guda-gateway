@@ -1,7 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { ProvidersPage } from './ProvidersPage';
+import { AdminLayout } from '../../routes/AdminLayout';
 import * as client from '../../api/client';
 
 vi.mock('../../api/client', async (importOriginal) => {
@@ -9,9 +11,24 @@ vi.mock('../../api/client', async (importOriginal) => {
   return { ...actual, apiFetch: vi.fn() };
 });
 
+vi.mock('../../api/session', () => ({
+  useSession: () => ({
+    authenticated: true,
+    loading: false,
+    login: vi.fn(),
+    logout: vi.fn(),
+    reset: vi.fn(),
+  }),
+  SessionProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
 function renderWithClient(ui: React.ReactElement) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter>{ui}</MemoryRouter>
+    </QueryClientProvider>,
+  );
 }
 
 function emptyPool(provider: string) {
@@ -30,101 +47,294 @@ function emptyPool(provider: string) {
   };
 }
 
-describe('ProvidersPage pools', () => {
+function defaultMock(path: string) {
+  if (path === '/admin/api/provider-health') {
+    return { items: [{ provider: 'tavily', status: 'healthy', key_count: 1, enabled_key_count: 1, cooldown_key_count: 0, reasons: [] }] };
+  }
+  if (path === '/admin/api/provider-quotas') {
+    return { items: [] };
+  }
+  if (path === '/admin/api/provider-pools/tavily?limit=25&offset=0') {
+    return {
+      provider: 'tavily',
+      summary: {
+        provider: 'tavily',
+        key_count: 3,
+        enabled_key_count: 3,
+        available_key_count: 2,
+        cooling_key_count: 1,
+        refreshed_key_count: 2,
+        known_remaining: 427,
+      },
+      items: [
+        {
+          status: 'cooling',
+          key: {
+            id: 5,
+            provider: 'tavily',
+            name: 'tavily-1',
+            fingerprint: '1c105c',
+            enabled: true,
+            cooldown_reason: 'plan_limit_exceeded',
+            last_failed_at: '2026-07-09T00:00:00Z',
+            quota_mode: 'endpoint_credentials',
+          },
+          quota: { provider_key_id: 5, provider: 'tavily', available: false, source: 'tavily_usage', checked_at: '2026-07-09T00:00:00Z' },
+        },
+        {
+          status: 'available',
+          key: {
+            id: 6,
+            provider: 'tavily',
+            name: 'tavily-2',
+            fingerprint: 'bce42f',
+            enabled: true,
+            quota_mode: 'endpoint_credentials',
+          },
+          quota: {
+            provider_key_id: 6,
+            provider: 'tavily',
+            available: true,
+            source: 'tavily_usage',
+            remaining: 427,
+            limit_value: 1000,
+            checked_at: '2026-07-09T00:01:00Z',
+          },
+        },
+      ],
+      page: { limit: 25, offset: 0, total: 3 },
+    };
+  }
+  if (path.startsWith('/admin/api/provider-pools/')) {
+    const provider = path.split('/')[4].split('?')[0];
+    return emptyPool(provider);
+  }
+  if (path === '/admin/api/provider-key-quotas/tavily/refresh-all') {
+    return {
+      provider: 'tavily',
+      attempted: 2,
+      succeeded: 1,
+      failed: 1,
+      skipped_disabled: 1,
+      skipped_not_configured: 0,
+    };
+  }
+  if (path === '/admin/api/provider-quotas/tavily/refresh') {
+    return { provider: 'tavily', available: true, source: 'tavily_usage' };
+  }
+  throw new Error(`unexpected path ${path}`);
+}
+
+describe('Provider Monitoring page', () => {
   afterEach(() => {
     cleanup();
   });
 
   beforeEach(() => {
     vi.mocked(client.apiFetch).mockReset();
+    vi.mocked(client.apiFetch).mockImplementation(async (path: string) => defaultMock(path));
+  });
+
+  it('renames Providers navigation and heading to Provider Monitoring', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={['/providers']}>
+          <AdminLayout />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(screen.getByRole('link', { name: /provider monitoring/i })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /^providers$/i })).not.toBeInTheDocument();
+
+    renderWithClient(<ProvidersPage />);
+    expect(await screen.findByRole('heading', { name: 'Provider Monitoring' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /^providers$/i })).not.toBeInTheDocument();
+  });
+
+  it('links to Manage Provider Endpoints', async () => {
+    renderWithClient(<ProvidersPage />);
+    const link = await screen.findByRole('link', { name: /manage provider endpoints/i });
+    expect(link).toHaveAttribute('href', '/provider-keys');
+  });
+
+  it('does not render provider creation-default forms', async () => {
+    renderWithClient(<ProvidersPage />);
+    await screen.findByRole('heading', { name: 'Provider Monitoring' });
+    expect(screen.queryByText(/default url for new endpoints/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/default url for new endpoints/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^save$/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/^settings$/i)).not.toBeInTheDocument();
+  });
+
+  it('shows inference, pool order, and quota as separate columns', async () => {
+    renderWithClient(<ProvidersPage />);
+    await screen.findByText('Tavily Pool');
+    // Three provider pools each render the same headers.
+    expect(screen.getAllByRole('columnheader', { name: /endpoint/i }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('columnheader', { name: /inference/i }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('columnheader', { name: /cooldown/i }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('columnheader', { name: /pool order/i }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('columnheader', { name: /^quota$/i }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('columnheader', { name: /checked/i }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('columnheader', { name: /actions/i }).length).toBeGreaterThan(0);
+  });
+
+  it('shows disabled and not configured quota states', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
-      if (path === '/admin/api/provider-settings') {
-        return { items: [{ provider: 'tavily', base_url: 'https://api.tavily.com' }] };
-      }
-      if (path === '/admin/api/provider-health') {
-        return { items: [{ provider: 'tavily', status: 'healthy', key_count: 1, enabled_key_count: 1, cooldown_key_count: 0, reasons: [] }] };
-      }
-      if (path === '/admin/api/provider-quotas') {
-        return { items: [] };
-      }
-      if (path === '/admin/api/provider-pools/tavily?limit=25&offset=0') {
+      if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
+      if (path === '/admin/api/provider-pools/grok?limit=25&offset=0') {
         return {
-          provider: 'tavily',
+          provider: 'grok',
           summary: {
-            provider: 'tavily',
-            key_count: 3,
-            enabled_key_count: 3,
+            provider: 'grok',
+            key_count: 2,
+            enabled_key_count: 2,
             available_key_count: 2,
-            cooling_key_count: 1,
-            refreshed_key_count: 2,
-            known_remaining: 427,
+            cooling_key_count: 0,
+            refreshed_key_count: 1,
           },
           items: [
             {
-              status: 'cooling',
-              key: { id: 5, provider: 'tavily', name: 'tavily-1', fingerprint: '1c105c', enabled: true, cooldown_reason: 'plan_limit_exceeded', last_failed_at: '2026-07-09T00:00:00Z' },
-              quota: { provider_key_id: 5, provider: 'tavily', available: false, source: 'tavily_usage', checked_at: '2026-07-09T00:00:00Z' },
+              status: 'available',
+              key: {
+                id: 10,
+                provider: 'grok',
+                name: 'grok-disabled-quota',
+                enabled: true,
+                quota_mode: 'disabled',
+              },
+              quota: {
+                provider_key_id: 10,
+                provider: 'grok',
+                available: false,
+                source: 'quota_disabled',
+                checked_at: '2026-07-09T00:00:00Z',
+                message_redacted: 'quota refresh disabled for this endpoint',
+              },
             },
             {
               status: 'available',
-              key: { id: 6, provider: 'tavily', name: 'tavily-2', fingerprint: 'bce42f', enabled: true },
-              quota: { provider_key_id: 6, provider: 'tavily', available: true, source: 'tavily_usage', remaining: 427, limit_value: 1000, checked_at: '2026-07-09T00:01:00Z' },
+              key: {
+                id: 11,
+                provider: 'grok',
+                name: 'grok-not-configured',
+                enabled: true,
+                quota_mode: 'separate_credentials',
+                quota_key_configured: false,
+              },
+              quota: {
+                provider_key_id: 11,
+                provider: 'grok',
+                available: false,
+                source: 'quota_not_configured',
+                checked_at: '2026-07-09T00:00:00Z',
+                message_redacted: 'quota credentials not configured for this endpoint',
+              },
             },
           ],
-          page: { limit: 25, offset: 0, total: 3 },
+          page: { limit: 25, offset: 0, total: 2 },
         };
       }
       if (path.startsWith('/admin/api/provider-pools/')) {
-        const provider = path.split('/')[4].split('?')[0];
-        return emptyPool(provider);
-      }
-      if (path === '/admin/api/provider-key-quotas/tavily/refresh-all') {
-        return {};
-      }
-      if (path === '/admin/api/provider-quotas/tavily/refresh') {
-        return { provider: 'tavily', available: true, source: 'tavily_usage' };
+        return emptyPool(path.split('/')[4].split('?')[0]);
       }
       throw new Error(`unexpected path ${path}`);
     });
+
+    renderWithClient(<ProvidersPage />);
+    await screen.findByText('Grok Pool');
+    expect(screen.getByText('grok-disabled-quota')).toBeInTheDocument();
+    expect(screen.getAllByText(/^disabled$/i).length).toBeGreaterThan(0);
+    expect(screen.getByText('grok-not-configured')).toBeInTheDocument();
+    expect(screen.getAllByText(/not configured/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/configure quota credentials/i)).toBeInTheDocument();
+
+    // Inference remains available even when quota is disabled/not configured.
+    const disabledRow = screen.getByText('grok-disabled-quota').closest('tr')!;
+    expect(within(disabledRow).getByText('available')).toBeInTheDocument();
+    expect(within(disabledRow).getAllByText(/^disabled$/i).length).toBeGreaterThan(0);
+  });
+
+  it('keeps provider tests, quota refresh, promote, demote, and reset controls', async () => {
+    renderWithClient(<ProvidersPage />);
+    await screen.findByText('Tavily Pool');
+    expect(screen.getByRole('button', { name: /select key/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /refresh all tavily keys/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /refresh sample for tavily/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /refresh key 6/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /promote key 5/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /demote key 6/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /reset cool and order for key 6/i })).toBeInTheDocument();
+  });
+
+  it('does not render URL, key, enable, archive, restore, delete, or create controls', async () => {
+    renderWithClient(<ProvidersPage />);
+    await screen.findByText('Tavily Pool');
+    expect(screen.queryByRole('button', { name: /add endpoint/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^enable$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^disable$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^archive$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^restore$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^delete$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^edit$/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^base url$/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^key$/i)).not.toBeInTheDocument();
+  });
+
+  it('reports refreshed failed and skipped-disabled refresh-all counts', async () => {
+    renderWithClient(<ProvidersPage />);
+    await screen.findByText('Tavily Pool');
+    fireEvent.click(screen.getByRole('button', { name: /refresh all tavily keys/i }));
+    await waitFor(() => {
+      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-key-quotas/tavily/refresh-all', { method: 'POST' });
+    });
+    expect(await screen.findByText(/Refreshed 1/)).toBeInTheDocument();
+    expect(screen.getByText(/Failed 1/)).toBeInTheDocument();
+    expect(screen.getByText(/Skipped disabled 1/)).toBeInTheDocument();
+  });
+
+  it('disables refresh-one when quota is disabled', async () => {
+    vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
+      if (path === '/admin/api/provider-pools/grok?limit=25&offset=0') {
+        return {
+          provider: 'grok',
+          summary: {
+            provider: 'grok',
+            key_count: 1,
+            enabled_key_count: 1,
+            available_key_count: 1,
+            cooling_key_count: 0,
+            refreshed_key_count: 1,
+          },
+          items: [
+            {
+              status: 'available',
+              key: { id: 10, provider: 'grok', name: 'grok-off', enabled: true, quota_mode: 'disabled' },
+              quota: {
+                provider_key_id: 10,
+                provider: 'grok',
+                available: false,
+                source: 'quota_disabled',
+                checked_at: '2026-07-09T00:00:00Z',
+              },
+            },
+          ],
+          page: { limit: 25, offset: 0, total: 1 },
+        };
+      }
+      if (path.startsWith('/admin/api/provider-pools/')) {
+        return emptyPool(path.split('/')[4].split('?')[0]);
+      }
+      throw new Error(`unexpected path ${path}`);
+    });
+    renderWithClient(<ProvidersPage />);
+    await screen.findByText('grok-off');
+    expect(screen.getByRole('button', { name: /refresh key 10/i })).toBeDisabled();
   });
 
   it('shows provider pool summary and paginated key rows', async () => {
-    vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
-      if (path === '/admin/api/provider-settings') return { items: [] };
-      if (path === '/admin/api/provider-health') return { items: [] };
-      if (path === '/admin/api/provider-quotas') return { items: [] };
-      if (path === '/admin/api/provider-pools/tavily?limit=25&offset=0') {
-        return {
-          provider: 'tavily',
-          summary: {
-            provider: 'tavily',
-            key_count: 3,
-            enabled_key_count: 3,
-            available_key_count: 2,
-            cooling_key_count: 1,
-            refreshed_key_count: 2,
-            known_remaining: 427,
-          },
-          items: [
-            {
-              status: 'cooling',
-              key: { id: 5, provider: 'tavily', name: 'tavily-1', fingerprint: '1c105c', enabled: true, cooldown_reason: 'plan_limit_exceeded', last_failed_at: '2026-07-09T00:00:00Z' },
-              quota: { provider_key_id: 5, provider: 'tavily', available: false, source: 'tavily_usage', checked_at: '2026-07-09T00:00:00Z' },
-            },
-            {
-              status: 'available',
-              key: { id: 6, provider: 'tavily', name: 'tavily-2', fingerprint: 'bce42f', enabled: true },
-              quota: { provider_key_id: 6, provider: 'tavily', available: true, source: 'tavily_usage', remaining: 427, limit_value: 1000, checked_at: '2026-07-09T00:01:00Z' },
-            },
-          ],
-          page: { limit: 25, offset: 0, total: 3 },
-        };
-      }
-      if (path.startsWith('/admin/api/provider-pools/')) {
-        return { provider: path.split('/')[4].split('?')[0], summary: {}, items: [], page: { limit: 25, offset: 0, total: 0 } };
-      }
-      throw new Error(`unexpected path ${path}`);
-    });
     renderWithClient(<ProvidersPage />);
     expect(await screen.findByText('Tavily Pool')).toBeInTheDocument();
     expect(screen.getByText(/Enabled 3/)).toBeInTheDocument();
@@ -135,7 +345,6 @@ describe('ProvidersPage pools', () => {
 
   it('does not show provider-wide quota errors when pool key quotas are refreshed', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
-      if (path === '/admin/api/provider-settings') return { items: [] };
       if (path === '/admin/api/provider-health') return { items: [] };
       if (path === '/admin/api/provider-quotas') {
         return {
@@ -166,7 +375,15 @@ describe('ProvidersPage pools', () => {
           items: [
             {
               status: 'available',
-              key: { id: 7, provider: 'grok', name: 'grok2api', fingerprint: 'aabbcc', enabled: true },
+              key: {
+                id: 7,
+                provider: 'grok',
+                name: 'grok2api',
+                fingerprint: 'aabbcc',
+                enabled: true,
+                quota_mode: 'separate_credentials',
+                quota_key_configured: true,
+              },
               quota: {
                 provider_key_id: 7,
                 provider: 'grok',
@@ -182,7 +399,7 @@ describe('ProvidersPage pools', () => {
         };
       }
       if (path.startsWith('/admin/api/provider-pools/')) {
-        return { provider: path.split('/')[4].split('?')[0], summary: {}, items: [], page: { limit: 25, offset: 0, total: 0 } };
+        return emptyPool(path.split('/')[4].split('?')[0]);
       }
       throw new Error(`unexpected path ${path}`);
     });
@@ -195,51 +412,80 @@ describe('ProvidersPage pools', () => {
   });
 
   it('shows usage not "not refreshed" when quota row exists but remaining is null', async () => {
-    // Tavily's real API returns used + account_plan_* in details but no
-    // top-level key.limit, so the normalizer leaves remaining/limit_value
-    // null. A refreshed, available key must not show "not refreshed".
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
-      if (path === '/admin/api/provider-settings' || path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
+      if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
       if (path === '/admin/api/provider-pools/tavily?limit=25&offset=0') {
         return {
           provider: 'tavily',
-          summary: { provider: 'tavily', key_count: 1, enabled_key_count: 1, available_key_count: 1, cooling_key_count: 0, refreshed_key_count: 1 },
+          summary: {
+            provider: 'tavily',
+            key_count: 1,
+            enabled_key_count: 1,
+            available_key_count: 1,
+            cooling_key_count: 0,
+            refreshed_key_count: 1,
+          },
           items: [
             {
               status: 'available',
-              key: { id: 6, provider: 'tavily', name: 'tavily-2', fingerprint: 'bce42f', enabled: true },
-              quota: { provider_key_id: 6, provider: 'tavily', available: true, source: 'tavily_usage', used: 1, checked_at: '2026-07-09T00:01:00Z' },
+              key: {
+                id: 6,
+                provider: 'tavily',
+                name: 'tavily-2',
+                fingerprint: 'bce42f',
+                enabled: true,
+                quota_mode: 'endpoint_credentials',
+              },
+              quota: {
+                provider_key_id: 6,
+                provider: 'tavily',
+                available: true,
+                source: 'tavily_usage',
+                used: 1,
+                checked_at: '2026-07-09T00:01:00Z',
+              },
             },
           ],
           page: { limit: 25, offset: 0, total: 1 },
         };
       }
       if (path.startsWith('/admin/api/provider-pools/')) {
-        return { provider: path.split('/')[4].split('?')[0], summary: {}, items: [], page: { limit: 25, offset: 0, total: 0 } };
+        return emptyPool(path.split('/')[4].split('?')[0]);
       }
       throw new Error(`unexpected path ${path}`);
     });
     renderWithClient(<ProvidersPage />);
     await screen.findByText('Tavily Pool');
-    // refreshed key must NOT show "not refreshed"
     expect(screen.queryByText('not refreshed')).not.toBeInTheDocument();
-    // it should show the usage it does have
     expect(screen.getByText(/used 1/i)).toBeInTheDocument();
   });
 
   it('reads cooldown reason from PascalCase Go JSON', async () => {
-    // Go's DisplayProviderKey has no json tags, so the API emits PascalCase
-    // (CooldownReason). valueOf must fall back to it when snake_case is absent.
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
-      if (path === '/admin/api/provider-settings' || path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
+      if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
       if (path === '/admin/api/provider-pools/tavily?limit=25&offset=0') {
         return {
           provider: 'tavily',
-          summary: { provider: 'tavily', key_count: 1, enabled_key_count: 1, available_key_count: 0, cooling_key_count: 1, refreshed_key_count: 0 },
+          summary: {
+            provider: 'tavily',
+            key_count: 1,
+            enabled_key_count: 1,
+            available_key_count: 0,
+            cooling_key_count: 1,
+            refreshed_key_count: 0,
+          },
           items: [
             {
               status: 'cooling',
-              key: { ID: 9, Provider: 'tavily', Name: 'tavily-pascal', Fingerprint: 'ff00ff', Enabled: true, CooldownReason: 'plan_limit_exceeded' },
+              key: {
+                ID: 9,
+                Provider: 'tavily',
+                Name: 'tavily-pascal',
+                Fingerprint: 'ff00ff',
+                Enabled: true,
+                CooldownReason: 'plan_limit_exceeded',
+                QuotaMode: 'endpoint_credentials',
+              },
               quota: null,
             },
           ],
@@ -247,7 +493,7 @@ describe('ProvidersPage pools', () => {
         };
       }
       if (path.startsWith('/admin/api/provider-pools/')) {
-        return { provider: path.split('/')[4].split('?')[0], summary: {}, items: [], page: { limit: 25, offset: 0, total: 0 } };
+        return emptyPool(path.split('/')[4].split('?')[0]);
       }
       throw new Error(`unexpected path ${path}`);
     });

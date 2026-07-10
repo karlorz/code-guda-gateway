@@ -18,7 +18,9 @@ import (
 	"code-guda-gateway/internal/store"
 )
 
-func openProxyTarget(t *testing.T, provider string, keys ...string) (*proxy.Proxy, *providers.KeyRepo, *store.Store) {
+// openProxyTarget seeds endpoints whose BaseURL is the given upstream so routing
+// is driven by the selected row, not a provider-wide proxy.Target field.
+func openProxyTarget(t *testing.T, provider, baseURL string, keys ...string) (*proxy.Proxy, *providers.KeyRepo, *store.Store) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	st, err := store.Open(dbPath)
@@ -34,8 +36,8 @@ func openProxyTarget(t *testing.T, provider string, keys ...string) (*proxy.Prox
 	repo := providers.NewKeyRepo(st.DB(), mk)
 	for i, k := range keys {
 		name := string(rune('a' + i))
-		if _, err := repo.Add(provider, name, k); err != nil {
-			t.Fatalf("Add key %s: %v", name, err)
+		if _, err := repo.AddEndpoint(provider, name, baseURL, k); err != nil {
+			t.Fatalf("AddEndpoint %s: %v", name, err)
 		}
 	}
 	px := proxy.New(proxy.Options{Client: http.DefaultClient})
@@ -58,7 +60,7 @@ func TestForwardMapsPathAndReplacesAuthorization(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	px, repo, _ := openProxyTarget(t, providers.ProviderTavily, "upstream-key")
+	px, repo, _ := openProxyTarget(t, providers.ProviderTavily, upstream.URL, "upstream-key")
 
 	req := httptest.NewRequest(http.MethodPost, "/tavily/search?debug=1", strings.NewReader(`{"query":"go"}`))
 	req.Header.Set("Authorization", "Bearer inbound")
@@ -66,7 +68,6 @@ func TestForwardMapsPathAndReplacesAuthorization(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	result := px.Forward(rec, req, proxy.Target{
-		BaseURL:  upstream.URL,
 		Path:     "/search",
 		Provider: providers.ProviderTavily,
 		Keys:     repo,
@@ -106,12 +107,11 @@ func TestProxy_RetriesAcrossKeysOn429(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	px, repo, st := openProxyTarget(t, providers.ProviderFirecrawl, "first", "second")
+	px, repo, st := openProxyTarget(t, providers.ProviderFirecrawl, upstream.URL, "first", "second")
 
 	req := httptest.NewRequest(http.MethodPost, "/firecrawl/scrape", strings.NewReader(`{"url":"https://example.com"}`))
 	rec := httptest.NewRecorder()
 	result := px.Forward(rec, req, proxy.Target{
-		BaseURL:  upstream.URL,
 		Path:     "/scrape",
 		Provider: providers.ProviderFirecrawl,
 		Keys:     repo,
@@ -139,6 +139,87 @@ func TestProxy_RetriesAcrossKeysOn429(t *testing.T) {
 	}
 }
 
+func TestProxy_HeterogeneousEndpointRetry_RoutesKeyWithMatchingURL(t *testing.T) {
+	var authA []string
+	var authB []string
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authA = append(authA, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("rate limited"))
+	}))
+	defer serverA.Close()
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authB = append(authB, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer serverB.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	mkPath := filepath.Join(t.TempDir(), "master.key")
+	mk, err := secrets.LoadOrCreate(mkPath)
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	repo := providers.NewKeyRepo(st.DB(), mk)
+	if _, err := repo.AddEndpoint(providers.ProviderTavily, "a", serverA.URL, "key-a"); err != nil {
+		t.Fatalf("AddEndpoint a: %v", err)
+	}
+	if _, err := repo.AddEndpoint(providers.ProviderTavily, "b", serverB.URL, "key-b"); err != nil {
+		t.Fatalf("AddEndpoint b: %v", err)
+	}
+
+	px := proxy.New(proxy.Options{Client: http.DefaultClient})
+	px.SetCooldownSettings(cooldown.DefaultSettings())
+
+	req := httptest.NewRequest(http.MethodPost, "/tavily/search", strings.NewReader(`{"query":"go"}`))
+	rec := httptest.NewRecorder()
+	result := px.Forward(rec, req, proxy.Target{
+		Path:     "/search",
+		Provider: providers.ProviderTavily,
+		Keys:     repo,
+	})
+
+	if result.Err != nil {
+		t.Fatalf("Forward returned error: %v", result.Err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != "ok" {
+		t.Fatalf("body = %q, want ok", rec.Body.String())
+	}
+
+	// Server A must only ever see key A; server B only key B.
+	if len(authA) != 1 || authA[0] != "Bearer key-a" {
+		t.Fatalf("server A auths = %#v, want [Bearer key-a]", authA)
+	}
+	if len(authB) != 1 || authB[0] != "Bearer key-b" {
+		t.Fatalf("server B auths = %#v, want [Bearer key-b]", authB)
+	}
+
+	var cooldownUntil sql.NullString
+	var lastFailed sql.NullString
+	_ = st.DB().QueryRow(`SELECT cooldown_until, last_failed_at FROM provider_keys WHERE name = 'a'`).Scan(&cooldownUntil, &lastFailed)
+	if !cooldownUntil.Valid || cooldownUntil.String == "" {
+		t.Fatal("expected endpoint A cooldown_until set after 429")
+	}
+	if !lastFailed.Valid || lastFailed.String == "" {
+		t.Fatal("expected endpoint A last_failed_at demotion after 429")
+	}
+
+	var successAt sql.NullString
+	_ = st.DB().QueryRow(`SELECT last_success_at FROM provider_keys WHERE name = 'b'`).Scan(&successAt)
+	if !successAt.Valid {
+		t.Fatal("expected endpoint B last_success_at set after 200")
+	}
+}
+
 func TestProxy_RetriesOn503(t *testing.T) {
 	var attempts int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -152,11 +233,10 @@ func TestProxy_RetriesOn503(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	px, repo, _ := openProxyTarget(t, providers.ProviderGrok, "k1", "k2")
+	px, repo, _ := openProxyTarget(t, providers.ProviderGrok, upstream.URL, "k1", "k2")
 	req := httptest.NewRequest(http.MethodGet, "/models", nil)
 	rec := httptest.NewRecorder()
 	_ = px.Forward(rec, req, proxy.Target{
-		BaseURL:  upstream.URL,
 		Path:     "/models",
 		Provider: providers.ProviderGrok,
 		Keys:     repo,
@@ -178,14 +258,13 @@ func TestProxy_CredentialErrorCoolsLongRetriesOtherKey(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	px, repo, st := openProxyTarget(t, providers.ProviderGrok, "bad-a", "bad-b")
+	px, repo, st := openProxyTarget(t, providers.ProviderGrok, upstream.URL, "bad-a", "bad-b")
 	s := cooldown.DefaultSettings()
 	s.MaxRetries = 2
 	px.SetCooldownSettings(s)
 	req := httptest.NewRequest(http.MethodGet, "/models", nil)
 	rec := httptest.NewRecorder()
 	_ = px.Forward(rec, req, proxy.Target{
-		BaseURL:  upstream.URL,
 		Path:     "/models",
 		Provider: providers.ProviderGrok,
 		Keys:     repo,
@@ -215,11 +294,10 @@ func TestProxy_RespectsRetryAfter(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	px, repo, st := openProxyTarget(t, providers.ProviderTavily, "only")
+	px, repo, st := openProxyTarget(t, providers.ProviderTavily, upstream.URL, "only")
 	req := httptest.NewRequest(http.MethodPost, "/search", strings.NewReader(`{}`))
 	rec := httptest.NewRecorder()
 	_ = px.Forward(rec, req, proxy.Target{
-		BaseURL:  upstream.URL,
 		Path:     "/search",
 		Provider: providers.ProviderTavily,
 		Keys:     repo,
@@ -245,11 +323,10 @@ func TestProxy_TavilyPlanLimitMapsToClearGatewayError(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	px, repo, st := openProxyTarget(t, providers.ProviderTavily, "only")
+	px, repo, st := openProxyTarget(t, providers.ProviderTavily, upstream.URL, "only")
 	req := httptest.NewRequest(http.MethodPost, "/tavily/map", strings.NewReader(`{"url":"https://example.com"}`))
 	rec := httptest.NewRecorder()
 	_ = px.Forward(rec, req, proxy.Target{
-		BaseURL:  upstream.URL,
 		Path:     "/map",
 		Provider: providers.ProviderTavily,
 		Keys:     repo,
@@ -292,7 +369,7 @@ func TestProxy_MaxRetriesExhausted(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	px, repo, st := openProxyTarget(t, providers.ProviderGrok, "k1", "k2", "k3", "k4")
+	px, repo, st := openProxyTarget(t, providers.ProviderGrok, upstream.URL, "k1", "k2", "k3", "k4")
 	s := cooldown.DefaultSettings()
 	s.MaxRetries = 3
 	px.SetCooldownSettings(s)
@@ -300,7 +377,6 @@ func TestProxy_MaxRetriesExhausted(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/models", nil)
 	rec := httptest.NewRecorder()
 	_ = px.Forward(rec, req, proxy.Target{
-		BaseURL:  upstream.URL,
 		Path:     "/models",
 		Provider: providers.ProviderGrok,
 		Keys:     repo,
@@ -316,16 +392,12 @@ func TestProxy_MaxRetriesExhausted(t *testing.T) {
 }
 
 func TestProxy_NoKeysConfigured(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer upstream.Close()
-
-	px, repo, _ := openProxyTarget(t, providers.ProviderGrok)
+	// No endpoints: SelectEndpoint must fail with ErrNoEnabledKey → 502.
+	// baseURL is unused when no keys are added.
+	px, repo, _ := openProxyTarget(t, providers.ProviderGrok, "https://example.invalid")
 	req := httptest.NewRequest(http.MethodGet, "/models", nil)
 	rec := httptest.NewRecorder()
 	result := px.Forward(rec, req, proxy.Target{
-		BaseURL:  upstream.URL,
 		Path:     "/models",
 		Provider: providers.ProviderGrok,
 		Keys:     repo,
@@ -345,11 +417,10 @@ func TestProxy_MarkSuccessOn2xx(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	px, repo, st := openProxyTarget(t, providers.ProviderGrok, "good")
+	px, repo, st := openProxyTarget(t, providers.ProviderGrok, upstream.URL, "good")
 	req := httptest.NewRequest(http.MethodGet, "/models", nil)
 	rec := httptest.NewRecorder()
 	_ = px.Forward(rec, req, proxy.Target{
-		BaseURL:  upstream.URL,
 		Path:     "/models",
 		Provider: providers.ProviderGrok,
 		Keys:     repo,
@@ -378,7 +449,7 @@ func (f *fakeAttemptRecorder) Record(row proxy.AttemptLog) error {
 	return f.err
 }
 
-func openProxyWithRecorder(t *testing.T, rec *fakeAttemptRecorder, provider string, keys ...string) (*proxy.Proxy, *providers.KeyRepo) {
+func openProxyWithRecorder(t *testing.T, rec *fakeAttemptRecorder, provider, baseURL string, keys ...string) (*proxy.Proxy, *providers.KeyRepo) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	st, err := store.Open(dbPath)
@@ -394,8 +465,8 @@ func openProxyWithRecorder(t *testing.T, rec *fakeAttemptRecorder, provider stri
 	repo := providers.NewKeyRepo(st.DB(), mk)
 	for i, k := range keys {
 		name := string(rune('a' + i))
-		if _, err := repo.Add(provider, name, k); err != nil {
-			t.Fatalf("Add key %s: %v", name, err)
+		if _, err := repo.AddEndpoint(provider, name, baseURL, k); err != nil {
+			t.Fatalf("AddEndpoint %s: %v", name, err)
 		}
 	}
 	px := proxy.New(proxy.Options{Client: http.DefaultClient, AttemptRecorder: rec})
@@ -411,11 +482,10 @@ func TestProxy_DisabledRecorderProducesZeroRows(t *testing.T) {
 	defer upstream.Close()
 
 	rec := &fakeAttemptRecorder{enabled: false}
-	px, repo := openProxyWithRecorder(t, rec, providers.ProviderTavily, "k1")
+	px, repo := openProxyWithRecorder(t, rec, providers.ProviderTavily, upstream.URL, "k1")
 	req := httptest.NewRequest(http.MethodPost, "/tavily/search", strings.NewReader(`{}`))
 	rr := httptest.NewRecorder()
 	result := px.Forward(rr, req, proxy.Target{
-		BaseURL:  upstream.URL,
 		Path:     "/search",
 		Provider: providers.ProviderTavily,
 		Keys:     repo,
@@ -446,12 +516,11 @@ func TestProxy_EnabledRecorderLogsTavily432Then200(t *testing.T) {
 	defer upstream.Close()
 
 	rec := &fakeAttemptRecorder{enabled: true}
-	px, repo := openProxyWithRecorder(t, rec, providers.ProviderTavily, "first", "second")
+	px, repo := openProxyWithRecorder(t, rec, providers.ProviderTavily, upstream.URL, "first", "second")
 	req := httptest.NewRequest(http.MethodPost, "/tavily/extract", strings.NewReader(`{}`))
 	req.Header.Set("X-Request-ID", "req-432-retry")
 	rr := httptest.NewRecorder()
 	result := px.Forward(rr, req, proxy.Target{
-		BaseURL:  upstream.URL,
 		Path:     "/extract",
 		Provider: providers.ProviderTavily,
 		Keys:     repo,
@@ -519,11 +588,10 @@ func TestProxy_RecorderErrorDoesNotChangeSuccess(t *testing.T) {
 	defer upstream.Close()
 
 	rec := &fakeAttemptRecorder{enabled: true, err: errors.New("disk full")}
-	px, repo := openProxyWithRecorder(t, rec, providers.ProviderTavily, "k1")
+	px, repo := openProxyWithRecorder(t, rec, providers.ProviderTavily, upstream.URL, "k1")
 	req := httptest.NewRequest(http.MethodPost, "/tavily/search", strings.NewReader(`{"q":"x"}`))
 	rr := httptest.NewRecorder()
 	result := px.Forward(rr, req, proxy.Target{
-		BaseURL:  upstream.URL,
 		Path:     "/search",
 		Provider: providers.ProviderTavily,
 		Keys:     repo,

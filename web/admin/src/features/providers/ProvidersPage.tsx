@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ChevronLeft, ChevronRight, RefreshCw, Save, TestTube2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, RefreshCw, TestTube2 } from 'lucide-react';
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { apiFetch } from '../../api/client';
 import type {
   ListResponse,
@@ -10,23 +11,22 @@ import type {
   ProviderPool,
   ProviderPoolRow,
   ProviderQuota,
-  ProviderSetting,
+  QuotaMode,
+  QuotaOperationalState,
+  RefreshAllKeyQuotasResult,
 } from '../../api/types';
-import { Badge, Button, Field, Panel, valueOf } from '../../components/ui';
+import { Badge, Button, Panel, valueOf } from '../../components/ui';
 
 const POOL_PROVIDERS = ['grok', 'tavily', 'firecrawl'] as const;
 const PAGE_SIZE = 25;
 
+const QUOTA_SOURCE_DISABLED = 'quota_disabled';
+const QUOTA_SOURCE_NOT_CONFIGURED = 'quota_not_configured';
+
 export function ProvidersPage() {
   const qc = useQueryClient();
-  const settings = useQuery({ queryKey: ['provider-settings'], queryFn: () => apiFetch<ListResponse<ProviderSetting>>('/admin/api/provider-settings') });
   const health = useQuery({ queryKey: ['provider-health'], queryFn: () => apiFetch<ListResponse<ProviderHealth>>('/admin/api/provider-health') });
   const quotas = useQuery({ queryKey: ['provider-quotas'], queryFn: () => apiFetch<ListResponse<ProviderQuota>>('/admin/api/provider-quotas') });
-  const saveSetting = useMutation({
-    mutationFn: ({ provider, baseURL }: { provider: string; baseURL: string }) =>
-      apiFetch(`/admin/api/provider-settings/${provider}`, { method: 'PATCH', body: JSON.stringify({ base_url: baseURL }) }),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ['provider-settings'] }),
-  });
   const postAction = useMutation({
     mutationFn: (path: string) => apiFetch(path, { method: 'POST' }),
     onSuccess: () => {
@@ -39,18 +39,17 @@ export function ProvidersPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold">Providers</h1>
-      <Panel title="Settings">
-        <div className="grid gap-3">
-          {(settings.data?.items ?? []).map((setting) => (
-            <ProviderSettingRow
-              key={setting.provider}
-              onSave={(baseURL) => saveSetting.mutate({ provider: setting.provider, baseURL })}
-              setting={setting}
-            />
-          ))}
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold">Provider Monitoring</h1>
+          <p className="mt-1 text-sm text-zinc-600">
+            Inference readiness, pool order, cooldown, and per-endpoint quota. Configure endpoints separately.
+          </p>
         </div>
-      </Panel>
+        <Link className="text-sm font-medium text-zinc-900 underline underline-offset-2" to="/provider-keys">
+          Manage Provider Endpoints
+        </Link>
+      </div>
       <Panel title="Health">
         <div className="grid gap-2 md:grid-cols-3">
           {(health.data?.items ?? []).map((item) => (
@@ -133,9 +132,59 @@ function providerTitle(provider: string): string {
   return `${provider[0].toUpperCase()}${provider.slice(1)} Pool`;
 }
 
+/** Map quota sidecar state independently of inference pool status. */
+export function deriveQuotaOperationalState(row: ProviderPoolRow): QuotaOperationalState {
+  const mode = valueOf<QuotaMode | string>(row.key as Record<string, unknown>, 'QuotaMode', 'quota_mode', '');
+  const configured = valueOf<boolean>(row.key as Record<string, unknown>, 'QuotaKeyConfigured', 'quota_key_configured', false);
+  const source = row.quota?.source ?? '';
+
+  if (mode === 'disabled' || source === QUOTA_SOURCE_DISABLED) {
+    return 'disabled';
+  }
+  if (mode === 'separate_credentials' && !configured) {
+    return 'not_configured';
+  }
+  if (source === QUOTA_SOURCE_NOT_CONFIGURED) {
+    return 'not_configured';
+  }
+  if (!row.quota) {
+    return 'not_refreshed';
+  }
+  if (row.quota.available) {
+    return 'ok';
+  }
+  return 'unavailable';
+}
+
+function quotaStateLabel(state: QuotaOperationalState, row: ProviderPoolRow): string {
+  switch (state) {
+    case 'disabled':
+      return 'disabled';
+    case 'not_configured':
+      return 'not configured';
+    case 'not_refreshed':
+      return 'not refreshed';
+    case 'ok': {
+      const remaining = row.quota ? quotaRemainingLabel(row.quota) : null;
+      return remaining ?? 'available';
+    }
+    case 'unavailable':
+      return row.quota?.message_redacted || 'unavailable';
+    default:
+      return '—';
+  }
+}
+
+function quotaBadgeTone(state: QuotaOperationalState): 'good' | 'warn' | 'bad' {
+  if (state === 'ok') return 'good';
+  if (state === 'disabled' || state === 'not_configured' || state === 'not_refreshed') return 'warn';
+  return 'bad';
+}
+
 function ProviderPoolSection({ provider, sampleQuota }: { provider: string; sampleQuota?: ProviderQuota }) {
   const qc = useQueryClient();
   const [offset, setOffset] = useState(0);
+  const [refreshAllResult, setRefreshAllResult] = useState<RefreshAllKeyQuotasResult | null>(null);
   const pool = useQuery({
     queryKey: ['provider-pools', provider, offset],
     queryFn: () => apiFetch<ProviderPool>(`/admin/api/provider-pools/${provider}?limit=${PAGE_SIZE}&offset=${offset}`),
@@ -151,8 +200,11 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
     onSuccess: invalidatePool,
   });
   const refreshAll = useMutation({
-    mutationFn: () => apiFetch(`/admin/api/provider-key-quotas/${provider}/refresh-all`, { method: 'POST' }),
-    onSuccess: invalidatePool,
+    mutationFn: () => apiFetch<RefreshAllKeyQuotasResult>(`/admin/api/provider-key-quotas/${provider}/refresh-all`, { method: 'POST' }),
+    onSuccess: (data) => {
+      setRefreshAllResult(data);
+      invalidatePool();
+    },
   });
   const refreshOne = useMutation({
     mutationFn: (id: number) => apiFetch(`/admin/api/provider-key-quotas/${id}/refresh`, { method: 'POST' }),
@@ -160,9 +212,10 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
   });
   const keyAction = useMutation({
     mutationFn: ({ id, path }: { id: number; path: string }) =>
-      apiFetch(`/admin/api/provider-keys/${id}${path}`, { method: 'POST' }),
+      apiFetch(`/admin/api/provider-endpoints/${id}${path}`, { method: 'POST' }),
     onSuccess: () => {
       invalidatePool();
+      void qc.invalidateQueries({ queryKey: ['provider-endpoints'] });
       void qc.invalidateQueries({ queryKey: ['provider-keys'] });
       void qc.invalidateQueries({ queryKey: ['provider-health'] });
     },
@@ -214,31 +267,40 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
         </p>
       ) : null}
 
+      {refreshAllResult ? (
+        <p className="mt-1 text-xs text-zinc-600" data-testid={`refresh-all-result-${provider}`}>
+          {`Refreshed ${refreshAllResult.succeeded} · Failed ${refreshAllResult.failed} · Skipped disabled ${refreshAllResult.skipped_disabled}${
+            refreshAllResult.skipped_not_configured != null ? ` · Skipped not configured ${refreshAllResult.skipped_not_configured}` : ''
+          }`}
+        </p>
+      ) : null}
+
       {showSampleQuotaError ? (
         <p className="mt-1 text-xs text-red-700">{sampleQuota.message_redacted}</p>
       ) : null}
 
       <div className="mt-3 overflow-x-auto">
-        <table className="w-full min-w-[640px] text-left text-sm">
+        <table className="w-full min-w-[720px] text-left text-sm">
           <thead className="text-xs uppercase text-zinc-500">
             <tr className="border-b border-zinc-200">
-              <th className="py-2 pr-3 font-medium">Name</th>
-              <th className="py-2 pr-3 font-medium">Status</th>
+              <th className="py-2 pr-3 font-medium">Endpoint</th>
+              <th className="py-2 pr-3 font-medium">Inference</th>
               <th className="py-2 pr-3 font-medium">Cooldown</th>
-              <th className="py-2 pr-3 font-medium">Order</th>
+              <th className="py-2 pr-3 font-medium">Pool order</th>
               <th className="py-2 pr-3 font-medium">Quota</th>
               <th className="py-2 pr-3 font-medium">Checked</th>
-              <th className="py-2 font-medium" />
+              <th className="py-2 font-medium">Actions</th>
             </tr>
           </thead>
           <tbody>
             {(pool.data.items ?? []).map((row) => {
               const id = keyID(row.key);
-              const remaining = row.quota ? quotaRemainingLabel(row.quota) : null;
+              const quotaState = deriveQuotaOperationalState(row);
               const cooldownReason = valueOf<string>(row.key as Record<string, unknown>, 'CooldownReason', 'cooldown_reason', '');
               const cooldownUntil = valueOf<string | undefined>(row.key as Record<string, unknown>, 'CooldownUntil', 'cooldown_until', undefined);
               const lastFailedAt = valueOf<string | undefined>(row.key as Record<string, unknown>, 'LastFailedAt', 'last_failed_at', undefined);
               const demoted = Boolean(lastFailedAt);
+              const refreshDisabled = quotaState === 'disabled' || refreshOne.isPending || !id;
               return (
                 <tr className="border-b border-zinc-100" key={id || keyName(row.key)}>
                   <td className="py-2 pr-3 font-medium text-zinc-900">{keyName(row.key)}</td>
@@ -256,7 +318,20 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
                       <span className="text-zinc-500">front pack</span>
                     )}
                   </td>
-                  <td className="py-2 pr-3 text-zinc-700">{remaining ?? (row.quota ? 'available' : 'not refreshed')}</td>
+                  <td className="py-2 pr-3 text-zinc-700">
+                    <div className="flex flex-col gap-0.5">
+                      <Badge tone={quotaBadgeTone(quotaState)}>{quotaState === 'ok' ? 'ok' : quotaState.replace('_', ' ')}</Badge>
+                      <span className="text-xs">{quotaStateLabel(quotaState, row)}</span>
+                      {quotaState === 'not_configured' ? (
+                        <span className="text-[11px] text-zinc-500">
+                          Configure quota credentials on{' '}
+                          <Link className="underline" to="/provider-keys">
+                            Provider Endpoints
+                          </Link>
+                        </span>
+                      ) : null}
+                    </div>
+                  </td>
                   <td className="py-2 pr-3 text-xs text-zinc-500">
                     {row.quota?.checked_at ? formatChecked(row.quota.checked_at) : '—'}
                   </td>
@@ -264,8 +339,9 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
                     <div className="flex flex-wrap justify-end gap-1">
                       <Button
                         aria-label={`Refresh key ${id}`}
-                        disabled={refreshOne.isPending || !id}
+                        disabled={refreshDisabled}
                         onClick={() => refreshOne.mutate(id)}
+                        title={quotaState === 'disabled' ? 'Quota refresh disabled for this endpoint' : undefined}
                         type="button"
                         variant="secondary"
                       >
@@ -327,25 +403,5 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
         </span>
       </div>
     </div>
-  );
-}
-
-function ProviderSettingRow({ setting, onSave }: { setting: ProviderSetting; onSave: (baseURL: string) => void }) {
-  return (
-    <form
-      className="grid gap-2 border-t border-zinc-200 py-3 md:grid-cols-[120px_1fr_auto]"
-      onSubmit={(event) => {
-        event.preventDefault();
-        const data = new FormData(event.currentTarget);
-        onSave(String(data.get('base_url') ?? ''));
-      }}
-    >
-      <strong className="pt-2 capitalize">{setting.provider}</strong>
-      <Field defaultValue={setting.base_url} label="Base URL" name="base_url" />
-      <Button className="mt-6" type="submit" variant="secondary">
-        <Save size={16} />
-        Save
-      </Button>
-    </form>
   );
 }
