@@ -23,6 +23,16 @@ export type GatewayKey = {
 
 export type GatewayKeyCreateResponse = { key: GatewayKey; raw_key: string };
 
+export type QuotaMode = 'disabled' | 'endpoint_credentials' | 'separate_credentials';
+export type QuotaFlow = 'grok2api_admin' | 'tavily_usage' | 'firecrawl_credit_usage';
+
+export type EndpointQuotaInput = {
+  mode: QuotaMode;
+  flow: QuotaFlow;
+  base_url?: string;
+  key?: string;
+};
+
 export type ProviderKey = {
   ID?: number;
   id?: number;
@@ -53,6 +63,18 @@ export type ProviderKey = {
   last_success_at?: string;
   last_error_at?: string;
   last_error_status?: number;
+  QuotaMode?: QuotaMode;
+  quota_mode?: QuotaMode;
+  QuotaFlow?: QuotaFlow;
+  quota_flow?: QuotaFlow;
+  QuotaBaseURL?: string | null;
+  quota_base_url?: string | null;
+  QuotaKeyConfigured?: boolean;
+  quota_key_configured?: boolean;
+  QuotaKeyPrefix?: string | null;
+  quota_key_prefix?: string | null;
+  QuotaKeyFingerprint?: string | null;
+  quota_key_fingerprint?: string | null;
 };
 
 export type ProviderSetting = { provider: string; base_url: string };

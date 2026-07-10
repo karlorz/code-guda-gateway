@@ -24,7 +24,11 @@ vi.mock('../../api/session', () => ({
 
 function renderWithClient(ui: React.ReactElement) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter>{ui}</MemoryRouter>
+    </QueryClientProvider>,
+  );
 }
 
 const listItem = {
@@ -34,6 +38,9 @@ const listItem = {
   KeyPrefix: 'xai-',
   Enabled: true,
   BaseURL: 'https://api.x.ai/v1',
+  QuotaMode: 'disabled',
+  QuotaFlow: 'grok2api_admin',
+  QuotaKeyConfigured: false,
 };
 
 const listItemAlt = {
@@ -43,6 +50,23 @@ const listItemAlt = {
   KeyPrefix: 'tvly-',
   Enabled: true,
   BaseURL: 'https://proxy.example/tavily',
+  QuotaMode: 'endpoint_credentials',
+  QuotaFlow: 'tavily_usage',
+  QuotaKeyConfigured: false,
+};
+
+const listItemSeparate = {
+  ID: 44,
+  Provider: 'grok',
+  Name: 'new-api-sg',
+  KeyPrefix: 'xai-',
+  Enabled: true,
+  BaseURL: 'https://new-api.example/v1',
+  QuotaMode: 'separate_credentials',
+  QuotaFlow: 'grok2api_admin',
+  QuotaBaseURL: 'https://grok2api.example',
+  QuotaKeyConfigured: true,
+  QuotaKeyPrefix: 'g2a-',
 };
 
 function mockDefaultEndpoints(items: unknown[] = [listItem, listItemAlt]) {
@@ -62,6 +86,9 @@ function mockDefaultEndpoints(items: unknown[] = [listItem, listItemAlt]) {
     }
     if (path === '/admin/api/provider-endpoints' && method === 'POST') {
       return listItem;
+    }
+    if (path.startsWith('/admin/api/provider-settings/') && method === 'PATCH') {
+      return { status: 'ok' };
     }
     if (path.startsWith('/admin/api/provider-endpoints/')) {
       return { status: 'ok' };
@@ -98,17 +125,45 @@ describe('Provider Endpoints navigation and page', () => {
     expect(await screen.findByRole('heading', { name: 'Provider Endpoints' })).toBeInTheDocument();
   });
 
-  it('create form submits base_url to canonical provider-endpoints', async () => {
+  it('opens endpoint create in a side sheet', async () => {
     renderWithClient(<ProviderKeysPage />);
     await screen.findByText('primary');
+    fireEvent.click(screen.getByRole('button', { name: /add endpoint/i }));
+    const dialog = await screen.findByRole('dialog', { name: /create endpoint/i });
+    expect(dialog).toBeInTheDocument();
+    expect(within(dialog).getByText(/identity/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/inference route/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/quota source/i)).toBeInTheDocument();
+  });
 
-    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: 'new-ep' } });
-    fireEvent.change(screen.getByLabelText(/^base url$/i), { target: { value: 'https://custom.example/v1' } });
-    const keyInput = screen.getByLabelText(/^key$/i);
+  it('explains that endpoint name does not define routing priority', async () => {
+    renderWithClient(<ProviderKeysPage />);
+    await screen.findByText('primary');
+    expect(screen.getByText(/does not define routing priority/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /add endpoint/i }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/does not define routing priority/i)).toBeInTheDocument();
+  });
+
+  it('submits nested quota configuration to provider-endpoints', async () => {
+    renderWithClient(<ProviderKeysPage />);
+    await screen.findByText('primary');
+    fireEvent.click(screen.getByRole('button', { name: /add endpoint/i }));
+    const dialog = await screen.findByRole('dialog', { name: /create endpoint/i });
+
+    fireEvent.change(within(dialog).getByLabelText(/^name$/i), { target: { value: 'new-ep' } });
+    fireEvent.change(within(dialog).getByLabelText(/^base url$/i), { target: { value: 'https://custom.example/v1' } });
+    const keyInput = within(dialog).getByLabelText(/^key$/i);
     expect(keyInput).toHaveAttribute('type', 'password');
     fireEvent.change(keyInput, { target: { value: 'xai-secret-create-key-abcdef' } });
-
-    fireEvent.click(screen.getByRole('button', { name: /add/i }));
+    fireEvent.change(within(dialog).getByLabelText(/quota mode/i), { target: { value: 'separate_credentials' } });
+    fireEvent.change(within(dialog).getByLabelText(/quota base url/i), {
+      target: { value: 'https://grok2api.example' },
+    });
+    fireEvent.change(within(dialog).getByLabelText(/^quota key$/i), {
+      target: { value: 'g2a-admin-quota-secret-key-2222' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: /create endpoint/i }));
 
     await waitFor(() => {
       expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith(
@@ -120,10 +175,53 @@ describe('Provider Endpoints navigation and page', () => {
             name: 'new-ep',
             base_url: 'https://custom.example/v1',
             key: 'xai-secret-create-key-abcdef',
+            quota: {
+              mode: 'separate_credentials',
+              flow: 'grok2api_admin',
+              base_url: 'https://grok2api.example',
+              key: 'g2a-admin-quota-secret-key-2222',
+            },
           }),
         }),
       );
     });
+  });
+
+  it('summarizes inference and quota configuration without primary or backup roles', async () => {
+    mockDefaultEndpoints([listItem, listItemAlt, listItemSeparate]);
+    renderWithClient(<ProviderKeysPage />);
+    expect(await screen.findByText('https://api.x.ai/v1')).toBeInTheDocument();
+    expect(screen.getByText('https://proxy.example/tavily')).toBeInTheDocument();
+    expect(screen.getAllByText(/inference/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/disabled/i)).toBeInTheDocument();
+    expect(screen.getByText(/use inference url and key/i)).toBeInTheDocument();
+    expect(screen.getByText(/separate credentials/i)).toBeInTheDocument();
+    expect(screen.queryByText(/primary role/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/backup role/i)).not.toBeInTheDocument();
+  });
+
+  it('shows creation defaults collapsed below the add action', async () => {
+    renderWithClient(<ProviderKeysPage />);
+    await screen.findByText('primary');
+    const defaultsToggle = screen.getByRole('button', { name: /new endpoint defaults/i });
+    expect(defaultsToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByLabelText(/default base url for new endpoints/i)).not.toBeInTheDocument();
+    fireEvent.click(defaultsToggle);
+    expect(defaultsToggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getAllByLabelText(/default base url for new endpoints/i).length).toBeGreaterThan(0);
+  });
+
+  it('states defaults affect future endpoints only', async () => {
+    renderWithClient(<ProviderKeysPage />);
+    await screen.findByText('primary');
+    fireEvent.click(screen.getByRole('button', { name: /new endpoint defaults/i }));
+    expect(screen.getByText(/defaults affect future endpoints only/i)).toBeInTheDocument();
+  });
+
+  it('links to Provider Monitoring', async () => {
+    renderWithClient(<ProviderKeysPage />);
+    const link = await screen.findByRole('link', { name: /provider monitoring/i });
+    expect(link).toHaveAttribute('href', '/providers');
   });
 
   it('table shows mixed row-owned base URLs', async () => {
@@ -132,63 +230,13 @@ describe('Provider Endpoints navigation and page', () => {
     expect(screen.getByText('https://proxy.example/tavily')).toBeInTheDocument();
   });
 
-  it('edit URL calls POST update-base-url', async () => {
-    mockDefaultEndpoints([listItem]);
-    renderWithClient(<ProviderKeysPage />);
-    await screen.findByText('primary');
-
-    fireEvent.click(screen.getByRole('button', { name: /edit url/i }));
-    const dialog = await screen.findByRole('dialog', { name: /edit base url/i });
-    const urlField = within(dialog).getByLabelText(/base url/i);
-    fireEvent.change(urlField, { target: { value: 'https://new-endpoint.example/v1' } });
-    fireEvent.click(within(dialog).getByRole('button', { name: /save url/i }));
-
-    await waitFor(() => {
-      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith(
-        '/admin/api/provider-endpoints/42/update-base-url',
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({ base_url: 'https://new-endpoint.example/v1' }),
-        }),
-      );
-    });
-  });
-
-  it('rotate key uses empty password input and never shows existing raw value', async () => {
-    mockDefaultEndpoints([listItem]);
-    renderWithClient(<ProviderKeysPage />);
-    await screen.findByText('primary');
-
-    fireEvent.click(screen.getByRole('button', { name: /^rotate key$/i }));
-    const dialog = await screen.findByRole('dialog', { name: /rotate key/i });
-    const keyField = within(dialog).getByLabelText(/new key/i);
-    expect(keyField).toHaveAttribute('type', 'password');
-    expect(keyField).toHaveValue('');
-    expect(within(dialog).queryByDisplayValue(/xai-|tvly-|secret/i)).not.toBeInTheDocument();
-
-    fireEvent.change(keyField, { target: { value: 'xai-rotated-key-value-zzzz' } });
-    fireEvent.click(within(dialog).getByRole('button', { name: /confirm rotate/i }));
-
-    await waitFor(() => {
-      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith(
-        '/admin/api/provider-endpoints/42/rotate-key',
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({ key: 'xai-rotated-key-value-zzzz' }),
-        }),
-      );
-    });
-  });
-
-  it('keeps enable, reset cool+order, promote, demote, and archive controls', async () => {
+  it('keeps enable and archive controls', async () => {
     mockDefaultEndpoints([listItem]);
     renderWithClient(<ProviderKeysPage />);
     await screen.findByText('primary');
     expect(screen.getByRole('button', { name: 'Disable' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Reset cool+order' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Promote' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Demote' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Archive' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
   });
 
   it('calls PATCH enable/disable on canonical endpoint path', async () => {
@@ -204,40 +252,13 @@ describe('Provider Endpoints navigation and page', () => {
     });
   });
 
-  it('calls POST reset-cooldown and archive on canonical endpoint paths', async () => {
+  it('calls POST archive on canonical endpoint path', async () => {
     mockDefaultEndpoints([listItem]);
     renderWithClient(<ProviderKeysPage />);
     await screen.findByText('primary');
-    fireEvent.click(screen.getByRole('button', { name: 'Reset cool+order' }));
-    await waitFor(() => {
-      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-endpoints/42/reset-cooldown', {
-        method: 'POST',
-        body: undefined,
-      });
-    });
     fireEvent.click(screen.getByRole('button', { name: 'Archive' }));
     await waitFor(() => {
       expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-endpoints/42/archive', {
-        method: 'POST',
-        body: undefined,
-      });
-    });
-  });
-
-  it('calls POST demote and promote (reset-selection) on canonical paths', async () => {
-    mockDefaultEndpoints([{ ...listItem, LastFailedAt: '2026-07-09T00:00:00Z' }]);
-    renderWithClient(<ProviderKeysPage />);
-    await screen.findByText('primary');
-    fireEvent.click(screen.getByRole('button', { name: 'Demote' }));
-    await waitFor(() => {
-      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-endpoints/42/demote', {
-        method: 'POST',
-        body: undefined,
-      });
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Promote' }));
-    await waitFor(() => {
-      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-endpoints/42/reset-selection', {
         method: 'POST',
         body: undefined,
       });
