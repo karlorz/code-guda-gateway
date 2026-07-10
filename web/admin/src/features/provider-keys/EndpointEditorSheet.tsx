@@ -1,4 +1,4 @@
-import type { EndpointQuotaInput, ProviderKey, ProviderSetting, QuotaFlow, QuotaMode } from '../../api/types';
+import type { EndpointQuotaInput, ProviderKey, QuotaFlow, QuotaMode } from '../../api/types';
 import { Button, Field, valueOf } from '../../components/ui';
 import { X } from 'lucide-react';
 import { FormEvent, useEffect, useState } from 'react';
@@ -32,7 +32,6 @@ export type EndpointEditorSheetProps = {
   endpoint?: ProviderKey | null;
   defaultBaseURL?: string;
   defaultURLByProvider?: Record<string, string>;
-  settings?: ProviderSetting[];
   onClose: () => void;
   onCreate: (input: {
     provider: string;
@@ -101,24 +100,16 @@ export function EndpointEditorSheet({
 
   function handleProviderChange(next: string) {
     setProvider(next);
-    if (mode === 'create') {
-      const nextDefault = defaultURLByProvider[next] ?? defaultBaseURL ?? '';
-      const prevDefaults = Object.values(defaultURLByProvider);
-      setBaseURL((current) => {
-        if (!current.trim() || prevDefaults.includes(current) || current === defaultBaseURL) {
-          return nextDefault;
-        }
-        return current;
-      });
-      if (!quotaModeTouched) {
-        setQuotaMode(defaultQuotaMode(next));
-        setQuotaFlow(defaultQuotaFlow(next));
-      } else {
-        setQuotaFlow(defaultQuotaFlow(next));
+    if (mode !== 'create') return;
+    const nextDefault = defaultURLByProvider[next] ?? defaultBaseURL ?? '';
+    const prevDefaults = Object.values(defaultURLByProvider);
+    setBaseURL((current) => {
+      if (!current.trim() || prevDefaults.includes(current) || current === defaultBaseURL) {
+        return nextDefault;
       }
-    } else {
-      setQuotaFlow(defaultQuotaFlow(next));
-    }
+      return current;
+    });
+    // Quota mode/flow defaults are owned by the provider useEffect above.
   }
 
   function handleQuotaModeChange(next: QuotaMode) {

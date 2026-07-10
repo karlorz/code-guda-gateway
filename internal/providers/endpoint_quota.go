@@ -62,16 +62,15 @@ var ErrQuotaNotConfigured = errors.New("providers: endpoint quota not configured
 
 // DefaultQuotaConfig returns the creation default mode and flow for a provider.
 func DefaultQuotaConfig(provider string) (QuotaMode, QuotaFlow, error) {
-	if err := validateProvider(provider); err != nil {
+	flow, err := defaultFlow(provider)
+	if err != nil {
 		return "", "", err
 	}
 	switch provider {
 	case ProviderGrok:
-		return QuotaDisabled, QuotaFlowGrok2APIAdmin, nil
-	case ProviderTavily:
-		return QuotaEndpointCredentials, QuotaFlowTavilyUsage, nil
-	case ProviderFirecrawl:
-		return QuotaEndpointCredentials, QuotaFlowFirecrawlCreditUsage, nil
+		return QuotaDisabled, flow, nil
+	case ProviderTavily, ProviderFirecrawl:
+		return QuotaEndpointCredentials, flow, nil
 	default:
 		return "", "", ErrUnknownProvider
 	}
@@ -150,6 +149,9 @@ func validateFlowForProvider(provider string, flow QuotaFlow) error {
 }
 
 func defaultFlow(provider string) (QuotaFlow, error) {
+	if err := validateProvider(provider); err != nil {
+		return "", err
+	}
 	switch provider {
 	case ProviderGrok:
 		return QuotaFlowGrok2APIAdmin, nil

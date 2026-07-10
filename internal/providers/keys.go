@@ -138,7 +138,7 @@ func (r *KeyRepo) AddEndpointWithQuota(provider, name, baseURL, rawKey string, q
 
 	var quotaBase interface{}
 	var encQuota interface{}
-	var qPrefix, qFP interface{}
+	var qPrefix, qFP string
 	if q.Mode == QuotaSeparateCredentials {
 		quotaBase = q.BaseURL
 		encQ, err := secrets.Encrypt(r.masterKey, []byte(q.RawKey))
@@ -146,12 +146,15 @@ func (r *KeyRepo) AddEndpointWithQuota(provider, name, baseURL, rawKey string, q
 			return DisplayProviderKey{}, err
 		}
 		encQuota = encQ
-		qp := keyPrefix(q.RawKey)
-		qf := fingerprint(q.RawKey)
-		qPrefix, qFP = qp, qf
+		qPrefix = keyPrefix(q.RawKey)
+		qFP = fingerprint(q.RawKey)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var qPrefixArg, qFPArg interface{}
+	if q.Mode == QuotaSeparateCredentials {
+		qPrefixArg, qFPArg = qPrefix, qFP
+	}
 	res, err := r.db.Exec(`
 		INSERT INTO provider_keys (
 			provider, name, base_url, encrypted_key, key_prefix, fingerprint, enabled,
@@ -160,7 +163,7 @@ func (r *KeyRepo) AddEndpointWithQuota(provider, name, baseURL, rawKey string, q
 			quota_key_prefix, quota_key_fingerprint
 		) VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		provider, name, normalized, enc, prefix, fp, now, now,
-		string(q.Mode), string(q.Flow), quotaBase, encQuota, qPrefix, qFP,
+		string(q.Mode), string(q.Flow), quotaBase, encQuota, qPrefixArg, qFPArg,
 	)
 	if err != nil {
 		return DisplayProviderKey{}, fmt.Errorf("insert provider_keys: %w", err)
@@ -183,12 +186,8 @@ func (r *KeyRepo) AddEndpointWithQuota(provider, name, baseURL, rawKey string, q
 		u := q.BaseURL
 		d.QuotaBaseURL = &u
 		d.QuotaKeyConfigured = true
-		if qp, ok := qPrefix.(string); ok {
-			d.QuotaKeyPrefix = &qp
-		}
-		if qf, ok := qFP.(string); ok {
-			d.QuotaKeyFingerprint = &qf
-		}
+		d.QuotaKeyPrefix = &qPrefix
+		d.QuotaKeyFingerprint = &qFP
 	}
 	return d, nil
 }
