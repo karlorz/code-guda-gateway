@@ -44,6 +44,10 @@ var migrations = []migration{
 		id:  "0008",
 		sql: migration0008,
 	},
+	{
+		id:  "0009",
+		sql: migration0009,
+	},
 }
 
 const migration0002 = `
@@ -154,6 +158,31 @@ SET base_url = COALESCE(
   END
 )
 WHERE base_url = '';
+`
+
+// Endpoint quota sidecars: optional per-row quota mode/flow and separately
+// encrypted credentials. Defaults: Grok disabled; Tavily/Firecrawl share
+// inference credentials. Never copies provider-global Grok admin secrets.
+const migration0009 = `
+ALTER TABLE provider_keys ADD COLUMN quota_mode TEXT NOT NULL DEFAULT 'disabled';
+ALTER TABLE provider_keys ADD COLUMN quota_flow TEXT NOT NULL DEFAULT '';
+ALTER TABLE provider_keys ADD COLUMN quota_base_url TEXT;
+ALTER TABLE provider_keys ADD COLUMN encrypted_quota_key TEXT;
+ALTER TABLE provider_keys ADD COLUMN quota_key_prefix TEXT;
+ALTER TABLE provider_keys ADD COLUMN quota_key_fingerprint TEXT;
+
+UPDATE provider_keys SET
+  quota_mode = CASE provider
+    WHEN 'tavily' THEN 'endpoint_credentials'
+    WHEN 'firecrawl' THEN 'endpoint_credentials'
+    ELSE 'disabled'
+  END,
+  quota_flow = CASE provider
+    WHEN 'grok' THEN 'grok2api_admin'
+    WHEN 'tavily' THEN 'tavily_usage'
+    WHEN 'firecrawl' THEN 'firecrawl_credit_usage'
+    ELSE ''
+  END;
 `
 
 const migration0001 = `
