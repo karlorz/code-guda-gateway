@@ -40,6 +40,10 @@ var migrations = []migration{
 		id:  "0007",
 		sql: migration0007,
 	},
+	{
+		id:  "0008",
+		sql: migration0008,
+	},
 }
 
 const migration0002 = `
@@ -130,6 +134,26 @@ const migration0007 = `
 ALTER TABLE provider_keys ADD COLUMN last_failed_at TEXT;
 CREATE INDEX IF NOT EXISTS idx_provider_keys_select
   ON provider_keys(provider, enabled, last_failed_at, id);
+`
+
+// base_url turns every provider_keys row into an atomic endpoint pair. Existing
+// rows snapshot the configured provider default, falling back to compiled URLs.
+const migration0008 = `
+ALTER TABLE provider_keys ADD COLUMN base_url TEXT NOT NULL DEFAULT '';
+
+UPDATE provider_keys
+SET base_url = COALESCE(
+  (SELECT NULLIF(TRIM(provider_settings.base_url), '')
+   FROM provider_settings
+   WHERE provider_settings.provider = provider_keys.provider),
+  CASE provider
+    WHEN 'grok' THEN 'https://api.x.ai/v1'
+    WHEN 'tavily' THEN 'https://api.tavily.com'
+    WHEN 'firecrawl' THEN 'https://api.firecrawl.dev/v2'
+    ELSE ''
+  END
+)
+WHERE base_url = '';
 `
 
 const migration0001 = `
