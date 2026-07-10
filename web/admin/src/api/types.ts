@@ -121,6 +121,20 @@ export type ProviderKeyQuota = {
   details?: Record<string, unknown>;
 };
 
+/** Operational quota display independent of inference pool status. */
+export type QuotaOperationalState = 'ok' | 'disabled' | 'not_configured' | 'not_refreshed' | 'unavailable';
+
+export type RefreshAllKeyQuotasResult = {
+  provider: string;
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  skipped_cooldown?: number;
+  skipped_disabled: number;
+  skipped_archived?: number;
+  skipped_not_configured?: number;
+};
+
 export type ProviderPoolRow = {
   key: ProviderKey;
   status: 'available' | 'cooling' | 'disabled' | 'archived' | 'not_refreshed';
