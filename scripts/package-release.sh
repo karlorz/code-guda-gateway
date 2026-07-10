@@ -77,8 +77,8 @@ build_for_platform() {
   mkdir -p "$ROOT/dist/build/$platform"
   (
     cd "$ROOT/web/admin"
-    bun install --frozen-lockfile
-    bun run build
+    bun install --frozen-lockfile >&2
+    bun run build >&2
   )
   rm -rf "$ROOT/internal/adminweb/assets/dist"
   mkdir -p "$ROOT/internal/adminweb/assets/dist"
@@ -86,8 +86,8 @@ build_for_platform() {
   printf '%s\n' 'stable directory marker for go:embed on fresh checkout' > "$ROOT/internal/adminweb/assets/dist/.keep"
   (
     cd "$ROOT"
-    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -buildvcs=false -o "dist/build/$platform/guda-gateway" ./cmd/guda-gateway
-    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -buildvcs=false -o "dist/build/$platform/guda-gateway-admin" ./cmd/guda-gateway-admin
+    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -buildvcs=false -o "dist/build/$platform/guda-gateway" ./cmd/guda-gateway >&2
+    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -buildvcs=false -o "dist/build/$platform/guda-gateway-admin" ./cmd/guda-gateway-admin >&2
   )
   printf '%s\n' "$ROOT/dist/build/$platform"
 }
