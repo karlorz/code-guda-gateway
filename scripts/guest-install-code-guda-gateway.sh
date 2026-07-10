@@ -233,11 +233,23 @@ restart_and_verify() {
   run_privileged "$(target_path "$INSTALL_BASE/bin/guda-gateway-admin")" --db "$VAR_DIR/gateway.db" --master-key "$ETC_DIR/master.key" db migrate
   run_privileged systemctl restart "$SERVICE_NAME"
   systemctl is-active "$SERVICE_NAME" >/dev/null
-  curl -fsS http://127.0.0.1:8080/healthz >/dev/null
+  local waited=0
+  until curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; do
+    if [[ "$waited" -ge 15 ]]; then
+      printf 'service did not become healthy within 15s\n' >&2
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
   if [[ "$SKIP_CADDY" != "1" ]]; then
     caddy validate --config "$CADDY_DIR/Caddyfile"
     systemctl reload caddy
   fi
+}
+
+cleanup() {
+  [[ -n "${tmp:-}" ]] && rm -rf "$tmp"
 }
 
 main() {
@@ -251,7 +263,7 @@ main() {
     printf 'release base is required; pass --release-base or render install.sh with package-release\n' >&2
     exit 2
   fi
-  local platform version tmp tarball
+  local platform version tarball
   platform="$(detect_platform)"
   version="$(resolve_version)"
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -260,7 +272,7 @@ main() {
   fi
   install_prereqs
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
+  trap cleanup EXIT
   tarball="$(download_release "$version" "$platform" "$tmp")"
   ensure_state_files
   install_release "$version" "$tarball"
