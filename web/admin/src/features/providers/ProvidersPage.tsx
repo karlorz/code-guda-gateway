@@ -160,9 +160,10 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
   });
   const keyAction = useMutation({
     mutationFn: ({ id, path }: { id: number; path: string }) =>
-      apiFetch(`/admin/api/provider-keys/${id}${path}`, { method: 'POST' }),
+      apiFetch(`/admin/api/provider-endpoints/${id}${path}`, { method: 'POST' }),
     onSuccess: () => {
       invalidatePool();
+      void qc.invalidateQueries({ queryKey: ['provider-endpoints'] });
       void qc.invalidateQueries({ queryKey: ['provider-keys'] });
       void qc.invalidateQueries({ queryKey: ['provider-health'] });
     },
@@ -341,7 +342,7 @@ function ProviderSettingRow({ setting, onSave }: { setting: ProviderSetting; onS
       }}
     >
       <strong className="pt-2 capitalize">{setting.provider}</strong>
-      <Field defaultValue={setting.base_url} label="Base URL" name="base_url" />
+      <Field defaultValue={setting.base_url} label="Default URL for new endpoints" name="base_url" />
       <Button className="mt-6" type="submit" variant="secondary">
         <Save size={16} />
         Save
