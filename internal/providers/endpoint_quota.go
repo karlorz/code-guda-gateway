@@ -37,9 +37,28 @@ type EndpointQuotaInput struct {
 	RawKey  string
 }
 
+// ResolvedEndpointQuota is the decrypted quota credential pair for one endpoint
+// row. Callers must not log APIKey.
+type ResolvedEndpointQuota struct {
+	EndpointID int64
+	Provider   string
+	Mode       QuotaMode
+	Flow       QuotaFlow
+	BaseURL    string
+	APIKey     string
+}
+
 // ErrInvalidQuotaConfig is returned when mode/flow/field combinations fail
 // validation so API and CLI callers can map the failure to HTTP 400.
 var ErrInvalidQuotaConfig = errors.New("providers: invalid endpoint quota config")
+
+// ErrQuotaDisabled is returned by ResolveEndpointQuota when the endpoint's
+// quota mode is disabled.
+var ErrQuotaDisabled = errors.New("providers: endpoint quota disabled")
+
+// ErrQuotaNotConfigured is returned when separate_credentials is set but no
+// encrypted quota key is present yet.
+var ErrQuotaNotConfigured = errors.New("providers: endpoint quota not configured")
 
 // DefaultQuotaConfig returns the creation default mode and flow for a provider.
 func DefaultQuotaConfig(provider string) (QuotaMode, QuotaFlow, error) {
