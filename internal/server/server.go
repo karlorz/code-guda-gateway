@@ -23,7 +23,6 @@ type Server struct {
 	proxy        *proxy.Proxy
 	gatewayKeys  *gatewaykeys.Service
 	providerKeys *providers.KeyRepo
-	settings     *providers.SettingsRepo
 	usage        *usage.UsageRepo
 	admin        http.Handler
 }
@@ -70,7 +69,6 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 		proxy:        px,
 		gatewayKeys:  gatewayKeys,
 		providerKeys: keyRepo,
-		settings:     settingsRepo,
 		usage:        usage.NewUsageRepo(db),
 		admin:        adminH,
 	}
@@ -138,13 +136,9 @@ func (s *Server) authorized(r *http.Request) (*gatewaykeys.DisplayKey, error) {
 }
 
 func (s *Server) forward(w http.ResponseWriter, r *http.Request, gwKey *gatewaykeys.DisplayKey, provider, path string) {
-	baseURL, err := s.settings.GetBaseURL(provider)
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
+	// Upstream base URL is selected per endpoint row (SelectEndpoint); provider_settings
+	// defaults no longer drive runtime routing.
 	res := s.proxy.Forward(w, r, proxy.Target{
-		BaseURL:  baseURL,
 		Path:     path,
 		Provider: provider,
 		Keys:     s.providerKeys,
