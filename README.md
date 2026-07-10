@@ -339,6 +339,10 @@ Every upstream credential is an **atomic endpoint pair**: one row owns both its
 `base_url` and encrypted API key. Runtime selection (`SelectEndpoint`) returns
 that pair together so retries never cross-wire key A to URL B.
 
+**Endpoint names are identifiers only** — they do not establish primary/backup
+roles or pool priority. Selection is sticky-winner + failure demotion (see
+below), ordered by demotion state and row id, never by name.
+
 ### Creating pairs
 
 Canonical CLI (key on stdin only; never pass secrets as argv):
@@ -369,10 +373,10 @@ counters, and quota history.
 
 ### Provider defaults
 
-`provider_settings.base_url` (and admin **Provider settings**) is only a
-**creation default** for new rows (and for the legacy `provider-key add`
-compatibility path). Changing a provider default does **not** mutate existing
-endpoint rows and does not re-route live traffic.
+`provider_settings.base_url` (and admin **Provider Endpoints** → collapsed
+**New endpoint defaults**) is only a **creation default** for new rows (and for
+the legacy `provider-key add` compatibility path). Changing a provider default
+does **not** mutate existing endpoint rows and does not re-route live traffic.
 
 Compiled defaults when settings are unset:
 
@@ -424,6 +428,122 @@ Key-named aliases remain through **`v0.4.x`** and are not removed before
 
 Compatibility mutations delegate to the same service as the canonical commands.
 
+## Endpoint quota sidecars
+
+Each endpoint row also owns an optional **quota sidecar** — configuration for
+how (or whether) plan/credit usage is refreshed for that row. Inference routing
+and quota refresh are independent:
+
+```text
+Inference: SelectEndpoint(provider) -> row base_url + inference key
+           -> cooldown / last_failed_at demotion on cool-policy failures
+
+Quota:     ResolveEndpointQuota(id) -> mode/flow + credentials
+           -> updates provider_key_quota_cache only
+```
+
+**Quota failures never cool, demote, disable, or reorder inference endpoints.**
+Inference failures never erase quota configuration or cache history.
+
+### Quota modes and flows
+
+| Mode | Credentials used | When to use |
+|---|---|---|
+| `disabled` | none | No quota refresh (Grok create default) |
+| `endpoint_credentials` | row inference `base_url` + key | Tavily/Firecrawl create default |
+| `separate_credentials` | `quota_base_url` + encrypted quota key | Grok via New API inference + owning Grok2API admin |
+
+| Flow | Provider |
+|---|---|
+| `grok2api_admin` | grok |
+| `tavily_usage` | tavily |
+| `firecrawl_credit_usage` | firecrawl |
+
+Creation defaults (migration `0009` backfill matches these):
+
+| Provider | Quota mode | Quota flow |
+|---|---|---|
+| Grok | `disabled` | `grok2api_admin` |
+| Tavily | `endpoint_credentials` | `tavily_usage` |
+| Firecrawl | `endpoint_credentials` | `firecrawl_credit_usage` |
+
+Grok often routes **inference** through a New API URL/token while **quota** must
+hit the matching Grok2API admin URL and admin key for that deployment. Use
+`separate_credentials` so each Grok endpoint row keeps its own quota URL/key and
+two rows cannot cross-use credentials.
+
+Tavily and Firecrawl normally reuse the same URL and key used for inference
+(`endpoint_credentials`).
+
+### Configuring quota (CLI)
+
+```bash
+# Create Grok with separate quota (inference key on stdin; quota key via file or
+# second prompt — never as argv):
+printf '%s' "$INF_KEY" | guda-gateway-admin provider-endpoint add \
+  --provider grok --name new-api-sg \
+  --base-url https://new-api.example/v1 \
+  --quota-mode separate_credentials \
+  --quota-flow grok2api_admin \
+  --quota-base-url https://grok2api.example \
+  --quota-key-file /path/to/quota.key
+
+# Change mode/flow/URL without rotating secrets:
+guda-gateway-admin provider-endpoint set-quota \
+  --id ID --mode separate_credentials --flow grok2api_admin \
+  --base-url https://grok2api.example
+
+# Rotate only the separate quota key (stdin):
+printf '%s' "$QUOTA_KEY" | guda-gateway-admin provider-endpoint rotate-quota-key --id ID
+
+# List includes safe quota metadata only (mode, flow, URL, configured flag, prefix):
+guda-gateway-admin provider-endpoint list
+```
+
+Admin API:
+
+| Action | Route |
+|---|---|
+| Create with nested `quota` | `POST /admin/api/provider-endpoints` |
+| Update mode/flow/URL | `POST /admin/api/provider-endpoints/{id}/update-quota` |
+| Rotate separate quota key | `POST /admin/api/provider-endpoints/{id}/rotate-quota-key` |
+
+List responses expose only safe fields: mode, flow, normalized quota URL, whether
+a separate key is configured, and prefix/fingerprint. Raw and encrypted keys are
+never returned.
+
+Switching away from `separate_credentials` deletes quota ciphertext and identity
+metadata. Switching back requires entering a new quota key.
+
+### Admin UI: configuration vs monitoring
+
+| Page | Route | Responsibility |
+|---|---|---|
+| **Provider Endpoints** | `/admin/provider-keys` | Create/edit endpoints, inference URL/key, quota mode/flow/URL, rotate keys, enable/disable/archive/delete, creation defaults |
+| **Provider Monitoring** | `/admin/providers` | Health tests, pool order/cooldown, inference vs quota status, refresh-one/refresh-all, Promote/Demote/Reset — **no** URL/credential/lifecycle editors |
+
+Quota operational vocabulary on monitoring: `disabled`, `not_configured`,
+`not_refreshed`, `available` / `ok`, or `refresh_failed` / `unavailable`.
+Refresh-all skips disabled quota sidecars and reports refreshed, failed, and
+skipped-disabled counts.
+
+### Legacy global Grok quota (`v0.4.x` compatibility)
+
+Provider-global Grok quota settings (`grok set-quota-mode`,
+`grok set-admin-base-url`, `grok set-admin-key`, and related admin APIs) remain
+readable and mutable through **`v0.4.x`** but are **deprecated**. They are
+**not** assigned to endpoint rows by migration `0009` and are **not** used by
+canonical per-endpoint quota refresh. Prefer `provider-endpoint set-quota` /
+`rotate-quota-key` (or the Provider Endpoints UI). Removal is not before
+**`v0.5.0`**.
+
+### Migration 0009
+
+Adds per-row `quota_mode`, `quota_flow`, `quota_base_url`, `encrypted_quota_key`,
+`quota_key_prefix`, and `quota_key_fingerprint`. Backfill sets provider defaults
+above; no row receives the legacy global Grok2API admin URL or key. Inference
+columns, row IDs, cooldowns, and demotion state are unchanged.
+
 ## Provider endpoint selection and cooldown
 
 Runtime selection is **sticky winner + failure demotion**, not classic
@@ -440,12 +560,16 @@ round-robin:
 5. Defaults: rate/plan cool **60s**, transient **30s**, credential **1h**,
    `max_retries` **3** (overridable via SQLite settings).
 
+Quota cache state is **not** an input to selection. A row with zero remaining
+plan quota may still be selected for inference; operators use monitoring refresh
+and pool demotion/cooldown tools as needed.
+
 Tavily upstream **432** is stored as key health `plan_limit_exceeded` and
 mapped to client **429** `tavily_plan_limit_exceeded` only if all attempts fail.
 
 ### Admin pool controls
 
-On **Providers** (per-provider pool table) and **Provider Endpoints**:
+On **Provider Monitoring** (per-provider pool table) and **Provider Endpoints**:
 
 | Action | Effect |
 |---|---|
@@ -473,9 +597,12 @@ Binary: `guda-gateway-admin`. Shared flags (before subcommand):
 - `--master-key` (default `/etc/code-guda-gateway/master.key`)
 
 Subcommands include `db migrate`, `token init|rotate|verify`, `gateway-key`,
-`provider-endpoint` (canonical: add with `--base-url`, list, set-base-url,
-rotate-key, reset-cooldown, reset-selection, demote, …),
+`provider-endpoint` (canonical: add with `--base-url` and optional quota flags,
+list, set-base-url, rotate-key, set-quota, rotate-quota-key, reset-cooldown,
+reset-selection, demote, …),
 `provider-key` (compatibility alias through `v0.4.x`),
+`grok` (legacy global Grok settings; global quota subcommands deprecated through
+`v0.4.x`),
 `settings`, `audit`, and `usage` — run with no args for usage.
 `token init` and `token rotate` print the raw admin token once; pass
 `--save-env ~/.secrets/guda-gateway.env` in local dev to also persist
