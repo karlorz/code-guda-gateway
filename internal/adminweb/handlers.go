@@ -231,6 +231,10 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 		h.handleProviderKeysCreate(w, r)
 	case strings.HasPrefix(path, "/admin/api/provider-keys/") && strings.HasSuffix(path, "/reset-cooldown") && r.Method == http.MethodPost:
 		h.handleProviderKeysResetCooldown(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-keys/") && strings.HasSuffix(path, "/reset-selection") && r.Method == http.MethodPost:
+		h.handleProviderKeysResetSelection(w, r)
+	case strings.HasPrefix(path, "/admin/api/provider-keys/") && strings.HasSuffix(path, "/demote") && r.Method == http.MethodPost:
+		h.handleProviderKeysDemote(w, r)
 	case strings.HasPrefix(path, "/admin/api/provider-keys/") && strings.HasSuffix(path, "/archive") && r.Method == http.MethodPost:
 		h.handleProviderKeysArchive(w, r)
 	case strings.HasPrefix(path, "/admin/api/provider-keys/") && strings.HasSuffix(path, "/restore") && r.Method == http.MethodPost:
@@ -577,6 +581,14 @@ func (h *Handler) handleProviderKeysDelete(w http.ResponseWriter, r *http.Reques
 
 func (h *Handler) handleProviderKeysResetCooldown(w http.ResponseWriter, r *http.Request) {
 	h.handleProviderKeyAction(w, r, "/reset-cooldown", h.deps.ProviderKeys.ResetCooldown)
+}
+
+func (h *Handler) handleProviderKeysResetSelection(w http.ResponseWriter, r *http.Request) {
+	h.handleProviderKeyAction(w, r, "/reset-selection", h.deps.ProviderKeys.ResetSelection)
+}
+
+func (h *Handler) handleProviderKeysDemote(w http.ResponseWriter, r *http.Request) {
+	h.handleProviderKeyAction(w, r, "/demote", h.deps.ProviderKeys.DemoteToEnd)
 }
 
 func (h *Handler) handleProviderKeyAction(w http.ResponseWriter, r *http.Request, suffix string, action func(int64) error) {

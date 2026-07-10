@@ -362,7 +362,7 @@ func (a *app) cmdGatewayKey(args []string) int {
 
 func (a *app) cmdProviderKey(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.stderr, "usage: provider-key add|list|disable|enable|archive|restore|reset-cooldown|delete")
+		fmt.Fprintln(a.stderr, "usage: provider-key add|list|disable|enable|archive|restore|reset-cooldown|reset-selection|demote|delete")
 		return exitUsage
 	}
 	mk, err := a.masterKey()
@@ -426,7 +426,7 @@ func (a *app) cmdProviderKey(args []string) int {
 		}
 		_ = w.Flush()
 		return exitOK
-	case "disable", "enable", "archive", "restore", "reset-cooldown", "delete":
+	case "disable", "enable", "archive", "restore", "reset-cooldown", "reset-selection", "demote", "delete":
 		id, ok := flagInt64(args[1:], "--id")
 		if !ok {
 			fmt.Fprintf(a.stderr, "provider-key %s requires --id\n", args[0])
@@ -444,6 +444,10 @@ func (a *app) cmdProviderKey(args []string) int {
 			err = repo.RestoreArchived(id)
 		case "reset-cooldown":
 			err = repo.ResetCooldown(id)
+		case "reset-selection":
+			err = repo.ResetSelection(id)
+		case "demote":
+			err = repo.DemoteToEnd(id)
 		case "delete":
 			err = repo.Delete(id)
 		}
@@ -640,7 +644,7 @@ Commands:
   token init|rotate [--save-env PATH] [--env-key NAME] | token verify [--token TOKEN]
   gateway-key create --name NAME | list | disable|enable|revoke|delete --id ID
   provider-key add --provider grok|tavily|firecrawl --name NAME (key on stdin only; never pass secrets as argv)
-  provider-key list | disable|enable|archive|restore|reset-cooldown|delete --id ID
+  provider-key list | disable|enable|archive|restore|reset-cooldown|reset-selection|demote|delete --id ID
   grok set-base-url URL | get-base-url | set-quota-mode MODE | get-quota-mode | set-admin-base-url URL | get-admin-base-url | set-admin-key
   audit tail [--limit N]
   db migrate`)

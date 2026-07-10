@@ -41,6 +41,8 @@ export type ProviderKey = {
   CooldownUntil?: string;
   cooldown_until?: string;
   cooldown_reason?: string;
+  LastFailedAt?: string;
+  last_failed_at?: string;
   LastEventAt?: string;
   last_event_at?: string;
   LastEventSource?: string;

@@ -27,7 +27,10 @@ export function ProviderKeysPage() {
   const action = useMutation({
     mutationFn: ({ id, path, body }: { id: number; path?: string; body?: unknown }) =>
       apiFetch(`/admin/api/provider-keys/${id}${path ?? ''}`, { method: path ? 'POST' : 'PATCH', body: body ? JSON.stringify(body) : undefined }),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ['provider-keys'] }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['provider-keys'] });
+      void qc.invalidateQueries({ queryKey: ['provider-pools'] });
+    },
   });
 
   function submit(event: FormEvent) {
@@ -68,6 +71,9 @@ export function ProviderKeysPage() {
             const id = valueOf<number>(record, 'ID', 'id', 0);
             const enabled = valueOf<boolean>(record, 'Enabled', 'enabled', false);
             const archived = valueOf<string | undefined>(record, 'ArchivedAt', 'archived_at', undefined);
+            const cooldownReason = valueOf<string>(record, 'CooldownReason', 'cooldown_reason', '');
+            const lastFailedAt = valueOf<string | undefined>(record, 'LastFailedAt', 'last_failed_at', undefined);
+            const cooldownUntil = valueOf<string | undefined>(record, 'CooldownUntil', 'cooldown_until', undefined);
             return {
               id,
               cols: [
@@ -75,6 +81,16 @@ export function ProviderKeysPage() {
                 valueOf<string>(record, 'Name', 'name', ''),
                 valueOf<string>(record, 'KeyPrefix', 'key_prefix', ''),
                 archived ? <Badge tone="bad">archived</Badge> : <Badge tone={enabled ? 'good' : 'warn'}>{enabled ? 'enabled' : 'disabled'}</Badge>,
+                cooldownReason || cooldownUntil ? (
+                  <span className="text-xs text-zinc-600">{cooldownReason || 'cooling'}{cooldownUntil ? ` · until ${new Date(cooldownUntil).toLocaleString()}` : ''}</span>
+                ) : (
+                  '—'
+                ),
+                lastFailedAt ? (
+                  <span className="text-xs text-amber-700" title={lastFailedAt}>demoted {new Date(lastFailedAt).toLocaleString()}</span>
+                ) : (
+                  <span className="text-xs text-zinc-500">front</span>
+                ),
               ],
               actions: (
                 <>
@@ -82,7 +98,13 @@ export function ProviderKeysPage() {
                     {enabled ? 'Disable' : 'Enable'}
                   </Button>
                   <Button disabled={action.isPending || Boolean(archived)} onClick={() => action.mutate({ id, path: '/reset-cooldown' })} type="button" variant="secondary">
-                    Reset cooldown
+                    Reset cool+order
+                  </Button>
+                  <Button disabled={action.isPending || Boolean(archived) || !lastFailedAt} onClick={() => action.mutate({ id, path: '/reset-selection' })} type="button" variant="secondary">
+                    Promote
+                  </Button>
+                  <Button disabled={action.isPending || Boolean(archived)} onClick={() => action.mutate({ id, path: '/demote' })} type="button" variant="secondary">
+                    Demote
                   </Button>
                   <Button disabled={action.isPending} onClick={() => action.mutate({ id, path: archived ? '/restore' : '/archive' })} type="button" variant="danger">
                     {archived ? 'Restore' : 'Archive'}

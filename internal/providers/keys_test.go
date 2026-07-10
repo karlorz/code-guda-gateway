@@ -412,3 +412,121 @@ func TestRawKey_RoundTripAndMissing(t *testing.T) {
 		t.Fatal("expected error for nonexistent id")
 	}
 }
+
+func TestSelectKey_DemotesFailedKeyToEnd(t *testing.T) {
+	t.Parallel()
+	repo, st, _ := openKeyRepo(t)
+	_, d1 := mustAdd(t, repo, providers.ProviderTavily, "a", "tvly-key-aaaa1111bbbb2222")
+	_, d2 := mustAdd(t, repo, providers.ProviderTavily, "b", "tvly-key-cccc3333dddd4444")
+
+	// Default: lowest id first.
+	id, _, err := repo.SelectKey(providers.ProviderTavily)
+	if err != nil {
+		t.Fatalf("SelectKey: %v", err)
+	}
+	if id != d1.ID {
+		t.Fatalf("first select = %d, want %d", id, d1.ID)
+	}
+
+	until := time.Now().UTC().Add(time.Hour)
+	reason := "plan_limit_exceeded"
+	if err := repo.MarkFailureWithCooldown(d1.ID, 432, "plan limit", &until, &reason); err != nil {
+		t.Fatalf("MarkFailureWithCooldown: %v", err)
+	}
+	// While cooled, only d2.
+	id, _, err = repo.SelectKey(providers.ProviderTavily)
+	if err != nil {
+		t.Fatalf("SelectKey cooled: %v", err)
+	}
+	if id != d2.ID {
+		t.Fatalf("while cooled got %d, want %d", id, d2.ID)
+	}
+
+	// Expire cooldown but keep last_failed_at demotion.
+	past := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	if _, err := st.DB().Exec(
+		`UPDATE provider_keys SET cooldown_until = ?, cooldown_reason = ? WHERE id = ?`,
+		past, "plan_limit_exceeded", d1.ID,
+	); err != nil {
+		t.Fatalf("expire cool: %v", err)
+	}
+	id, _, err = repo.SelectKey(providers.ProviderTavily)
+	if err != nil {
+		t.Fatalf("SelectKey demoted: %v", err)
+	}
+	if id != d2.ID {
+		t.Fatalf("after demote got %d, want never-failed %d", id, d2.ID)
+	}
+
+	// Promote d1 (clear demotion) → back to lowest id among front pack.
+	if err := repo.ResetSelection(d1.ID); err != nil {
+		t.Fatalf("ResetSelection: %v", err)
+	}
+	id, _, err = repo.SelectKey(providers.ProviderTavily)
+	if err != nil {
+		t.Fatalf("SelectKey after promote: %v", err)
+	}
+	if id != d1.ID {
+		t.Fatalf("after promote got %d, want %d", id, d1.ID)
+	}
+}
+
+func TestMarkSuccess_ClearsLastFailedAt(t *testing.T) {
+	t.Parallel()
+	repo, _, _ := openKeyRepo(t)
+	_, d := mustAdd(t, repo, providers.ProviderGrok, "s", "xai-success-demote-55555555")
+	if err := repo.DemoteToEnd(d.ID); err != nil {
+		t.Fatalf("DemoteToEnd: %v", err)
+	}
+	got, err := repo.Get(d.ID)
+	if err != nil || got.LastFailedAt == nil {
+		t.Fatalf("expected last_failed_at set, got %+v err=%v", got, err)
+	}
+	if err := repo.MarkSuccess(d.ID); err != nil {
+		t.Fatalf("MarkSuccess: %v", err)
+	}
+	got, err = repo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.LastFailedAt != nil {
+		t.Fatalf("last_failed_at after success = %v, want nil", *got.LastFailedAt)
+	}
+}
+
+func TestResetCooldown_ClearsDemotion(t *testing.T) {
+	t.Parallel()
+	repo, _, _ := openKeyRepo(t)
+	_, d := mustAdd(t, repo, providers.ProviderGrok, "c", "xai-cool-demote-6666666666")
+	until := time.Now().UTC().Add(time.Minute)
+	reason := "rate_limited"
+	if err := repo.MarkFailureWithCooldown(d.ID, 429, "limited", &until, &reason); err != nil {
+		t.Fatalf("MarkFailureWithCooldown: %v", err)
+	}
+	if err := repo.ResetCooldown(d.ID); err != nil {
+		t.Fatalf("ResetCooldown: %v", err)
+	}
+	got, err := repo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.CooldownUntil != nil || got.CooldownReason != nil || got.LastFailedAt != nil {
+		t.Fatalf("expected clear cool+demote, got until=%v reason=%v failed=%v", got.CooldownUntil, got.CooldownReason, got.LastFailedAt)
+	}
+}
+
+func TestMarkFailureWithoutCooldown_DoesNotDemote(t *testing.T) {
+	t.Parallel()
+	repo, _, _ := openKeyRepo(t)
+	_, d := mustAdd(t, repo, providers.ProviderGrok, "f", "xai-nodemote-777777777777")
+	if err := repo.MarkFailure(d.ID, 400, "bad request"); err != nil {
+		t.Fatalf("MarkFailure: %v", err)
+	}
+	got, err := repo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.LastFailedAt != nil {
+		t.Fatalf("unexpected demotion on non-cool failure: %v", *got.LastFailedAt)
+	}
+}

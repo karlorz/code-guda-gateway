@@ -202,6 +202,21 @@ credentials and avoid fragile `.git` ownership or macOS metadata drift.
 
 ## Local development
 
+### One-command dev boot
+
+```bash
+./scripts/dev-up.sh            # start if not already healthy
+./scripts/dev-up.sh --status
+./scripts/dev-up.sh --rebuild  # rebuild binary then start
+./scripts/dev-up.sh --stop
+./scripts/dev-up.sh --fg       # foreground
+```
+
+Loads `~/.secrets/guda-gateway.env` when present, uses the persistent pair
+`~/.local/share/guda-gateway/{gateway.db,master.key}`, sets
+`GUDA_ADMIN_COOKIE_SECURE=false`, builds `./guda-gateway` if missing, and
+health-checks `http://127.0.0.1:8080/healthz`. Log: `/tmp/guda-gateway-dev.log`.
+
 There are two local dev path setups. **Do not mix them** - the SQLite DB and
 master key file are a pair; if you seed keys with one master key and run the
 gateway with another, provider key decryption fails with
@@ -271,7 +286,7 @@ The React admin UI lives in `web/admin`. During local frontend work, run the Go
 server and Vite dev server separately:
 
 ```bash
-GUDA_ADMIN_COOKIE_SECURE=false ADDR=127.0.0.1:8080 go run ./cmd/guda-gateway
+./scripts/dev-up.sh
 bun run --cwd web/admin dev
 ```
 

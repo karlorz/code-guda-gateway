@@ -1290,3 +1290,48 @@ func truncate(s string, n int) string {
 	}
 	return s[:n]
 }
+
+func TestProviderKeys_ResetSelectionAndDemote(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	c := loginSession(t, app, initToken(t, auth))
+	d, err := keyRepo.Add(providers.ProviderGrok, "ord", "xai-order-key-1234567890")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := keyRepo.DemoteToEnd(d.ID); err != nil {
+		t.Fatalf("DemoteToEnd: %v", err)
+	}
+	path := "/admin/api/provider-keys/" + strconv.FormatInt(d.ID, 10) + "/reset-selection"
+	req := httptest.NewRequest(http.MethodPost, path, nil)
+	req.Header.Set("X-CSRF-Token", csrfForTest(t, app, c))
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reset-selection status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	got, err := keyRepo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.LastFailedAt != nil {
+		t.Fatalf("last_failed_at still set after reset-selection")
+	}
+
+	path = "/admin/api/provider-keys/" + strconv.FormatInt(d.ID, 10) + "/demote"
+	req = httptest.NewRequest(http.MethodPost, path, nil)
+	req.Header.Set("X-CSRF-Token", csrfForTest(t, app, c))
+	req.AddCookie(c)
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("demote status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	got, err = keyRepo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get after demote: %v", err)
+	}
+	if got.LastFailedAt == nil {
+		t.Fatal("expected last_failed_at after demote")
+	}
+}

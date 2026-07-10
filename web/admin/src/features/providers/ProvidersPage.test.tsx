@@ -62,7 +62,7 @@ describe('ProvidersPage pools', () => {
           items: [
             {
               status: 'cooling',
-              key: { id: 5, provider: 'tavily', name: 'tavily-1', fingerprint: '1c105c', enabled: true, cooldown_reason: 'plan_limit_exceeded' },
+              key: { id: 5, provider: 'tavily', name: 'tavily-1', fingerprint: '1c105c', enabled: true, cooldown_reason: 'plan_limit_exceeded', last_failed_at: '2026-07-09T00:00:00Z' },
               quota: { provider_key_id: 5, provider: 'tavily', available: false, source: 'tavily_usage', checked_at: '2026-07-09T00:00:00Z' },
             },
             {
@@ -108,7 +108,7 @@ describe('ProvidersPage pools', () => {
           items: [
             {
               status: 'cooling',
-              key: { id: 5, provider: 'tavily', name: 'tavily-1', fingerprint: '1c105c', enabled: true, cooldown_reason: 'plan_limit_exceeded' },
+              key: { id: 5, provider: 'tavily', name: 'tavily-1', fingerprint: '1c105c', enabled: true, cooldown_reason: 'plan_limit_exceeded', last_failed_at: '2026-07-09T00:00:00Z' },
               quota: { provider_key_id: 5, provider: 'tavily', available: false, source: 'tavily_usage', checked_at: '2026-07-09T00:00:00Z' },
             },
             {

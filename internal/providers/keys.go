@@ -26,6 +26,7 @@ type DisplayProviderKey struct {
 	Enabled                  bool
 	CooldownUntil            *string
 	CooldownReason           *string
+	LastFailedAt             *string
 	LastUsedAt               *string
 	LastSuccessAt            *string
 	LastErrorAt              *string
@@ -110,7 +111,7 @@ func (r *KeyRepo) List(provider string) ([]DisplayProviderKey, error) {
 	}
 	rows, err := r.db.Query(`
 		SELECT id, provider, name, key_prefix, fingerprint, enabled,
-			cooldown_until, cooldown_reason, last_used_at, last_success_at,
+			cooldown_until, cooldown_reason, last_failed_at, last_used_at, last_success_at,
 			last_error_at, last_error_status, last_error_message_redacted,
 			archived_at, last_event_at, last_event_source, last_event_status_class,
 			last_event_http_status, last_event_message_redacted,
@@ -135,7 +136,7 @@ func (r *KeyRepo) List(provider string) ([]DisplayProviderKey, error) {
 func (r *KeyRepo) Get(id int64) (DisplayProviderKey, error) {
 	row := r.db.QueryRow(`
 		SELECT id, provider, name, key_prefix, fingerprint, enabled,
-			cooldown_until, cooldown_reason, last_used_at, last_success_at,
+			cooldown_until, cooldown_reason, last_failed_at, last_used_at, last_success_at,
 			last_error_at, last_error_status, last_error_message_redacted,
 			archived_at, last_event_at, last_event_source, last_event_status_class,
 			last_event_http_status, last_event_message_redacted,
@@ -158,15 +159,56 @@ func (r *KeyRepo) Enable(id int64) error {
 	return r.setEnabled(id, true)
 }
 
-// ResetCooldown clears cooldown_until and cooldown_reason for a provider key.
+// ResetCooldown clears cooldown and failure-demotion order for a provider key.
 func (r *KeyRepo) ResetCooldown(id int64) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	res, err := r.db.Exec(`
-		UPDATE provider_keys SET cooldown_until = NULL, cooldown_reason = NULL, updated_at = ? WHERE id = ?`,
+		UPDATE provider_keys SET
+			cooldown_until = NULL,
+			cooldown_reason = NULL,
+			last_failed_at = NULL,
+			updated_at = ?
+		WHERE id = ?`,
 		now, id,
 	)
 	if err != nil {
 		return fmt.Errorf("reset cooldown: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("provider key %d: not found", id)
+	}
+	return nil
+}
+
+// ResetSelection clears only last_failed_at so the key re-enters the never-failed pack.
+// Cooldown is left unchanged.
+func (r *KeyRepo) ResetSelection(id int64) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := r.db.Exec(`
+		UPDATE provider_keys SET last_failed_at = NULL, updated_at = ? WHERE id = ?`,
+		now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("reset selection: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("provider key %d: not found", id)
+	}
+	return nil
+}
+
+// DemoteToEnd marks the key as most-recently-failed so SelectKey ranks it last
+// among non-cooled keys. Does not set cooldown.
+func (r *KeyRepo) DemoteToEnd(id int64) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := r.db.Exec(`
+		UPDATE provider_keys SET last_failed_at = ?, updated_at = ? WHERE id = ?`,
+		now, now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("demote provider key: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
@@ -225,8 +267,13 @@ func (r *KeyRepo) Delete(id int64) error {
 	return nil
 }
 
-// SelectKey picks the lowest-id enabled key not in cooldown, decrypts it, and updates last_used_at.
-// Selection policy: ORDER BY id ASC LIMIT 1 (documented for Task 6 replacement).
+// SelectKey picks an enabled key not in cooldown, decrypts it, and updates last_used_at.
+// Selection policy (sticky winner + failure demotion):
+//
+//	ORDER BY last_failed_at ASC NULLS FIRST, id ASC
+//
+// Never-failed keys (NULL last_failed_at) sort first; among demoted keys the oldest
+// failure is tried first. Cooldown still excludes keys until cooldown_until.
 func (r *KeyRepo) SelectKey(provider string) (keyID int64, rawKey string, err error) {
 	if err := validateProvider(provider); err != nil {
 		return 0, "", err
@@ -239,7 +286,8 @@ func (r *KeyRepo) SelectKey(provider string) (keyID int64, rawKey string, err er
 		WHERE provider = ? AND enabled = 1
 		  AND (cooldown_until IS NULL OR cooldown_until < ?)
 		  AND archived_at IS NULL
-		ORDER BY id ASC LIMIT 1`,
+		ORDER BY last_failed_at IS NOT NULL, last_failed_at ASC, id ASC
+		LIMIT 1`,
 		provider, now,
 	).Scan(&id, &enc)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -302,13 +350,14 @@ func (r *KeyRepo) MarkLastEvent(keyID int64, ev LastEvent) error {
 	return nil
 }
 
-// MarkSuccess records a successful upstream use for cooldown tracking (Task 6).
+// MarkSuccess records a successful upstream use and clears failure demotion.
 func (r *KeyRepo) MarkSuccess(keyID int64) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := r.db.Exec(`
 		UPDATE provider_keys SET
 			last_success_at = ?,
 			consecutive_failures = 0,
+			last_failed_at = NULL,
 			updated_at = ?
 		WHERE id = ?`, now, now, keyID)
 	if err != nil {
@@ -323,6 +372,8 @@ func (r *KeyRepo) MarkFailure(keyID int64, status int, redactedMsg string) error
 }
 
 // MarkFailureWithCooldown records failure and optionally sets cooldown_until/reason.
+// When a cooldown is applied (until != nil), last_failed_at is also set so the key
+// sorts to the end of the selection pack after cool expires.
 func (r *KeyRepo) MarkFailureWithCooldown(keyID int64, status int, redactedMsg string, until *time.Time, reason *string) error {
 	msg := Redact(redactedMsg)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -333,6 +384,11 @@ func (r *KeyRepo) MarkFailureWithCooldown(keyID int64, status int, redactedMsg s
 	if reason != nil {
 		reasonStr = *reason
 	}
+	// Only demote when a cooldown policy is applied (same outcomes as cool policies).
+	var lastFailed interface{}
+	if until != nil {
+		lastFailed = now
+	}
 	_, err := r.db.Exec(`
 		UPDATE provider_keys SET
 			last_error_at = ?,
@@ -342,8 +398,9 @@ func (r *KeyRepo) MarkFailureWithCooldown(keyID int64, status int, redactedMsg s
 			total_failures = total_failures + 1,
 			cooldown_until = ?,
 			cooldown_reason = ?,
+			last_failed_at = COALESCE(?, last_failed_at),
 			updated_at = ?
-		WHERE id = ?`, now, status, msg, untilStr, reasonStr, now, keyID)
+		WHERE id = ?`, now, status, msg, untilStr, reasonStr, lastFailed, now, keyID)
 	if err != nil {
 		return fmt.Errorf("mark failure: %w", err)
 	}
@@ -406,7 +463,7 @@ type displayKeyScanner interface {
 func scanDisplayKey(row displayKeyScanner) (DisplayProviderKey, error) {
 	var d DisplayProviderKey
 	var enabled int
-	var cooldownUntil, cooldownReason sql.NullString
+	var cooldownUntil, cooldownReason, lastFailedAt sql.NullString
 	var lastUsed, lastSuccess, lastError sql.NullString
 	var lastStatus sql.NullInt64
 	var lastMsg sql.NullString
@@ -414,7 +471,7 @@ func scanDisplayKey(row displayKeyScanner) (DisplayProviderKey, error) {
 	var lastEventHTTPStatus sql.NullInt64
 	if err := row.Scan(
 		&d.ID, &d.Provider, &d.Name, &d.KeyPrefix, &d.Fingerprint, &enabled,
-		&cooldownUntil, &cooldownReason, &lastUsed, &lastSuccess,
+		&cooldownUntil, &cooldownReason, &lastFailedAt, &lastUsed, &lastSuccess,
 		&lastError, &lastStatus, &lastMsg,
 		&archivedAt, &lastEventAt, &lastEventSource, &lastEventStatusClass,
 		&lastEventHTTPStatus, &lastEventMsg,
@@ -425,6 +482,7 @@ func scanDisplayKey(row displayKeyScanner) (DisplayProviderKey, error) {
 	d.Enabled = enabled != 0
 	d.CooldownUntil = nullStrPtr(cooldownUntil)
 	d.CooldownReason = nullStrPtr(cooldownReason)
+	d.LastFailedAt = nullStrPtr(lastFailedAt)
 	d.LastUsedAt = nullStrPtr(lastUsed)
 	d.LastSuccessAt = nullStrPtr(lastSuccess)
 	d.LastErrorAt = nullStrPtr(lastError)

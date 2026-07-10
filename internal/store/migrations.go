@@ -36,6 +36,10 @@ var migrations = []migration{
 		id:  "0006",
 		sql: migration0006,
 	},
+	{
+		id:  "0007",
+		sql: migration0007,
+	},
 }
 
 const migration0002 = `
@@ -118,6 +122,14 @@ CREATE INDEX IF NOT EXISTS idx_proxy_attempt_logs_request_id
 
 CREATE INDEX IF NOT EXISTS idx_proxy_attempt_logs_occurred_at
   ON proxy_attempt_logs(occurred_at, id);
+`
+
+// last_failed_at drives sticky-winner failure demotion:
+// SelectKey orders never-failed keys first, then oldest failure, then id.
+const migration0007 = `
+ALTER TABLE provider_keys ADD COLUMN last_failed_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_provider_keys_select
+  ON provider_keys(provider, enabled, last_failed_at, id);
 `
 
 const migration0001 = `

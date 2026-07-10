@@ -59,7 +59,7 @@ describe('ProviderKeysPage mutations', () => {
   it('calls POST reset-cooldown and archive', async () => {
     renderWithClient(<ProviderKeysPage />);
     await screen.findByText('primary');
-    fireEvent.click(screen.getByRole('button', { name: 'Reset cooldown' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Reset cool+order' }));
     await waitFor(() => {
       expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-keys/42/reset-cooldown', { method: 'POST', body: undefined });
     });
