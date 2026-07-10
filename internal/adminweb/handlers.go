@@ -550,7 +550,7 @@ func (h *Handler) handleProviderKeysCreate(w http.ResponseWriter, r *http.Reques
 		display, err = h.deps.ProviderKeys.Add(body.Provider, body.Name, rawKey)
 	}
 	if err != nil {
-		if errors.Is(err, providers.ErrDuplicateName) || errors.Is(err, providers.ErrUnknownProvider) {
+		if errors.Is(err, providers.ErrDuplicateName) || errors.Is(err, providers.ErrUnknownProvider) || errors.Is(err, providers.ErrInvalidBaseURL) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -589,7 +589,7 @@ func (h *Handler) handleProviderEndpointsCreate(w http.ResponseWriter, r *http.R
 	}
 	display, err := h.deps.ProviderKeys.AddEndpoint(body.Provider, body.Name, body.BaseURL, rawKey)
 	if err != nil {
-		if errors.Is(err, providers.ErrDuplicateName) || errors.Is(err, providers.ErrUnknownProvider) {
+		if errors.Is(err, providers.ErrDuplicateName) || errors.Is(err, providers.ErrUnknownProvider) || errors.Is(err, providers.ErrInvalidBaseURL) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -621,10 +621,22 @@ func (h *Handler) handleProviderEndpointsUpdateBaseURL(w http.ResponseWriter, r 
 	}
 	row, err := h.deps.ProviderKeys.Get(id)
 	if err != nil {
+		if errors.Is(err, providers.ErrProviderKeyNotFound) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", "provider endpoint not found")
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	if err := h.deps.ProviderKeys.UpdateBaseURL(id, body.BaseURL); err != nil {
+		if errors.Is(err, providers.ErrInvalidBaseURL) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		if errors.Is(err, providers.ErrProviderKeyNotFound) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", "provider endpoint not found")
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -712,6 +724,14 @@ func (h *Handler) handleProviderEndpointsPatch(w http.ResponseWriter, r *http.Re
 	switch {
 	case strings.TrimSpace(body.BaseURL) != "":
 		if err := h.deps.ProviderKeys.UpdateBaseURL(id, body.BaseURL); err != nil {
+			if errors.Is(err, providers.ErrInvalidBaseURL) {
+				writeAPIError(w, http.StatusBadRequest, "bad_request", err.Error())
+				return
+			}
+			if errors.Is(err, providers.ErrProviderKeyNotFound) {
+				writeAPIError(w, http.StatusBadRequest, "bad_request", "provider endpoint not found")
+				return
+			}
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -845,6 +865,10 @@ func (h *Handler) handleGrokPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.deps.Settings.SetBaseURL(providers.ProviderGrok, body.BaseURL); err != nil {
+		if errors.Is(err, providers.ErrInvalidBaseURL) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -880,6 +904,10 @@ func (h *Handler) handleProviderSettingsPatch(w http.ResponseWriter, r *http.Req
 	if err := h.deps.Settings.SetBaseURL(provider, body.BaseURL); err != nil {
 		if errors.Is(err, providers.ErrUnknownProvider) {
 			writeAPIError(w, http.StatusBadRequest, "bad_request", "unknown provider")
+			return
+		}
+		if errors.Is(err, providers.ErrInvalidBaseURL) {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
 		http.Error(w, "internal error", http.StatusInternalServerError)

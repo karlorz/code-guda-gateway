@@ -94,7 +94,7 @@ func (r *KeyRepo) AddEndpoint(provider, name, baseURL, rawKey string) (DisplayPr
 	}
 	normalized, err := NormalizeBaseURL(baseURL)
 	if err != nil {
-		return DisplayProviderKey{}, fmt.Errorf("add provider endpoint: %w", err)
+		return DisplayProviderKey{}, err
 	}
 	var existing int
 	if err := r.db.QueryRow(
@@ -176,7 +176,7 @@ func (r *KeyRepo) Get(id int64) (DisplayProviderKey, error) {
 		FROM provider_keys WHERE id = ?`, id)
 	d, err := scanDisplayKey(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return DisplayProviderKey{}, fmt.Errorf("provider key %d: not found", id)
+		return DisplayProviderKey{}, fmt.Errorf("%w: id %d", ErrProviderKeyNotFound, id)
 	}
 	return d, err
 }
@@ -208,7 +208,7 @@ func (r *KeyRepo) ResetCooldown(id int64) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("provider key %d: not found", id)
+		return fmt.Errorf("%w: id %d", ErrProviderKeyNotFound, id)
 	}
 	return nil
 }
@@ -226,7 +226,7 @@ func (r *KeyRepo) ResetSelection(id int64) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("provider key %d: not found", id)
+		return fmt.Errorf("%w: id %d", ErrProviderKeyNotFound, id)
 	}
 	return nil
 }
@@ -244,7 +244,7 @@ func (r *KeyRepo) DemoteToEnd(id int64) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("provider key %d: not found", id)
+		return fmt.Errorf("%w: id %d", ErrProviderKeyNotFound, id)
 	}
 	return nil
 }
@@ -258,7 +258,7 @@ func (r *KeyRepo) Archive(id int64) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("provider key %d: not found", id)
+		return fmt.Errorf("%w: id %d", ErrProviderKeyNotFound, id)
 	}
 	return nil
 }
@@ -272,7 +272,7 @@ func (r *KeyRepo) RestoreArchived(id int64) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("provider key %d: not found", id)
+		return fmt.Errorf("%w: id %d", ErrProviderKeyNotFound, id)
 	}
 	return nil
 }
@@ -375,7 +375,7 @@ func (r *KeyRepo) RawEndpoint(id int64) (SelectedEndpoint, error) {
 		`SELECT id, provider, name, base_url, encrypted_key FROM provider_keys WHERE id = ?`, id,
 	).Scan(&id, &provider, &name, &baseURL, &enc)
 	if errors.Is(err, sql.ErrNoRows) {
-		return SelectedEndpoint{}, fmt.Errorf("provider key %d: not found", id)
+		return SelectedEndpoint{}, fmt.Errorf("%w: id %d", ErrProviderKeyNotFound, id)
 	}
 	if err != nil {
 		return SelectedEndpoint{}, fmt.Errorf("load provider key: %w", err)
@@ -416,7 +416,7 @@ func (r *KeyRepo) UpdateBaseURL(id int64, baseURL string) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("provider key %d: not found", id)
+		return fmt.Errorf("%w: id %d", ErrProviderKeyNotFound, id)
 	}
 	return nil
 }
@@ -451,7 +451,7 @@ func (r *KeyRepo) RotateKey(id int64, rawKey string) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("provider key %d: not found", id)
+		return fmt.Errorf("%w: id %d", ErrProviderKeyNotFound, id)
 	}
 	return nil
 }

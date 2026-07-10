@@ -8,30 +8,31 @@ import (
 
 // NormalizeBaseURL validates and normalizes an operator-provided endpoint base.
 // Provider-specific path prefixes are preserved; only trailing slashes are removed.
+// Validation failures wrap ErrInvalidBaseURL so callers can map them to HTTP 400.
 func NormalizeBaseURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return "", fmt.Errorf("base URL is required")
+		return "", fmt.Errorf("%w: base URL is required", ErrInvalidBaseURL)
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("parse base URL: %w", err)
+		return "", fmt.Errorf("%w: parse base URL: %v", ErrInvalidBaseURL, err)
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("base URL scheme must be http or https")
+		return "", fmt.Errorf("%w: base URL scheme must be http or https", ErrInvalidBaseURL)
 	}
 	if u.Hostname() == "" || u.Opaque != "" {
-		return "", fmt.Errorf("base URL must include a host")
+		return "", fmt.Errorf("%w: base URL must include a host", ErrInvalidBaseURL)
 	}
 	if u.User != nil {
-		return "", fmt.Errorf("base URL must not include user information")
+		return "", fmt.Errorf("%w: base URL must not include user information", ErrInvalidBaseURL)
 	}
 	if u.RawQuery != "" || u.ForceQuery {
-		return "", fmt.Errorf("base URL must not include a query string")
+		return "", fmt.Errorf("%w: base URL must not include a query string", ErrInvalidBaseURL)
 	}
 	if u.Fragment != "" {
-		return "", fmt.Errorf("base URL must not include a fragment")
+		return "", fmt.Errorf("%w: base URL must not include a fragment", ErrInvalidBaseURL)
 	}
 	u.Path = strings.TrimRight(u.Path, "/")
 	u.RawPath = strings.TrimRight(u.RawPath, "/")

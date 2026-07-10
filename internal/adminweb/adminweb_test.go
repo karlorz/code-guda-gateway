@@ -1574,3 +1574,58 @@ func TestProviderEndpoint_AndLegacyProviderKey_SameStableRowID(t *testing.T) {
 		t.Fatal("last_failed_at still set after reset-selection")
 	}
 }
+
+func TestProviderEndpoint_CreateInvalidURLReturns400(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	cases := []string{
+		"https://user:pass@example.com/v1",
+		"https://example.com/v1?api_key=x",
+		"https://example.com/v1#frag",
+	}
+	for i, bad := range cases {
+		name := "bad-" + strconv.Itoa(i)
+		body := `{"provider":"tavily","name":"` + name + `","base_url":"` + bad + `","key":"tvly-bad-url-key-aaaaaaaa"}`
+		rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-endpoints", body, csrf, c)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("create bad URL %q status=%d body=%s", bad, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestProviderEndpoint_UpdateBaseURLInvalidReturns400(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	d, err := keyRepo.AddEndpoint(providers.ProviderGrok, "url-bad", "https://api.x.ai/v1", "xai-url-bad-key-12345678")
+	if err != nil {
+		t.Fatalf("AddEndpoint: %v", err)
+	}
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	path := "/admin/api/provider-endpoints/" + strconv.FormatInt(d.ID, 10) + "/update-base-url"
+	rec := serveMutatingAdmin(app, http.MethodPost, path, `{"base_url":"https://user:pass@host.example/v1"}`, csrf, c)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("update-base-url invalid status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got, err := keyRepo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.BaseURL != "https://api.x.ai/v1" {
+		t.Fatalf("BaseURL mutated on validation failure: %q", got.BaseURL)
+	}
+}
+
+func TestProviderSettingsPatch_InvalidURLReturns400(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	rec := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/provider-settings/tavily",
+		`{"base_url":"https://user:pass@evil.example/v1"}`, csrf, c)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("settings patch invalid status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "bad_request") && !strings.Contains(rec.Body.String(), "user") {
+		// structured bad_request preferred; message may mention user info
+		if !strings.Contains(rec.Body.String(), "invalid") && !strings.Contains(rec.Body.String(), "user") {
+			t.Logf("body=%s", rec.Body.String())
+		}
+	}
+}

@@ -770,3 +770,91 @@ func TestProviderDefaultChange_DoesNotChangeEndpointQuotaURL(t *testing.T) {
 		t.Fatalf("quota = %#v", q)
 	}
 }
+
+func TestRefreshKey_GrokReturnsAdminAggregateMarker(t *testing.T) {
+	// Per-key Grok refresh must NOT stamp the shared admin aggregate as
+	// independent remaining quota on the endpoint row.
+	_, mk, keyRepo, settingsRepo := openQuotaTestDB(t)
+	if err := settingsRepo.SetGrokQuotaMode("grok2api_admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := settingsRepo.SetGrok2APIAdminKey(mk, "secret-admin-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	adminHits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		adminHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tokens":[{"token":"t1","quota":{"fast":{"remaining":99,"total":100}}}]}`))
+	}))
+	defer srv.Close()
+	if err := settingsRepo.SetGrok2APIAdminBaseURL(srv.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	key, err := keyRepo.AddEndpoint(ProviderGrok, "inf-1", "https://api.x.ai/v1", "xai-inf-key-11111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ref := &QuotaRefresher{
+		HTTPClient:   srv.Client(),
+		ProviderKeys: keyRepo,
+		Settings:     settingsRepo,
+		KeyQuotas:    nil,
+		MasterKey:    mk,
+		Now:          func() time.Time { return time.Date(2026, 7, 8, 0, 0, 0, 0, time.UTC) },
+	}
+
+	// Provider-level path still returns the real admin aggregate.
+	pq, err := ref.Refresh(context.Background(), ProviderGrok)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if !pq.Available || pq.Source != "grok2api_admin_tokens" {
+		t.Fatalf("provider-level quota = %+v", pq)
+	}
+	if pq.Remaining == nil || *pq.Remaining != 99 {
+		t.Fatalf("provider remaining = %#v", pq.Remaining)
+	}
+
+	// Per-key path returns admin-aggregate marker, not a real remaining number.
+	q, err := ref.RefreshKey(context.Background(), key.ID)
+	if err != nil {
+		t.Fatalf("RefreshKey: %v", err)
+	}
+	if q.Available {
+		t.Fatalf("per-key Grok quota must not be available: %+v", q)
+	}
+	if q.Source != "grok2api_admin_aggregate" {
+		t.Fatalf("source = %q, want grok2api_admin_aggregate", q.Source)
+	}
+	if q.Remaining != nil {
+		t.Fatalf("remaining must be nil for per-key Grok marker, got %#v", q.Remaining)
+	}
+	if q.MessageRedacted == nil || !strings.Contains(*q.MessageRedacted, "not per-endpoint") {
+		t.Fatalf("message = %#v", q.MessageRedacted)
+	}
+	if q.ProviderKeyID != key.ID {
+		t.Fatalf("provider_key_id = %d, want %d", q.ProviderKeyID, key.ID)
+	}
+	// RefreshKey must not call the shared admin tokens path for Grok rows.
+	// (provider-level Refresh above may have hit the server already.)
+	// Count hits after RefreshKey alone via a second key with a fresh server.
+	key2, err := keyRepo.AddEndpoint(ProviderGrok, "inf-2", "https://new-api.example/v1", "xai-inf-key-22222222")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hitsBefore := adminHits
+	q2, err := ref.RefreshKey(context.Background(), key2.ID)
+	if err != nil {
+		t.Fatalf("RefreshKey2: %v", err)
+	}
+	if adminHits != hitsBefore {
+		t.Fatalf("per-key Grok refresh hit admin API (%d -> %d); must not attribute admin aggregate", hitsBefore, adminHits)
+	}
+	if q2.Source != "grok2api_admin_aggregate" || q2.Available {
+		t.Fatalf("second key marker = %+v", q2)
+	}
+}

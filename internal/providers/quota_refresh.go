@@ -181,7 +181,8 @@ func (r *QuotaRefresher) RefreshAllKeys(ctx context.Context, provider string) (R
 }
 
 // refreshProviderWithEndpoint runs the provider-specific quota call using a complete
-// endpoint pair (row-owned BaseURL + APIKey). Grok still uses the admin-token path.
+// endpoint pair (row-owned BaseURL + APIKey). Grok quota is provider-level admin
+// aggregate only — per-key refresh does not stamp that aggregate onto the row.
 func (r *QuotaRefresher) refreshProviderWithEndpoint(ctx context.Context, provider string, ep SelectedEndpoint) QuotaCache {
 	now := r.nowUTC()
 	checked := now.Format(time.RFC3339Nano)
@@ -206,13 +207,27 @@ func (r *QuotaRefresher) refreshProviderWithEndpoint(ctx context.Context, provid
 			return normalizeFirecrawlCreditUsage(ProviderFirecrawl, id, checked, expires, payload)
 		})
 	case ProviderGrok:
-		// Grok quota is admin-token based, not per provider_keys raw key.
-		// Reuse the existing admin path and attribute the result to this key id.
-		qc, _ := r.refreshGrok2API(ctx, checked, expires)
-		qc.ProviderKeyID = &keyID
-		return qc
+		// Grok quota is admin-token based (provider-level aggregate), not per
+		// inference endpoint. Do not attribute the shared admin result to this row
+		// as if it were independent remaining quota.
+		return grokPerKeyAdminAggregateQuota(checked, expires, keyID)
 	default:
 		return quotaFailure(provider, "quota_refresh", checked, expires, &keyID, ErrUnknownProvider)
+	}
+}
+
+// grokPerKeyAdminAggregateQuota marks that Grok remaining is not per-endpoint.
+// Provider-level Refresh still uses refreshGrok2API for the real aggregate.
+func grokPerKeyAdminAggregateQuota(checked, expires string, keyID int64) QuotaCache {
+	msg := "Grok quota is provider-level admin aggregate, not per-endpoint"
+	return QuotaCache{
+		Provider:        ProviderGrok,
+		ProviderKeyID:   &keyID,
+		Source:          "grok2api_admin_aggregate",
+		Available:       false,
+		CheckedAt:       checked,
+		ExpiresAt:       expires,
+		MessageRedacted: &msg,
 	}
 }
 
