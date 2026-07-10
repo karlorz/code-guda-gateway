@@ -7,17 +7,17 @@ import (
 
 // QuotaCache is a normalized, redacted provider quota snapshot.
 type QuotaCache struct {
-	Provider        string  `json:"provider"`
-	ProviderKeyID   *int64  `json:"provider_key_id,omitempty"`
-	Source          string  `json:"source"`
-	Available       bool    `json:"available"`
-	Used            *int64  `json:"used,omitempty"`
-	LimitValue      *int64  `json:"limit_value,omitempty"`
-	Remaining       *int64  `json:"remaining,omitempty"`
-	PeriodStart     *string `json:"period_start,omitempty"`
-	PeriodEnd       *string `json:"period_end,omitempty"`
-	CheckedAt       string  `json:"checked_at"`
-	ExpiresAt       string  `json:"expires_at"`
+	Provider        string         `json:"provider"`
+	ProviderKeyID   *int64         `json:"provider_key_id,omitempty"`
+	Source          string         `json:"source"`
+	Available       bool           `json:"available"`
+	Used            *int64         `json:"used,omitempty"`
+	LimitValue      *int64         `json:"limit_value,omitempty"`
+	Remaining       *int64         `json:"remaining,omitempty"`
+	PeriodStart     *string        `json:"period_start,omitempty"`
+	PeriodEnd       *string        `json:"period_end,omitempty"`
+	CheckedAt       string         `json:"checked_at"`
+	ExpiresAt       string         `json:"expires_at"`
 	MessageRedacted *string        `json:"message_redacted,omitempty"`
 	Details         map[string]any `json:"details,omitempty"`
 }

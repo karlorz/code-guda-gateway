@@ -467,8 +467,7 @@ func TestGrokBaseURL_GetAndPatch(t *testing.T) {
 
 func TestAdminResourceEndpoints(t *testing.T) {
 	app, auth, _, keyRepo, _, _ := openAdminApp(t)
-	c := loginSession(t, app, initToken(t, auth))
-	csrf := csrfForTest(t, app, c)
+	c, csrf := authenticatedAdminSession(t, app, auth)
 	key, err := keyRepo.Add(providers.ProviderGrok, "resource", "xai-resource-key-123456789")
 	if err != nil {
 		t.Fatalf("Add: %v", err)
@@ -907,6 +906,381 @@ func TestProviderKeyQuotaRefreshAllRequiresProvider(t *testing.T) {
 	app.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func authenticatedAdminSession(t *testing.T, app http.Handler, auth *adminauth.Service) (*http.Cookie, string) {
+	t.Helper()
+	c := loginSession(t, app, initToken(t, auth))
+	return c, csrfForTest(t, app, c)
+}
+
+func mutatingAdminReq(method, path, body, csrf string, c *http.Cookie) *http.Request {
+	var req *http.Request
+	if body != "" {
+		req = httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+	} else {
+		req = httptest.NewRequest(method, path, nil)
+	}
+	if csrf != "" {
+		req.Header.Set("X-CSRF-Token", csrf)
+	}
+	if c != nil {
+		req.AddCookie(c)
+	}
+	return req
+}
+
+func serveMutatingAdmin(app http.Handler, method, path, body, csrf string, c *http.Cookie) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, mutatingAdminReq(method, path, body, csrf, c))
+	return rec
+}
+
+func TestGatewayKeysPatch_EnableDisable(t *testing.T) {
+	app, auth, gk, _, st, _ := openAdminApp(t)
+	_, display, err := gk.Create("patch-me")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	path := "/admin/api/gateway-keys/" + strconv.FormatInt(display.ID, 10)
+
+	rec := serveMutatingAdmin(app, http.MethodPatch, path, `{"enabled":false}`, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var enabled int
+	if err := st.DB().QueryRow(`SELECT enabled FROM gateway_keys WHERE id = ?`, display.ID).Scan(&enabled); err != nil {
+		t.Fatalf("query enabled: %v", err)
+	}
+	if enabled != 0 {
+		t.Fatal("key still enabled after disable")
+	}
+
+	rec2 := serveMutatingAdmin(app, http.MethodPatch, path, `{"enabled":true}`, csrf, c)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("enable status=%d", rec2.Code)
+	}
+	if err := st.DB().QueryRow(`SELECT enabled FROM gateway_keys WHERE id = ?`, display.ID).Scan(&enabled); err != nil {
+		t.Fatalf("query enabled: %v", err)
+	}
+	if enabled == 0 {
+		t.Fatal("key still disabled after enable")
+	}
+}
+
+func TestGatewayKeysPatch_CSRFAndBadRequest(t *testing.T) {
+	app, auth, gk, _, _, _ := openAdminApp(t)
+	_, display, _ := gk.Create("csrf-gw")
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	path := "/admin/api/gateway-keys/" + strconv.FormatInt(display.ID, 10)
+
+	rec := serveMutatingAdmin(app, http.MethodPatch, path, `{"enabled":false}`, "", c)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("csrf status=%d want 403", rec.Code)
+	}
+
+	rec2 := serveMutatingAdmin(app, http.MethodPatch, path, `{}`, csrf, c)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("empty body status=%d", rec2.Code)
+	}
+}
+
+func TestGatewayKeysRevoke_SuccessAndState(t *testing.T) {
+	app, auth, gk, _, st, _ := openAdminApp(t)
+	_, display, _ := gk.Create("revoke-me")
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	path := "/admin/api/gateway-keys/" + strconv.FormatInt(display.ID, 10) + "/revoke"
+
+	rec := serveMutatingAdmin(app, http.MethodPost, path, "", csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke status=%d", rec.Code)
+	}
+	var revokedAt sql.NullString
+	if err := st.DB().QueryRow(`SELECT revoked_at FROM gateway_keys WHERE id = ?`, display.ID).Scan(&revokedAt); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if !revokedAt.Valid || revokedAt.String == "" {
+		t.Fatal("revoked_at not set")
+	}
+}
+
+func TestGatewayKeysRevoke_CSRFAndBadID(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/gateway-keys/1/revoke", "", "", c)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("csrf=%d", rec.Code)
+	}
+
+	rec2 := serveMutatingAdmin(app, http.MethodPost, "/admin/api/gateway-keys/notanid/revoke", "", csrf, c)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("bad id=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+	if !strings.Contains(rec2.Body.String(), `"error"`) {
+		t.Fatalf("expected writeAPIError shape: %s", rec2.Body.String())
+	}
+}
+
+func TestGatewayKeysDelete_SuccessAndState(t *testing.T) {
+	app, auth, gk, _, st, _ := openAdminApp(t)
+	_, display, _ := gk.Create("delete-me")
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	path := "/admin/api/gateway-keys/" + strconv.FormatInt(display.ID, 10)
+
+	rec := serveMutatingAdmin(app, http.MethodDelete, path, "", csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status=%d", rec.Code)
+	}
+	var n int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM gateway_keys WHERE id = ?`, display.ID).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Fatal("row still exists")
+	}
+}
+
+func TestGatewayKeysDelete_CSRFAndBadID(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+
+	rec := serveMutatingAdmin(app, http.MethodDelete, "/admin/api/gateway-keys/1", "", "", c)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("csrf=%d", rec.Code)
+	}
+
+	rec2 := serveMutatingAdmin(app, http.MethodDelete, "/admin/api/gateway-keys/abc", "", csrf, c)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("bad id=%d", rec2.Code)
+	}
+}
+
+func TestProviderKeysPatch_EnableDisable(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	d, _ := keyRepo.Add(providers.ProviderGrok, "p-patch", "xai-patch-key-1234567890")
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	path := "/admin/api/provider-keys/" + strconv.FormatInt(d.ID, 10)
+
+	rec := serveMutatingAdmin(app, http.MethodPatch, path, `{"enabled":false}`, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable=%d", rec.Code)
+	}
+	got, _ := keyRepo.Get(d.ID)
+	if got.Enabled {
+		t.Fatal("still enabled")
+	}
+
+	rec2 := serveMutatingAdmin(app, http.MethodPatch, path, `{"enabled":true}`, csrf, c)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("enable=%d", rec2.Code)
+	}
+	got2, _ := keyRepo.Get(d.ID)
+	if !got2.Enabled {
+		t.Fatal("still disabled")
+	}
+}
+
+func TestProviderKeysPatch_CSRFAndMissingEnabled(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	d, _ := keyRepo.Add(providers.ProviderGrok, "p-csrf", "xai-csrf-key-1234567890")
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	path := "/admin/api/provider-keys/" + strconv.FormatInt(d.ID, 10)
+
+	rec := serveMutatingAdmin(app, http.MethodPatch, path, `{"enabled":false}`, "", c)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("csrf=%d", rec.Code)
+	}
+
+	rec2 := serveMutatingAdmin(app, http.MethodPatch, path, `{}`, csrf, c)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("missing enabled=%d", rec2.Code)
+	}
+}
+
+func TestProviderKeysArchiveRestoreDelete(t *testing.T) {
+	app, auth, _, keyRepo, st, _ := openAdminApp(t)
+	d, _ := keyRepo.Add(providers.ProviderTavily, "arc", "tvly-archive-key-abcdefghij")
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	base := "/admin/api/provider-keys/" + strconv.FormatInt(d.ID, 10)
+
+	rec := serveMutatingAdmin(app, http.MethodPost, base+"/archive", "", csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("archive=%d", rec.Code)
+	}
+	var archived sql.NullString
+	if err := st.DB().QueryRow(`SELECT archived_at FROM provider_keys WHERE id = ?`, d.ID).Scan(&archived); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if !archived.Valid {
+		t.Fatal("not archived")
+	}
+
+	rec2 := serveMutatingAdmin(app, http.MethodPost, base+"/restore", "", csrf, c)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("restore=%d", rec2.Code)
+	}
+	if err := st.DB().QueryRow(`SELECT archived_at FROM provider_keys WHERE id = ?`, d.ID).Scan(&archived); err != nil {
+		t.Fatalf("scan2: %v", err)
+	}
+	if archived.Valid {
+		t.Fatal("still archived")
+	}
+
+	rec3 := serveMutatingAdmin(app, http.MethodDelete, base, "", csrf, c)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("delete=%d", rec3.Code)
+	}
+	var n int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM provider_keys WHERE id = ?`, d.ID).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Fatal("row remains")
+	}
+}
+
+func TestProviderKeysArchive_CSRFAndBadID(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-keys/1/archive", "", "", c)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("csrf=%d", rec.Code)
+	}
+
+	rec2 := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-keys/x/archive", "", csrf, c)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("bad id=%d", rec2.Code)
+	}
+	if !strings.Contains(rec2.Body.String(), `"code"`) {
+		t.Fatalf("expected api error: %s", rec2.Body.String())
+	}
+}
+
+func TestProviderKeyQuotaRefreshOne(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"key":{"usage":1,"limit":1000},"account":{}}`))
+	}))
+	defer srv.Close()
+
+	ref := &providers.QuotaRefresher{HTTPClient: srv.Client()}
+	app, auth, keyRepo, st := openAdminAppWithRefresher(t, ref)
+	if err := providers.NewSettingsRepo(st.DB()).SetBaseURL(providers.ProviderTavily, srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := keyRepo.Add(providers.ProviderTavily, "rq", "tvly-refresh-one-key-abcdefgh")
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	path := "/admin/api/provider-key-quotas/" + strconv.FormatInt(d.ID, 10) + "/refresh"
+
+	rec := serveMutatingAdmin(app, http.MethodPost, path, "", csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh one=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"provider_key_id"`) {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+}
+
+func TestProviderKeyQuotaRefreshOne_CSRFAndBadID(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-key-quotas/1/refresh", "", "", c)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("csrf=%d", rec.Code)
+	}
+
+	rec2 := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-key-quotas/nope/refresh", "", csrf, c)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("bad id=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+}
+
+func TestProviderKeyQuotaRefreshOne_NilRefresher(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-key-quotas/1/refresh", "", csrf, c)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("nil refresher=%d", rec.Code)
+	}
+}
+
+func TestProviderSettingsPatch_TavilyAndUnknown(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+
+	newURL := "https://tavily-custom.example"
+	rec := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/provider-settings/tavily", `{"base_url":"`+newURL+`"}`, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tavily patch=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec2 := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/provider-settings/notreal", `{"base_url":"https://x"}`, csrf, c)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("unknown=%d", rec2.Code)
+	}
+	if !strings.Contains(rec2.Body.String(), "unknown provider") {
+		t.Fatalf("body=%s", rec2.Body.String())
+	}
+}
+
+func TestProviderSettingsPatch_CSRF(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c := loginSession(t, app, initToken(t, auth))
+
+	rec := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/provider-settings/firecrawl", `{"base_url":"https://fc.example"}`, "", c)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("csrf=%d", rec.Code)
+	}
+}
+
+func TestProviderManualTest_OkAndMissingKey(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/providers/grok/test", "", csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("missing key=%d", rec.Code)
+	}
+	var miss map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &miss); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if miss["status"] != "missing_key" {
+		t.Fatalf("status=%v", miss)
+	}
+
+	_, _ = keyRepo.Add(providers.ProviderGrok, "testable", "xai-manual-test-key-123456789")
+	rec2 := serveMutatingAdmin(app, http.MethodPost, "/admin/api/providers/grok/test", "", csrf, c)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("ok path=%d", rec2.Code)
+	}
+	var ok map[string]string
+	if err := json.Unmarshal(rec2.Body.Bytes(), &ok); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if ok["status"] != "ok" {
+		t.Fatalf("status=%v", ok)
+	}
+}
+
+func TestProviderManualTest_UnknownProviderAndCSRF(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/providers/bogus/test", "", csrf, c)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown=%d", rec.Code)
+	}
+
+	rec2 := serveMutatingAdmin(app, http.MethodPost, "/admin/api/providers/grok/test", "", "", c)
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("csrf=%d", rec2.Code)
 	}
 }
 

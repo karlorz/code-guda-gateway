@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: gofmt
+        run: |
+          test -z "$(gofmt -l .)"
+
+      - name: go test
+        run: go test ./...
+
+      - name: go test race
+        run: go test -race ./...
+
+      - name: bun install admin
+        run: bun install --frozen-lockfile --cwd web/admin
+
+      - name: bun test admin
+        run: bun run --cwd web/admin test
+
+      - name: bun build admin
+        run: bun run --cwd web/admin build
+
+      - name: installer smoke
+        run: bash scripts/test-install-linux.sh
+
+      - name: build
+        run: bash scripts/build.sh
