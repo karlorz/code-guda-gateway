@@ -794,3 +794,122 @@ func TestProviderEndpoint_AuditNoSecrets(t *testing.T) {
 		t.Fatalf("audit detail leaked secret: %q", detail)
 	}
 }
+
+// TestSeedProviderKeysScript_PassesURLAndKeepsSecretsOffArgv asserts the shared-base
+// seed script uses canonical provider-endpoint add with an explicit --base-url for
+// every row and never places raw keys on argv (stdin only).
+func TestSeedProviderKeysScript_PassesURLAndKeepsSecretsOffArgv(t *testing.T) {
+	// Resolve seed script relative to module root (this package is cmd/guda-gateway-admin).
+	root := filepath.Clean(filepath.Join("..", ".."))
+	scriptPath := filepath.Join(root, "scripts", "seed-provider-keys.sh")
+	raw, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read seed script: %v", err)
+	}
+	src := string(raw)
+
+	if !strings.Contains(src, "provider-endpoint") || !strings.Contains(src, "add") {
+		t.Fatal("seed script must call provider-endpoint add")
+	}
+	if !strings.Contains(src, "--base-url") {
+		t.Fatal("seed script must pass --base-url into every created row")
+	}
+	// Prefer canonical command; legacy provider-key add is not enough for explicit URLs.
+	if strings.Contains(src, "provider-key add") {
+		t.Fatal("seed script still uses legacy provider-key add; switch to provider-endpoint add --base-url")
+	}
+	// Keys must flow via stdin (printf | admin), never as --key / trailing argv.
+	if strings.Contains(src, "--key ") || strings.Contains(src, "--api-key") {
+		t.Fatal("seed script must not pass raw keys as CLI flags")
+	}
+	if !strings.Contains(src, "printf") || !strings.Contains(src, "|") {
+		t.Fatal("seed script must pipe keys via stdin")
+	}
+	// Env secret names must not be interpolated into the admin argv string beyond
+	// the local key variable that is only written to the pipe.
+	for _, line := range strings.Split(src, "\n") {
+		if strings.Contains(line, "provider-endpoint") && strings.Contains(line, "GROK_API_KEY") {
+			t.Fatalf("raw env key appears on provider-endpoint argv line: %s", line)
+		}
+		if strings.Contains(line, "provider-endpoint") && strings.Contains(line, "FIRECRAWL_API_KEY") {
+			t.Fatalf("raw env key appears on provider-endpoint argv line: %s", line)
+		}
+		if strings.Contains(line, "provider-endpoint") && strings.Contains(line, "TAVILY_API_KEYS") {
+			t.Fatalf("raw env key appears on provider-endpoint argv line: %s", line)
+		}
+	}
+}
+
+// TestSeedStyleSharedBase_CreatesRowsWithBaseURLAndNoSecretLeak simulates the
+// shared-base seed path: one explicit base URL per provider, key on stdin only.
+func TestSeedStyleSharedBase_CreatesRowsWithBaseURLAndNoSecretLeak(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+
+	type row struct {
+		provider, name, baseURL, secret string
+	}
+	rows := []row{
+		{"grok", "grok2api", providers.DefaultGrokBaseURL, "xai-seed-style-secret-grok111"},
+		{"firecrawl", "gh01", providers.DefaultFirecrawlBaseURL, "fc-seed-style-secret-fire222"},
+		{"tavily", "tavily-1", providers.DefaultTavilyBaseURL, "tvly-seed-style-secret-tav333"},
+		{"tavily", "tavily-2", providers.DefaultTavilyBaseURL, "tvly-seed-style-secret-tav444"},
+	}
+	var combinedOut strings.Builder
+	for _, r := range rows {
+		stdout, stderr, code := runCLI(t, dbPath, masterPath, r.secret+"\n",
+			"provider-endpoint", "add",
+			"--provider", r.provider,
+			"--name", r.name,
+			"--base-url", r.baseURL,
+		)
+		if code != 0 {
+			t.Fatalf("add %s/%s exit %d stderr=%s stdout=%s", r.provider, r.name, code, stderr, stdout)
+		}
+		combinedOut.WriteString(stdout)
+		combinedOut.WriteString(stderr)
+		if strings.Contains(stdout, r.secret) || strings.Contains(stderr, r.secret) {
+			t.Fatalf("output leaked secret for %s/%s", r.provider, r.name)
+		}
+	}
+
+	list, _, code := runCLI(t, dbPath, masterPath, "", "provider-endpoint", "list")
+	if code != 0 {
+		t.Fatalf("list exit %d", code)
+	}
+	combinedOut.WriteString(list)
+	for _, r := range rows {
+		if strings.Contains(list, r.secret) || strings.Contains(combinedOut.String(), r.secret) {
+			t.Fatalf("list/output leaked secret for %s", r.name)
+		}
+	}
+
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, err := repo.ListAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != len(rows) {
+		t.Fatalf("rows=%d want %d", len(all), len(rows))
+	}
+	byName := map[string]string{}
+	for _, d := range all {
+		byName[d.Provider+"/"+d.Name] = d.BaseURL
+		if strings.TrimSpace(d.BaseURL) == "" {
+			t.Fatalf("empty base_url for %s/%s", d.Provider, d.Name)
+		}
+	}
+	for _, r := range rows {
+		got, ok := byName[r.provider+"/"+r.name]
+		if !ok {
+			t.Fatalf("missing row %s/%s", r.provider, r.name)
+		}
+		if got != r.baseURL {
+			t.Fatalf("%s/%s base_url=%q want %q", r.provider, r.name, got, r.baseURL)
+		}
+	}
+}
