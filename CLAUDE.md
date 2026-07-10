@@ -19,3 +19,6 @@
 - Build: `{REPO_ROOT}/scripts/build.sh` (uses `-buildvcs=false` so it builds on non-git src dirs, e.g. staged deploy checkouts)
 - Bootstrap template: `{REPO_ROOT}/scripts/templates/bootstrap.env.example`
 - Current stable release: `v0.3.1-stable` (tag on `main`, live on kr01 `search.karldigi.dev`)
+- Public installer: `curl -fsSL https://raw.githubusercontent.com/karlorz/code-guda-gateway/main/deploy/code-guda-gateway/install.sh | bash`
+  (repo must be public for the no-token-on-kr01 deploy path; the v0.3.1-test
+  tag validated the full release pipeline and kr01 installer deploy on 2026-07-10)
