@@ -563,3 +563,234 @@ func TestCLI_RecoveryWithoutService(t *testing.T) {
 		t.Fatalf("verify: %q", verifyOut)
 	}
 }
+
+
+func TestProviderEndpointAdd_RequiresBaseURLAndMasksSecret(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	secret := "tvly-cli-endpoint-secret-abcdef"
+	baseURL := "https://proxy.example/tavily"
+	stdout, stderr, code := runCLI(t, dbPath, masterPath, secret+"\n",
+		"provider-endpoint", "add",
+		"--provider", "tavily",
+		"--name", "ep1",
+		"--base-url", baseURL,
+	)
+	if code != 0 {
+		t.Fatalf("add exit %d stderr=%s stdout=%s", code, stderr, stdout)
+	}
+	if strings.Contains(stdout, secret) {
+		t.Fatalf("stdout leaked secret: %q", stdout)
+	}
+	if !strings.Contains(stdout, "base_url=") && !strings.Contains(stdout, "proxy.example/tavily") {
+		t.Fatalf("stdout missing base_url: %q", stdout)
+	}
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, err := repo.ListAll()
+	if err != nil || len(all) != 1 {
+		t.Fatalf("list: len=%d err=%v", len(all), err)
+	}
+	if !strings.Contains(all[0].BaseURL, "proxy.example/tavily") {
+		t.Fatalf("stored BaseURL=%q", all[0].BaseURL)
+	}
+}
+
+func TestProviderEndpointList_ShowsBaseURLColumn(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	secret := "xai-list-endpoint-key-123456"
+	_, _, code := runCLI(t, dbPath, masterPath, secret+"\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "g1",
+		"--base-url", "https://api.x.ai/v1",
+	)
+	if code != 0 {
+		t.Fatalf("add exit %d", code)
+	}
+	list, _, code := runCLI(t, dbPath, masterPath, "", "provider-endpoint", "list")
+	if code != 0 {
+		t.Fatalf("list exit %d", code)
+	}
+	if strings.Contains(list, secret) {
+		t.Fatal("list leaked secret")
+	}
+	if !strings.Contains(list, "BASE_URL") {
+		t.Fatalf("list missing BASE_URL column: %q", list)
+	}
+	if !strings.Contains(list, "api.x.ai") {
+		t.Fatalf("list missing base url value: %q", list)
+	}
+}
+
+func TestProviderEndpoint_SetBaseURLAndRotateKey(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	oldKey := "xai-old-cli-key-1111111111"
+	stdout, _, code := runCLI(t, dbPath, masterPath, oldKey+"\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "rot",
+		"--base-url", "https://api.x.ai/v1",
+	)
+	if code != 0 {
+		t.Fatalf("add exit %d out=%s", code, stdout)
+	}
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, _ := repo.ListAll()
+	if len(all) != 1 {
+		t.Fatalf("keys %d", len(all))
+	}
+	id := all[0].ID
+	idStr := strconv.FormatInt(id, 10)
+
+	newURL := "https://custom.cli.example/v1"
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "provider-endpoint", "set-base-url", "--id", idStr, "--url", newURL); c != 0 {
+		t.Fatal("set-base-url")
+	}
+	got, _ := repo.Get(id)
+	if got.BaseURL != newURL {
+		t.Fatalf("BaseURL=%q want %q", got.BaseURL, newURL)
+	}
+
+	newKey := "xai-new-cli-key-2222222222"
+	rotOut, _, c := runCLI(t, dbPath, masterPath, newKey+"\n", "provider-endpoint", "rotate-key", "--id", idStr)
+	if c != 0 {
+		t.Fatalf("rotate-key exit %d out=%s", c, rotOut)
+	}
+	if strings.Contains(rotOut, oldKey) || strings.Contains(rotOut, newKey) {
+		t.Fatal("rotate-key output leaked secret")
+	}
+	raw, err := repo.RawKey(id)
+	if err != nil {
+		t.Fatalf("RawKey: %v", err)
+	}
+	if raw != newKey {
+		t.Fatalf("stored=%q want %q", raw, newKey)
+	}
+}
+
+func TestLegacyProviderKey_AddStillUsesDefaultBaseURL(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	secret := "xai-legacy-cli-key-33333333"
+	if _, _, c := runCLI(t, dbPath, masterPath, secret+"\n", "provider-key", "add", "--provider", "grok", "--name", "legacy"); c != 0 {
+		t.Fatal("provider-key add")
+	}
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := openDB(t, dbPath)
+	repo := providers.NewKeyRepo(db, mk)
+	defaultURL, err := providers.NewSettingsRepo(db).GetBaseURL(providers.ProviderGrok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, _ := repo.ListAll()
+	if len(all) != 1 {
+		t.Fatalf("keys %d", len(all))
+	}
+	if all[0].BaseURL != defaultURL {
+		t.Fatalf("BaseURL=%q want default %q", all[0].BaseURL, defaultURL)
+	}
+}
+
+func TestProviderEndpoint_AndLegacyProviderKey_SameRowMutations(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	secret := "xai-same-row-cli-key-444444"
+	if _, _, c := runCLI(t, dbPath, masterPath, secret+"\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "same",
+		"--base-url", "https://api.x.ai/v1",
+	); c != 0 {
+		t.Fatal("provider-endpoint add")
+	}
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, _ := repo.ListAll()
+	id := all[0].ID
+	idStr := strconv.FormatInt(id, 10)
+
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "provider-key", "disable", "--id", idStr); c != 0 {
+		t.Fatal("legacy disable")
+	}
+	got, _ := repo.Get(id)
+	if got.Enabled {
+		t.Fatal("still enabled")
+	}
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "provider-endpoint", "enable", "--id", idStr); c != 0 {
+		t.Fatal("canonical enable")
+	}
+	got, _ = repo.Get(id)
+	if !got.Enabled {
+		t.Fatal("still disabled")
+	}
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "provider-key", "demote", "--id", idStr); c != 0 {
+		t.Fatal("legacy demote")
+	}
+	got, _ = repo.Get(id)
+	if got.LastFailedAt == nil {
+		t.Fatal("expected last_failed_at")
+	}
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "provider-endpoint", "reset-selection", "--id", idStr); c != 0 {
+		t.Fatal("canonical reset-selection")
+	}
+	got, _ = repo.Get(id)
+	if got.LastFailedAt != nil {
+		t.Fatal("last_failed_at still set")
+	}
+}
+
+func TestProviderEndpoint_AuditNoSecrets(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	secret := "tvly-cli-audit-secret-zzzz"
+	if _, _, c := runCLI(t, dbPath, masterPath, secret+"\n",
+		"provider-endpoint", "add",
+		"--provider", "tavily",
+		"--name", "aud",
+		"--base-url", "https://api.tavily.com",
+	); c != 0 {
+		t.Fatal("add")
+	}
+	mk, _ := loadMaster(t, masterPath)
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, _ := repo.ListAll()
+	idStr := strconv.FormatInt(all[0].ID, 10)
+	newKey := "tvly-cli-audit-rotated-yyyy"
+	if _, _, c := runCLI(t, dbPath, masterPath, newKey+"\n", "provider-endpoint", "rotate-key", "--id", idStr); c != 0 {
+		t.Fatal("rotate-key")
+	}
+	events, err := audit.NewAuditRepo(openDB(t, dbPath)).List(audit.ListFilter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var details strings.Builder
+	actions := map[string]bool{}
+	for _, ev := range events {
+		actions[ev.Action] = true
+		details.WriteString(ev.DetailRedacted)
+		details.WriteString("\n")
+	}
+	if !actions["provider_endpoint.add"] && !actions["provider_key.add"] {
+		t.Fatalf("missing add audit in %#v", actions)
+	}
+	detail := details.String()
+	if strings.Contains(detail, secret) || strings.Contains(detail, newKey) {
+		t.Fatalf("audit detail leaked secret: %q", detail)
+	}
+}

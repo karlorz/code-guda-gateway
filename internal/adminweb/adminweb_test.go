@@ -1335,3 +1335,242 @@ func TestProviderKeys_ResetSelectionAndDemote(t *testing.T) {
 		t.Fatal("expected last_failed_at after demote")
 	}
 }
+
+
+func TestProviderEndpoint_CreateListWithBaseURL(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	rawKey := "tvly-endpoint-create-secret-abcdef"
+	baseURL := "https://proxy.example/tavily"
+	body := `{"provider":"tavily","name":"ep-primary","base_url":"` + baseURL + `","key":"` + rawKey + `"}`
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-endpoints", body, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	createBody := rec.Body.String()
+	if strings.Contains(createBody, rawKey) {
+		t.Fatal("create response leaked raw key")
+	}
+	if !strings.Contains(createBody, "proxy.example/tavily") {
+		t.Fatalf("create missing base url: %s", createBody)
+	}
+	var created providers.DisplayProviderKey
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("create json: %v", err)
+	}
+	if created.ID == 0 || created.BaseURL == "" {
+		t.Fatalf("created = %#v", created)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/provider-endpoints?provider=tavily", nil)
+	req.AddCookie(c)
+	listRec := httptest.NewRecorder()
+	app.ServeHTTP(listRec, req)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listRec.Code, listRec.Body.String())
+	}
+	listBody := listRec.Body.String()
+	if strings.Contains(listBody, rawKey) {
+		t.Fatal("list leaked raw key")
+	}
+	if !strings.Contains(listBody, "proxy.example/tavily") {
+		t.Fatalf("list missing base url field: %s", listBody)
+	}
+	if !strings.Contains(listBody, "ep-primary") {
+		t.Fatalf("list missing name: %s", listBody)
+	}
+}
+
+func TestProviderEndpoint_UpdateBaseURL(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	d, err := keyRepo.AddEndpoint(providers.ProviderGrok, "url-row", "https://api.x.ai/v1", "xai-url-update-key-12345678")
+	if err != nil {
+		t.Fatalf("AddEndpoint: %v", err)
+	}
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	newURL := "https://custom-endpoint.example/v1"
+	path := "/admin/api/provider-endpoints/" + strconv.FormatInt(d.ID, 10) + "/update-base-url"
+	rec := serveMutatingAdmin(app, http.MethodPost, path, `{"base_url":"`+newURL+`"}`, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update-base-url status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got, err := keyRepo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.BaseURL != newURL {
+		t.Fatalf("BaseURL=%q want %q", got.BaseURL, newURL)
+	}
+}
+
+func TestProviderEndpoint_RotateKeyNoSecretLeak(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	oldKey := "xai-old-rotate-key-1111111111"
+	newKey := "xai-new-rotate-key-2222222222"
+	d, err := keyRepo.AddEndpoint(providers.ProviderGrok, "rot", "https://api.x.ai/v1", oldKey)
+	if err != nil {
+		t.Fatalf("AddEndpoint: %v", err)
+	}
+	oldFP := d.Fingerprint
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	path := "/admin/api/provider-endpoints/" + strconv.FormatInt(d.ID, 10) + "/rotate-key"
+	rec := serveMutatingAdmin(app, http.MethodPost, path, `{"key":"`+newKey+`"}`, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rotate-key status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	respBody := rec.Body.String()
+	if strings.Contains(respBody, oldKey) || strings.Contains(respBody, newKey) {
+		t.Fatal("rotate-key response leaked raw key")
+	}
+	got, err := keyRepo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Fingerprint == oldFP {
+		t.Fatal("fingerprint unchanged after rotate")
+	}
+	raw, err := keyRepo.RawKey(d.ID)
+	if err != nil {
+		t.Fatalf("RawKey: %v", err)
+	}
+	if raw != newKey {
+		t.Fatalf("stored key = %q want %q", raw, newKey)
+	}
+}
+
+func TestProviderEndpoint_AuditNeverLeaksSecret(t *testing.T) {
+	app, auth, _, _, st, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	rawKey := "tvly-audit-secret-key-zzzzzzzz"
+	body := `{"provider":"tavily","name":"aud-ep","base_url":"https://api.tavily.com","key":"` + rawKey + `"}`
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-endpoints", body, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var created providers.DisplayProviderKey
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	newKey := "tvly-rotated-audit-secret-yyyy"
+	rotPath := "/admin/api/provider-endpoints/" + strconv.FormatInt(created.ID, 10) + "/rotate-key"
+	rotRec := serveMutatingAdmin(app, http.MethodPost, rotPath, `{"key":"`+newKey+`"}`, csrf, c)
+	if rotRec.Code != http.StatusOK {
+		t.Fatalf("rotate status=%d", rotRec.Code)
+	}
+	urlPath := "/admin/api/provider-endpoints/" + strconv.FormatInt(created.ID, 10) + "/update-base-url"
+	urlRec := serveMutatingAdmin(app, http.MethodPost, urlPath, `{"base_url":"https://proxy.tavily.example"}`, csrf, c)
+	if urlRec.Code != http.StatusOK {
+		t.Fatalf("update-base-url status=%d", urlRec.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/audit-events", nil)
+	req.AddCookie(c)
+	listRec := httptest.NewRecorder()
+	app.ServeHTTP(listRec, req)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("audit list status=%d", listRec.Code)
+	}
+	auditBody := listRec.Body.String()
+	if strings.Contains(auditBody, rawKey) || strings.Contains(auditBody, newKey) {
+		t.Fatal("audit leaked raw key material")
+	}
+	if !strings.Contains(auditBody, "provider_endpoint") && !strings.Contains(auditBody, "provider_key") {
+		t.Fatalf("expected endpoint/key audit actions: %s", truncate(auditBody, 400))
+	}
+	rows, err := audit.NewAuditRepo(st.DB()).List(audit.ListFilter{})
+	if err != nil {
+		t.Fatalf("audit list: %v", err)
+	}
+	for _, ev := range rows {
+		if strings.Contains(ev.DetailRedacted, rawKey) || strings.Contains(ev.DetailRedacted, newKey) {
+			t.Fatalf("audit detail leaked secret: %q", ev.DetailRedacted)
+		}
+	}
+}
+
+func TestLegacyProviderKey_CreateUsesProviderDefaultBaseURL(t *testing.T) {
+	app, auth, _, keyRepo, st, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	defaultURL, err := providers.NewSettingsRepo(st.DB()).GetBaseURL(providers.ProviderGrok)
+	if err != nil {
+		t.Fatalf("GetBaseURL: %v", err)
+	}
+	rawKey := "xai-legacy-default-key-99999999"
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-keys",
+		`{"provider":"grok","name":"legacy-def","key":"`+rawKey+`"}`, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("legacy create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), rawKey) {
+		t.Fatal("legacy create leaked raw key")
+	}
+	var created providers.DisplayProviderKey
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	got, err := keyRepo.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.BaseURL != defaultURL {
+		t.Fatalf("BaseURL=%q want default %q", got.BaseURL, defaultURL)
+	}
+}
+
+func TestProviderEndpoint_AndLegacyProviderKey_SameStableRowID(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+	rawKey := "xai-shared-row-key-aaaaaaaa"
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-endpoints",
+		`{"provider":"grok","name":"shared-row","base_url":"https://api.x.ai/v1","key":"`+rawKey+`"}`, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var created providers.DisplayProviderKey
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	id := created.ID
+	idStr := strconv.FormatInt(id, 10)
+
+	recDis := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/provider-keys/"+idStr, `{"enabled":false}`, csrf, c)
+	if recDis.Code != http.StatusOK {
+		t.Fatalf("legacy disable status=%d", recDis.Code)
+	}
+	got, err := keyRepo.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Enabled {
+		t.Fatal("row still enabled after legacy disable")
+	}
+
+	recEn := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/provider-endpoints/"+idStr, `{"enabled":true}`, csrf, c)
+	if recEn.Code != http.StatusOK {
+		t.Fatalf("canonical enable status=%d body=%s", recEn.Code, recEn.Body.String())
+	}
+	got, err = keyRepo.Get(id)
+	if err != nil {
+		t.Fatalf("Get2: %v", err)
+	}
+	if !got.Enabled {
+		t.Fatal("row still disabled after canonical enable")
+	}
+
+	recDem := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-keys/"+idStr+"/demote", "", csrf, c)
+	if recDem.Code != http.StatusOK {
+		t.Fatalf("legacy demote status=%d", recDem.Code)
+	}
+	got, _ = keyRepo.Get(id)
+	if got.LastFailedAt == nil {
+		t.Fatal("expected last_failed_at after demote")
+	}
+	recReset := serveMutatingAdmin(app, http.MethodPost, "/admin/api/provider-endpoints/"+idStr+"/reset-selection", "", csrf, c)
+	if recReset.Code != http.StatusOK {
+		t.Fatalf("canonical reset-selection status=%d", recReset.Code)
+	}
+	got, _ = keyRepo.Get(id)
+	if got.LastFailedAt != nil {
+		t.Fatal("last_failed_at still set after reset-selection")
+	}
+}

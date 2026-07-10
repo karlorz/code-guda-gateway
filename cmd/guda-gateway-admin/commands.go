@@ -58,6 +58,8 @@ func (a *app) dispatch(args []string) int {
 		return a.cmdGatewayKey(args[1:])
 	case "provider-key":
 		return a.cmdProviderKey(args[1:])
+	case "provider-endpoint":
+		return a.cmdProviderEndpoint(args[1:])
 	case "grok":
 		return a.cmdGrok(args[1:])
 	case "audit":
@@ -464,6 +466,172 @@ func (a *app) cmdProviderKey(args []string) int {
 	}
 }
 
+func (a *app) cmdProviderEndpoint(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(a.stderr, "usage: provider-endpoint add|list|set-base-url|rotate-key|disable|enable|archive|restore|reset-cooldown|reset-selection|demote|delete")
+		return exitUsage
+	}
+	mk, err := a.masterKey()
+	if err != nil {
+		fmt.Fprintf(a.stderr, "master key: %v\n", err)
+		return exitError
+	}
+	st, err := a.openStore()
+	if err != nil {
+		fmt.Fprintf(a.stderr, "open db: %v\n", err)
+		return exitError
+	}
+	defer st.Close()
+	repo := providers.NewKeyRepo(st.DB(), mk)
+	switch args[0] {
+	case "add":
+		provider, okP := flagValue(args[1:], "--provider")
+		name, okN := flagValue(args[1:], "--name")
+		baseURL, okU := flagValue(args[1:], "--base-url")
+		if !okP || !okN || !okU || provider == "" || name == "" || strings.TrimSpace(baseURL) == "" {
+			fmt.Fprintln(a.stderr, "provider-endpoint add requires --provider, --name, and --base-url")
+			return exitUsage
+		}
+		rawKey, err := readLine(a.stdin)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				fmt.Fprintln(a.stderr, "empty provider key")
+				return exitUsage
+			}
+			fmt.Fprintf(a.stderr, "read provider key from stdin: %v\n", err)
+			return exitError
+		}
+		rawKey = strings.TrimSpace(rawKey)
+		if rawKey == "" {
+			fmt.Fprintln(a.stderr, "empty provider key")
+			return exitUsage
+		}
+		d, err := repo.AddEndpoint(provider, name, baseURL, rawKey)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint add: %v\n", err)
+			return exitError
+		}
+		fmt.Fprintf(a.stdout, "id=%d provider=%s name=%s base_url=%s prefix=%s fingerprint=%s\n",
+			d.ID, d.Provider, d.Name, d.BaseURL, d.KeyPrefix, d.Fingerprint)
+		recordCLIAudit(st.DB(), "provider_endpoint.add", "provider_endpoint", strconv.FormatInt(d.ID, 10), "provider="+provider+";name="+name+";base_url="+d.BaseURL+";result=ok")
+		return exitOK
+	case "list":
+		all, err := repo.ListAll()
+		if err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint list: %v\n", err)
+			return exitError
+		}
+		w := tabwriter.NewWriter(a.stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\tPROVIDER\tNAME\tBASE_URL\tPREFIX\tFINGERPRINT\tENABLED\tCOOLDOWN_UNTIL")
+		for _, k := range all {
+			cd := ""
+			if k.CooldownUntil != nil {
+				cd = *k.CooldownUntil
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%v\t%s\n",
+				k.ID, k.Provider, k.Name, k.BaseURL, k.KeyPrefix, k.Fingerprint, k.Enabled, cd)
+		}
+		_ = w.Flush()
+		return exitOK
+	case "set-base-url":
+		id, ok := flagInt64(args[1:], "--id")
+		url, okU := flagValue(args[1:], "--url")
+		if !ok || !okU || strings.TrimSpace(url) == "" {
+			fmt.Fprintln(a.stderr, "provider-endpoint set-base-url requires --id and --url")
+			return exitUsage
+		}
+		row, err := repo.Get(id)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint set-base-url: %v\n", err)
+			return exitError
+		}
+		if err := repo.UpdateBaseURL(id, url); err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint set-base-url: %v\n", err)
+			return exitError
+		}
+		updated, err := repo.Get(id)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint set-base-url: %v\n", err)
+			return exitError
+		}
+		fmt.Fprintf(a.stdout, "id=%d base_url=%s\n", id, updated.BaseURL)
+		recordCLIAudit(st.DB(), "provider_endpoint.update_base_url", "provider_endpoint", strconv.FormatInt(id, 10), "provider="+row.Provider+";name="+row.Name+";base_url="+updated.BaseURL+";result=ok")
+		return exitOK
+	case "rotate-key":
+		id, ok := flagInt64(args[1:], "--id")
+		if !ok {
+			fmt.Fprintln(a.stderr, "provider-endpoint rotate-key requires --id")
+			return exitUsage
+		}
+		rawKey, err := readLine(a.stdin)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				fmt.Fprintln(a.stderr, "empty provider key")
+				return exitUsage
+			}
+			fmt.Fprintf(a.stderr, "read provider key from stdin: %v\n", err)
+			return exitError
+		}
+		rawKey = strings.TrimSpace(rawKey)
+		if rawKey == "" {
+			fmt.Fprintln(a.stderr, "empty provider key")
+			return exitUsage
+		}
+		row, err := repo.Get(id)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint rotate-key: %v\n", err)
+			return exitError
+		}
+		if err := repo.RotateKey(id, rawKey); err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint rotate-key: %v\n", err)
+			return exitError
+		}
+		updated, err := repo.Get(id)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint rotate-key: %v\n", err)
+			return exitError
+		}
+		fmt.Fprintf(a.stdout, "id=%d prefix=%s fingerprint=%s\n", updated.ID, updated.KeyPrefix, updated.Fingerprint)
+		recordCLIAudit(st.DB(), "provider_endpoint.rotate_key", "provider_endpoint", strconv.FormatInt(id, 10), "provider="+row.Provider+";name="+row.Name+";fingerprint="+updated.Fingerprint+";result=ok")
+		return exitOK
+	case "disable", "enable", "archive", "restore", "reset-cooldown", "reset-selection", "demote", "delete":
+		id, ok := flagInt64(args[1:], "--id")
+		if !ok {
+			fmt.Fprintf(a.stderr, "provider-endpoint %s requires --id\n", args[0])
+			return exitUsage
+		}
+		var err error
+		switch args[0] {
+		case "disable":
+			err = repo.Disable(id)
+		case "enable":
+			err = repo.Enable(id)
+		case "archive":
+			err = repo.Archive(id)
+		case "restore":
+			err = repo.RestoreArchived(id)
+		case "reset-cooldown":
+			err = repo.ResetCooldown(id)
+		case "reset-selection":
+			err = repo.ResetSelection(id)
+		case "demote":
+			err = repo.DemoteToEnd(id)
+		case "delete":
+			err = repo.Delete(id)
+		}
+		if err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint %s: %v\n", args[0], err)
+			return exitError
+		}
+		action := strings.ReplaceAll(args[0], "-", "_")
+		recordCLIAudit(st.DB(), "provider_endpoint."+action, "provider_endpoint", strconv.FormatInt(id, 10), "result=ok")
+		return exitOK
+	default:
+		fmt.Fprintf(a.stderr, "unknown provider-endpoint subcommand %q\n", args[0])
+		return exitUsage
+	}
+}
+
 func (a *app) cmdGrok(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(a.stderr, "usage: grok set-base-url|get-base-url|set-quota-mode|get-quota-mode|set-admin-base-url|get-admin-base-url|set-admin-key")
@@ -645,6 +813,9 @@ Commands:
   gateway-key create --name NAME | list | disable|enable|revoke|delete --id ID
   provider-key add --provider grok|tavily|firecrawl --name NAME (key on stdin only; never pass secrets as argv)
   provider-key list | disable|enable|archive|restore|reset-cooldown|reset-selection|demote|delete --id ID
+  provider-endpoint add --provider grok|tavily|firecrawl --name NAME --base-url URL (key on stdin only)
+  provider-endpoint list | set-base-url --id ID --url URL | rotate-key --id ID (key on stdin)
+  provider-endpoint disable|enable|archive|restore|reset-cooldown|reset-selection|demote|delete --id ID
   grok set-base-url URL | get-base-url | set-quota-mode MODE | get-quota-mode | set-admin-base-url URL | get-admin-base-url | set-admin-key
   audit tail [--limit N]
   db migrate`)
