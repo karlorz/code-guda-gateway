@@ -129,11 +129,11 @@ func (r *QuotaRefresher) RefreshKey(ctx context.Context, providerKeyID int64) (P
 		return ProviderKeyQuota{}, err
 	}
 	var q ProviderKeyQuota
-	raw, err := r.ProviderKeys.RawKey(providerKeyID)
+	ep, err := r.ProviderKeys.RawEndpoint(providerKeyID)
 	if err != nil {
 		q = keyQuotaFailure(display, "quota_refresh", err)
 	} else {
-		qc := r.refreshProviderWithRawKey(ctx, display.Provider, providerKeyID, raw)
+		qc := r.refreshProviderWithEndpoint(ctx, display.Provider, ep)
 		q = providerKeyQuotaFromCache(providerKeyID, qc)
 	}
 	if r.KeyQuotas != nil {
@@ -143,6 +143,7 @@ func (r *QuotaRefresher) RefreshKey(ctx context.Context, providerKeyID int64) (P
 	}
 	return q, nil
 }
+
 
 // RefreshAllKeys walks every key for a provider, skipping archived/disabled/cooling rows,
 // and RefreshKey's the rest.
@@ -179,18 +180,18 @@ func (r *QuotaRefresher) RefreshAllKeys(ctx context.Context, provider string) (R
 	return out, nil
 }
 
-// refreshProviderWithRawKey runs the provider-specific quota endpoint using a known raw key.
-// For Tavily/Firecrawl this hits the per-key usage endpoint with that bearer.
-// For Grok, per-key raw keys are not used for quota (admin token path); we attribute the
-// admin-token pool snapshot to the chosen key id so a ProviderKeyQuota row still lands.
-func (r *QuotaRefresher) refreshProviderWithRawKey(ctx context.Context, provider string, keyID int64, rawKey string) QuotaCache {
+// refreshProviderWithEndpoint runs the provider-specific quota call using a complete
+// endpoint pair (row-owned BaseURL + APIKey). Grok quota is provider-level admin
+// aggregate only — per-key refresh does not stamp that aggregate onto the row.
+func (r *QuotaRefresher) refreshProviderWithEndpoint(ctx context.Context, provider string, ep SelectedEndpoint) QuotaCache {
 	now := r.nowUTC()
 	checked := now.Format(time.RFC3339Nano)
 	expires := now.Add(quotaCacheTTL).Format(time.RFC3339Nano)
+	keyID := ep.ID
 
 	switch provider {
 	case ProviderTavily:
-		return r.refreshProviderHTTPWithKey(ctx, ProviderTavily, "tavily_usage", "/usage", checked, expires, keyID, rawKey, func(id *int64, body []byte) QuotaCache {
+		return r.refreshProviderHTTPWithEndpoint(ctx, ProviderTavily, "tavily_usage", "/usage", checked, expires, ep, func(id *int64, body []byte) QuotaCache {
 			var payload tavilyUsageResponse
 			if err := json.Unmarshal(body, &payload); err != nil {
 				return quotaMalformed(ProviderTavily, "tavily_usage", checked, expires, id)
@@ -198,7 +199,7 @@ func (r *QuotaRefresher) refreshProviderWithRawKey(ctx context.Context, provider
 			return normalizeTavilyUsage(ProviderTavily, id, checked, expires, payload)
 		})
 	case ProviderFirecrawl:
-		return r.refreshProviderHTTPWithKey(ctx, ProviderFirecrawl, "firecrawl_credit_usage", "/team/credit-usage", checked, expires, keyID, rawKey, func(id *int64, body []byte) QuotaCache {
+		return r.refreshProviderHTTPWithEndpoint(ctx, ProviderFirecrawl, "firecrawl_credit_usage", "/team/credit-usage", checked, expires, ep, func(id *int64, body []byte) QuotaCache {
 			var payload firecrawlCreditUsageResponse
 			if err := json.Unmarshal(body, &payload); err != nil {
 				return quotaMalformed(ProviderFirecrawl, "firecrawl_credit_usage", checked, expires, id)
@@ -206,15 +207,31 @@ func (r *QuotaRefresher) refreshProviderWithRawKey(ctx context.Context, provider
 			return normalizeFirecrawlCreditUsage(ProviderFirecrawl, id, checked, expires, payload)
 		})
 	case ProviderGrok:
-		// Grok quota is admin-token based, not per provider_keys raw key.
-		// Reuse the existing admin path and attribute the result to this key id.
-		qc, _ := r.refreshGrok2API(ctx, checked, expires)
-		qc.ProviderKeyID = &keyID
-		return qc
+		// Grok quota is admin-token based (provider-level aggregate), not per
+		// inference endpoint. Do not attribute the shared admin result to this row
+		// as if it were independent remaining quota.
+		return grokPerKeyAdminAggregateQuota(checked, expires, keyID)
 	default:
 		return quotaFailure(provider, "quota_refresh", checked, expires, &keyID, ErrUnknownProvider)
 	}
 }
+
+// grokPerKeyAdminAggregateQuota marks that Grok remaining is not per-endpoint.
+// Provider-level Refresh still uses refreshGrok2API for the real aggregate.
+func grokPerKeyAdminAggregateQuota(checked, expires string, keyID int64) QuotaCache {
+	msg := "Grok quota is provider-level admin aggregate, not per-endpoint"
+	return QuotaCache{
+		Provider:        ProviderGrok,
+		ProviderKeyID:   &keyID,
+		Source:          "grok2api_admin_aggregate",
+		Available:       false,
+		CheckedAt:       checked,
+		ExpiresAt:       expires,
+		MessageRedacted: &msg,
+	}
+}
+
+
 
 func providerKeyQuotaFromCache(providerKeyID int64, qc QuotaCache) ProviderKeyQuota {
 	q := ProviderKeyQuota{
@@ -346,33 +363,35 @@ func (r *QuotaRefresher) refreshProviderHTTP(
 	provider, source, pathSuffix, checked, expires string,
 	parse func(keyID *int64, body []byte) QuotaCache,
 ) (QuotaCache, error) {
-	keyID, rawKey, err := r.ProviderKeys.SelectKey(provider)
+	ep, err := r.ProviderKeys.SelectEndpoint(provider)
 	if err != nil {
 		return quotaFailure(provider, source, checked, expires, nil, err), nil
 	}
-	return r.refreshProviderHTTPWithKey(ctx, provider, source, pathSuffix, checked, expires, keyID, rawKey, parse), nil
+	return r.refreshProviderHTTPWithEndpoint(ctx, provider, source, pathSuffix, checked, expires, ep, parse), nil
 }
 
-// refreshProviderHTTPWithKey performs the quota HTTP call with a known raw key (no SelectKey).
-func (r *QuotaRefresher) refreshProviderHTTPWithKey(
+// refreshProviderHTTPWithEndpoint performs the quota HTTP call using the row-owned
+// BaseURL and APIKey from the same SelectedEndpoint (no Settings.GetBaseURL).
+func (r *QuotaRefresher) refreshProviderHTTPWithEndpoint(
 	ctx context.Context,
 	provider, source, pathSuffix, checked, expires string,
-	keyID int64,
-	rawKey string,
+	ep SelectedEndpoint,
 	parse func(keyID *int64, body []byte) QuotaCache,
 ) QuotaCache {
-	base, err := r.Settings.GetBaseURL(provider)
+	keyID := ep.ID
+	url, err := JoinEndpointURL(ep.BaseURL, pathSuffix, "")
 	if err != nil {
 		return quotaFailure(provider, source, checked, expires, &keyID, err)
 	}
-	url := strings.TrimRight(base, "/") + pathSuffix
-	body, status, err := r.getJSON(ctx, url, rawKey)
+	body, status, err := r.getJSON(ctx, url, ep.APIKey)
 	r.recordQuotaEvent(keyID, status, err)
 	if err != nil {
 		return quotaHTTPFailure(provider, source, checked, expires, &keyID, status, err)
 	}
 	return parse(&keyID, body)
 }
+
+
 
 func (r *QuotaRefresher) requestHTTP(ctx context.Context, method, url, bearer string) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, nil)

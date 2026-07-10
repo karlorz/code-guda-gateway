@@ -17,9 +17,9 @@ import (
 
 const tavilyPlanLimitStatus = 432
 
-// KeySelector selects provider keys and records upstream outcomes.
+// KeySelector selects atomic provider endpoints and records upstream outcomes.
 type KeySelector interface {
-	SelectKey(provider string) (keyID int64, rawKey string, err error)
+	SelectEndpoint(provider string) (providers.SelectedEndpoint, error)
 	MarkSuccess(keyID int64) error
 	MarkFailureWithCooldown(keyID int64, status int, redactedMsg string, until *time.Time, reason *string) error
 }
@@ -31,8 +31,9 @@ type AttemptRecorder interface {
 	Record(AttemptLog) error
 }
 
+// Target describes a gateway route to forward. Upstream base URL comes from the
+// selected endpoint row (not a provider-wide field).
 type Target struct {
-	BaseURL  string
 	Path     string
 	Provider string
 	Keys     KeySelector
@@ -71,10 +72,6 @@ func (p *Proxy) SetCooldownSettings(s cooldown.Settings) {
 }
 
 func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) Result {
-	if strings.TrimSpace(target.BaseURL) == "" {
-		http.Error(w, "upstream base URL is not configured", http.StatusBadGateway)
-		return Result{Err: fmt.Errorf("upstream base URL is not configured"), StatusCode: http.StatusBadGateway}
-	}
 	if target.Keys == nil || strings.TrimSpace(target.Provider) == "" {
 		http.Error(w, "upstream API keys are not configured", http.StatusBadGateway)
 		return Result{Err: fmt.Errorf("upstream API keys are not configured"), StatusCode: http.StatusBadGateway}
@@ -105,7 +102,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 	attemptLogging := p.attempts != nil && p.attempts.Enabled()
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		keyID, key, selErr := target.Keys.SelectKey(target.Provider)
+		endpoint, selErr := target.Keys.SelectEndpoint(target.Provider)
 		if selErr != nil {
 			if errors.Is(selErr, providers.ErrNoEnabledKey) {
 				if lastStatus != 0 {
@@ -119,11 +116,17 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 			return Result{Err: selErr, StatusCode: http.StatusInternalServerError}
 		}
 
+		if strings.TrimSpace(endpoint.BaseURL) == "" {
+			http.Error(w, "upstream base URL is not configured", http.StatusBadGateway)
+			return Result{Err: fmt.Errorf("upstream base URL is not configured"), StatusCode: http.StatusBadGateway}
+		}
+
 		// Minimal surface: record numeric key id only. Name/fingerprint stay nil;
 		// the admin pool endpoint maps id -> display metadata for the UI.
+		keyID := endpoint.ID
 		keyIDCopy := keyID
 
-		resp, err := p.do(r, target, key, body)
+		resp, err := p.do(r, target, endpoint, body)
 		if err != nil {
 			coolDur := p.settings.Transient
 			if coolDur <= 0 {
@@ -257,17 +260,17 @@ func (p *Proxy) recordAttempt(row AttemptLog, enabled bool) {
 	_ = p.attempts.Record(row)
 }
 
-func (p *Proxy) do(r *http.Request, target Target, key string, body []byte) (*http.Response, error) {
-	url := strings.TrimRight(target.BaseURL, "/") + target.Path
-	if r.URL.RawQuery != "" {
-		url += "?" + r.URL.RawQuery
+func (p *Proxy) do(r *http.Request, target Target, endpoint providers.SelectedEndpoint, body []byte) (*http.Response, error) {
+	url, err := providers.JoinEndpointURL(endpoint.BaseURL, target.Path, r.URL.RawQuery)
+	if err != nil {
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header = r.Header.Clone()
-	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Authorization", "Bearer "+endpoint.APIKey)
 	req.Host = ""
 	return p.client.Do(req)
 }

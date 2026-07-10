@@ -5,7 +5,7 @@ import { useSession } from '../api/session';
 const navItems = [
   { to: '/', label: 'Overview', icon: Gauge },
   { to: '/gateway-keys', label: 'Gateway Keys', icon: KeyRound },
-  { to: '/provider-keys', label: 'Provider Keys', icon: ShieldCheck },
+  { to: '/provider-keys', label: 'Provider Endpoints', icon: ShieldCheck },
   { to: '/providers', label: 'Providers', icon: ServerCog },
   { to: '/usage', label: 'Usage', icon: BarChart3 },
   { to: '/audit', label: 'Audit', icon: Activity },

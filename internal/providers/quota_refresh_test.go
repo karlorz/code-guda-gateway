@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -208,11 +209,8 @@ func TestQuotaRefresherTavilySendsBearerAndParsesUsage(t *testing.T) {
 	defer srv.Close()
 
 	_, _, keyRepo, settingsRepo := openQuotaTestDB(t)
-	_, err := keyRepo.Add(ProviderTavily, "t1", testKey)
+	_, err := keyRepo.AddEndpoint(ProviderTavily, "t1", srv.URL, testKey)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := settingsRepo.SetBaseURL(ProviderTavily, srv.URL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -251,12 +249,9 @@ func TestQuotaRefresherFirecrawlSendsBearerAndParsesCreditUsage(t *testing.T) {
 	defer srv.Close()
 
 	_, _, keyRepo, settingsRepo := openQuotaTestDB(t)
-	_, err := keyRepo.Add(ProviderFirecrawl, "f1", testKey)
-	if err != nil {
-		t.Fatal(err)
-	}
 	base := strings.TrimSuffix(srv.URL, "/") + "/v2"
-	if err := settingsRepo.SetBaseURL(ProviderFirecrawl, base); err != nil {
+	_, err := keyRepo.AddEndpoint(ProviderFirecrawl, "f1", base, testKey)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -286,11 +281,8 @@ func TestQuotaRefresherUnauthorizedRedactsKey(t *testing.T) {
 	defer srv.Close()
 
 	_, _, keyRepo, settingsRepo := openQuotaTestDB(t)
-	_, err := keyRepo.Add(ProviderTavily, "t1", testKey)
+	_, err := keyRepo.AddEndpoint(ProviderTavily, "t1", srv.URL, testKey)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := settingsRepo.SetBaseURL(ProviderTavily, srv.URL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -324,11 +316,8 @@ func TestQuotaRefresherInvalidJSON(t *testing.T) {
 	defer srv.Close()
 
 	_, _, keyRepo, settingsRepo := openQuotaTestDB(t)
-	_, err := keyRepo.Add(ProviderTavily, "t1", "tvly-test-key-abcdefghij")
+	_, err := keyRepo.AddEndpoint(ProviderTavily, "t1", srv.URL, "tvly-test-key-abcdefghij")
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := settingsRepo.SetBaseURL(ProviderTavily, srv.URL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -542,12 +531,9 @@ func TestQuotaRefresher_RefreshKeyTavilyCachesPerKey(t *testing.T) {
 
 	keyRepo, st, mk := openQuotaRefreshStore(t)
 	settings := NewSettingsRepo(st.DB())
-	if err := settings.SetBaseURL(ProviderTavily, ts.URL); err != nil {
-		t.Fatalf("SetBaseURL: %v", err)
-	}
-	key, err := keyRepo.Add(ProviderTavily, "t1", "tvly-secret-1")
+	key, err := keyRepo.AddEndpoint(ProviderTavily, "t1", ts.URL, "tvly-secret-1")
 	if err != nil {
-		t.Fatalf("Add: %v", err)
+		t.Fatalf("AddEndpoint: %v", err)
 	}
 	refresher := QuotaRefresher{
 		ProviderKeys: keyRepo,
@@ -586,5 +572,289 @@ func TestQuotaRefresher_RefreshAllSkipsCooling(t *testing.T) {
 	}
 	if result.Attempted != 1 || result.SkippedCooldown != 1 || result.KeyResults[0].ProviderKeyID != k1.ID {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestQuotaRefreshKey_UsesRowOwnedTavilyURLAndKey(t *testing.T) {
+	const rowKey = "tvly-row-owned-key-aaaa"
+	const wrongKey = "tvly-wrong-provider-key"
+	var mu sync.Mutex
+	var gotAuth string
+	var hitCount int
+
+	rowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hitCount++
+		gotAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		if r.URL.Path != "/usage" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"key":{"usage":5,"limit":50},"account":{}}`))
+	}))
+	defer rowSrv.Close()
+
+	// Provider-default server must not receive the quota call.
+	defaultSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("quota hit provider default URL %s instead of row-owned endpoint", r.URL.String())
+		http.Error(w, "wrong host", http.StatusTeapot)
+	}))
+	defer defaultSrv.Close()
+
+	_, _, keyRepo, settingsRepo := openQuotaTestDB(t)
+	if err := settingsRepo.SetBaseURL(ProviderTavily, defaultSrv.URL); err != nil {
+		t.Fatal(err)
+	}
+	key, err := keyRepo.AddEndpoint(ProviderTavily, "row", rowSrv.URL, rowKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed a decoy row that would be selected if RefreshKey used SelectKey.
+	if _, err := keyRepo.AddEndpoint(ProviderTavily, "decoy", defaultSrv.URL, wrongKey); err != nil {
+		t.Fatal(err)
+	}
+
+	ref := &QuotaRefresher{
+		HTTPClient:   rowSrv.Client(),
+		ProviderKeys: keyRepo,
+		Settings:     settingsRepo,
+		Now:          func() time.Time { return time.Date(2026, 7, 8, 0, 0, 0, 0, time.UTC) },
+	}
+	q, err := ref.RefreshKey(context.Background(), key.ID)
+	if err != nil {
+		t.Fatalf("RefreshKey: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hitCount != 1 {
+		t.Fatalf("row-owned server hit count = %d, want 1", hitCount)
+	}
+	if gotAuth != "Bearer "+rowKey {
+		t.Fatalf("auth = %q, want Bearer %s", gotAuth, rowKey)
+	}
+	if !q.Available || q.ProviderKeyID != key.ID {
+		t.Fatalf("quota = %#v", q)
+	}
+	if q.Remaining == nil || *q.Remaining != 45 {
+		t.Fatalf("remaining = %#v", q.Remaining)
+	}
+}
+
+func TestQuotaRefreshAll_UsesEachFirecrawlEndpointPair(t *testing.T) {
+	const keyA = "fc-endpoint-a-key-11111111"
+	const keyB = "fc-endpoint-b-key-22222222"
+
+	var mu sync.Mutex
+	hits := map[string]string{} // server label -> auth bearer key
+
+	mkSrv := func(label string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v2/team/credit-usage" && r.URL.Path != "/team/credit-usage" {
+				t.Errorf("%s path = %q", label, r.URL.Path)
+			}
+			auth := r.Header.Get("Authorization")
+			mu.Lock()
+			hits[label] = auth
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"remainingCredits":10,"planCredits":20}}`))
+		}))
+	}
+	srvA := mkSrv("a")
+	defer srvA.Close()
+	srvB := mkSrv("b")
+	defer srvB.Close()
+
+	baseA := strings.TrimSuffix(srvA.URL, "/") + "/v2"
+	baseB := strings.TrimSuffix(srvB.URL, "/") + "/v2"
+
+	keyRepo, st, mk := openQuotaRefreshStore(t)
+	settings := NewSettingsRepo(st.DB())
+	// Provider default points at neither endpoint.
+	if err := settings.SetBaseURL(ProviderFirecrawl, "https://api.firecrawl.dev/v2"); err != nil {
+		t.Fatal(err)
+	}
+	epA, err := keyRepo.AddEndpoint(ProviderFirecrawl, "a", baseA, keyA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	epB, err := keyRepo.AddEndpoint(ProviderFirecrawl, "b", baseB, keyB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	ref := &QuotaRefresher{
+		HTTPClient:   client,
+		ProviderKeys: keyRepo,
+		Settings:     settings,
+		KeyQuotas:    NewKeyQuotaRepo(st.DB()),
+		MasterKey:    mk,
+		Now:          func() time.Time { return time.Date(2026, 7, 8, 0, 0, 0, 0, time.UTC) },
+	}
+	result, err := ref.RefreshAllKeys(context.Background(), ProviderFirecrawl)
+	if err != nil {
+		t.Fatalf("RefreshAllKeys: %v", err)
+	}
+	if result.Attempted != 2 || result.Succeeded != 2 {
+		t.Fatalf("result = %#v", result)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if hits["a"] != "Bearer "+keyA {
+		t.Fatalf("server A auth = %q, want Bearer %s (ep id %d)", hits["a"], keyA, epA.ID)
+	}
+	if hits["b"] != "Bearer "+keyB {
+		t.Fatalf("server B auth = %q, want Bearer %s (ep id %d)", hits["b"], keyB, epB.ID)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("hits = %#v, want both endpoints", hits)
+	}
+}
+
+func TestProviderDefaultChange_DoesNotChangeEndpointQuotaURL(t *testing.T) {
+	const rowKey = "tvly-stable-endpoint-key"
+	var mu sync.Mutex
+	var hitCount int
+
+	rowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hitCount++
+		mu.Unlock()
+		if r.URL.Path != "/usage" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"key":{"usage":1,"limit":10},"account":{}}`))
+	}))
+	defer rowSrv.Close()
+
+	newDefaultSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("quota hit changed provider default %s; row base URL should be sticky", r.URL.String())
+		http.Error(w, "wrong host", http.StatusTeapot)
+	}))
+	defer newDefaultSrv.Close()
+
+	_, _, keyRepo, settingsRepo := openQuotaTestDB(t)
+	// Snapshot a different default first; endpoint row stores its own URL.
+	if err := settingsRepo.SetBaseURL(ProviderTavily, "https://api.tavily.com"); err != nil {
+		t.Fatal(err)
+	}
+	key, err := keyRepo.AddEndpoint(ProviderTavily, "sticky", rowSrv.URL, rowKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Change provider default after the endpoint exists — must not reroute quota.
+	if err := settingsRepo.SetBaseURL(ProviderTavily, newDefaultSrv.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	ref := &QuotaRefresher{
+		HTTPClient:   rowSrv.Client(),
+		ProviderKeys: keyRepo,
+		Settings:     settingsRepo,
+		Now:          func() time.Time { return time.Date(2026, 7, 8, 0, 0, 0, 0, time.UTC) },
+	}
+	q, err := ref.RefreshKey(context.Background(), key.ID)
+	if err != nil {
+		t.Fatalf("RefreshKey: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hitCount != 1 {
+		t.Fatalf("row server hits = %d, want 1 (provider default must not be used)", hitCount)
+	}
+	if !q.Available || q.ProviderKeyID != key.ID {
+		t.Fatalf("quota = %#v", q)
+	}
+}
+
+func TestRefreshKey_GrokReturnsAdminAggregateMarker(t *testing.T) {
+	// Per-key Grok refresh must NOT stamp the shared admin aggregate as
+	// independent remaining quota on the endpoint row.
+	_, mk, keyRepo, settingsRepo := openQuotaTestDB(t)
+	if err := settingsRepo.SetGrokQuotaMode("grok2api_admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := settingsRepo.SetGrok2APIAdminKey(mk, "secret-admin-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	adminHits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		adminHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tokens":[{"token":"t1","quota":{"fast":{"remaining":99,"total":100}}}]}`))
+	}))
+	defer srv.Close()
+	if err := settingsRepo.SetGrok2APIAdminBaseURL(srv.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	key, err := keyRepo.AddEndpoint(ProviderGrok, "inf-1", "https://api.x.ai/v1", "xai-inf-key-11111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ref := &QuotaRefresher{
+		HTTPClient:   srv.Client(),
+		ProviderKeys: keyRepo,
+		Settings:     settingsRepo,
+		KeyQuotas:    nil,
+		MasterKey:    mk,
+		Now:          func() time.Time { return time.Date(2026, 7, 8, 0, 0, 0, 0, time.UTC) },
+	}
+
+	// Provider-level path still returns the real admin aggregate.
+	pq, err := ref.Refresh(context.Background(), ProviderGrok)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if !pq.Available || pq.Source != "grok2api_admin_tokens" {
+		t.Fatalf("provider-level quota = %+v", pq)
+	}
+	if pq.Remaining == nil || *pq.Remaining != 99 {
+		t.Fatalf("provider remaining = %#v", pq.Remaining)
+	}
+
+	// Per-key path returns admin-aggregate marker, not a real remaining number.
+	q, err := ref.RefreshKey(context.Background(), key.ID)
+	if err != nil {
+		t.Fatalf("RefreshKey: %v", err)
+	}
+	if q.Available {
+		t.Fatalf("per-key Grok quota must not be available: %+v", q)
+	}
+	if q.Source != "grok2api_admin_aggregate" {
+		t.Fatalf("source = %q, want grok2api_admin_aggregate", q.Source)
+	}
+	if q.Remaining != nil {
+		t.Fatalf("remaining must be nil for per-key Grok marker, got %#v", q.Remaining)
+	}
+	if q.MessageRedacted == nil || !strings.Contains(*q.MessageRedacted, "not per-endpoint") {
+		t.Fatalf("message = %#v", q.MessageRedacted)
+	}
+	if q.ProviderKeyID != key.ID {
+		t.Fatalf("provider_key_id = %d, want %d", q.ProviderKeyID, key.ID)
+	}
+	// RefreshKey must not call the shared admin tokens path for Grok rows.
+	// (provider-level Refresh above may have hit the server already.)
+	// Count hits after RefreshKey alone via a second key with a fresh server.
+	key2, err := keyRepo.AddEndpoint(ProviderGrok, "inf-2", "https://new-api.example/v1", "xai-inf-key-22222222")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hitsBefore := adminHits
+	q2, err := ref.RefreshKey(context.Background(), key2.ID)
+	if err != nil {
+		t.Fatalf("RefreshKey2: %v", err)
+	}
+	if adminHits != hitsBefore {
+		t.Fatalf("per-key Grok refresh hit admin API (%d -> %d); must not attribute admin aggregate", hitsBefore, adminHits)
+	}
+	if q2.Source != "grok2api_admin_aggregate" || q2.Available {
+		t.Fatalf("second key marker = %+v", q2)
 	}
 }

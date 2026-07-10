@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -71,6 +72,88 @@ func TestOpen_Idempotent(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("schema_migrations rows for 0001 = %d, want 1", count)
+	}
+}
+
+func TestOpen_Migration0008BackfillsProviderEndpointURLs(t *testing.T) {
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "gateway.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE schema_migrations (id TEXT NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL);
+		CREATE TABLE provider_settings (provider TEXT NOT NULL PRIMARY KEY, base_url TEXT NOT NULL, updated_at TEXT NOT NULL);
+		CREATE TABLE provider_keys (
+			id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+			provider TEXT NOT NULL,
+			name TEXT NOT NULL,
+			encrypted_key TEXT NOT NULL,
+			key_prefix TEXT NOT NULL,
+			fingerprint TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			cooldown_until TEXT,
+			cooldown_reason TEXT,
+			last_used_at TEXT,
+			last_success_at TEXT,
+			last_error_at TEXT,
+			last_error_status INTEGER,
+			last_error_message_redacted TEXT,
+			consecutive_failures INTEGER NOT NULL DEFAULT 0,
+			total_failures INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			archived_at TEXT,
+			last_event_at TEXT,
+			last_event_source TEXT,
+			last_event_status_class TEXT,
+			last_event_http_status INTEGER,
+			last_event_message_redacted TEXT,
+			last_failed_at TEXT
+		);
+		INSERT INTO provider_settings(provider, base_url, updated_at)
+		VALUES ('grok', 'https://grok.example/v1', 'now');
+		INSERT INTO provider_keys(id, provider, name, encrypted_key, key_prefix, fingerprint, created_at, updated_at)
+		VALUES
+			(41, 'grok', 'configured', 'cipher-a', 'prefix', 'fp-a', 'created', 'updated'),
+			(42, 'tavily', 'defaulted', 'cipher-b', 'prefix', 'fp-b', 'created', 'updated');
+	`)
+	if err != nil {
+		t.Fatalf("seed pre-0008 database: %v", err)
+	}
+	for i := 1; i <= 7; i++ {
+		id := fmt.Sprintf("%04d", i)
+		if _, err := db.Exec(`INSERT INTO schema_migrations(id, applied_at) VALUES (?, 'now')`, id); err != nil {
+			t.Fatalf("mark migration %s: %v", id, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close seed database: %v", err)
+	}
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+
+	var configuredURL, defaultURL string
+	if err := s.DB().QueryRow(`SELECT base_url FROM provider_keys WHERE id = 41`).Scan(&configuredURL); err != nil {
+		t.Fatalf("configured base_url: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT base_url FROM provider_keys WHERE id = 42`).Scan(&defaultURL); err != nil {
+		t.Fatalf("default base_url: %v", err)
+	}
+	if configuredURL != "https://grok.example/v1" {
+		t.Fatalf("configured base_url = %q", configuredURL)
+	}
+	if defaultURL != "https://api.tavily.com" {
+		t.Fatalf("default base_url = %q", defaultURL)
+	}
+	var id int64
+	if err := s.DB().QueryRow(`SELECT id FROM provider_keys WHERE name = 'configured'`).Scan(&id); err != nil || id != 41 {
+		t.Fatalf("stable id = %d err=%v", id, err)
 	}
 }
 

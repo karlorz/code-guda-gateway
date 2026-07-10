@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,11 +75,8 @@ func TestServer_RuntimeRequestIncrementsUsage(t *testing.T) {
 	defer upstream.Close()
 
 	app, gk, keyRepo, st, raw := openTestApp(t, config.Config{})
-	if _, err := keyRepo.Add(providers.ProviderGrok, "primary", "grok-key"); err != nil {
-		t.Fatalf("Add grok key: %v", err)
-	}
-	if err := providers.NewSettingsRepo(st.DB()).SetBaseURL(providers.ProviderGrok, upstream.URL+"/grok/v1"); err != nil {
-		t.Fatalf("SetBaseURL: %v", err)
+	if _, err := keyRepo.AddEndpoint(providers.ProviderGrok, "primary", upstream.URL+"/grok/v1", "grok-key"); err != nil {
+		t.Fatalf("AddEndpoint grok: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/grok/v1/models", nil)
@@ -120,12 +118,9 @@ func TestServer_RuntimeRouteAcceptsValidGatewayKey(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	app, _, keyRepo, st, raw := openTestApp(t, config.Config{})
-	if _, err := keyRepo.Add(providers.ProviderGrok, "primary", "grok-key"); err != nil {
-		t.Fatalf("Add grok key: %v", err)
-	}
-	if err := providers.NewSettingsRepo(st.DB()).SetBaseURL(providers.ProviderGrok, upstream.URL+"/grok/v1"); err != nil {
-		t.Fatalf("SetBaseURL: %v", err)
+	app, _, keyRepo, _, raw := openTestApp(t, config.Config{})
+	if _, err := keyRepo.AddEndpoint(providers.ProviderGrok, "primary", upstream.URL+"/grok/v1", "grok-key"); err != nil {
+		t.Fatalf("AddEndpoint grok: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/grok/v1/models", nil)
@@ -138,6 +133,53 @@ func TestServer_RuntimeRouteAcceptsValidGatewayKey(t *testing.T) {
 	}
 }
 
+// TestServer_ProviderDefaultDoesNotReroute proves that changing provider_settings
+// after an endpoint row is created does not change the live upstream for that row.
+func TestServer_ProviderDefaultDoesNotReroute(t *testing.T) {
+	var hitsOriginal atomic.Int32
+	var hitsChanged atomic.Int32
+	original := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitsOriginal.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("from-original"))
+	}))
+	defer original.Close()
+	changed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitsChanged.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("from-changed"))
+	}))
+	defer changed.Close()
+
+	app, _, keyRepo, st, raw := openTestApp(t, config.Config{})
+	// Snapshot original base URL into the endpoint row at creation time.
+	if _, err := keyRepo.AddEndpoint(providers.ProviderGrok, "primary", original.URL+"/grok/v1", "grok-key"); err != nil {
+		t.Fatalf("AddEndpoint: %v", err)
+	}
+	// Mutate provider-wide default after the row exists — must not re-route live traffic.
+	if err := providers.NewSettingsRepo(st.DB()).SetBaseURL(providers.ProviderGrok, changed.URL+"/grok/v1"); err != nil {
+		t.Fatalf("SetBaseURL after create: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/grok/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != "from-original" {
+		t.Fatalf("body = %q, want from-original (row-owned URL)", rec.Body.String())
+	}
+	if hitsOriginal.Load() != 1 {
+		t.Fatalf("original hits = %d, want 1", hitsOriginal.Load())
+	}
+	if hitsChanged.Load() != 0 {
+		t.Fatalf("changed hits = %d, want 0 (provider_settings must not re-route)", hitsChanged.Load())
+	}
+}
+
 func TestServer_RuntimeRouteRejectsRevokedGatewayKey(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -145,7 +187,7 @@ func TestServer_RuntimeRouteRejectsRevokedGatewayKey(t *testing.T) {
 	defer upstream.Close()
 
 	app, gk, keyRepo, _, raw := openTestApp(t, config.Config{})
-	_, _ = keyRepo.Add(providers.ProviderGrok, "primary", "grok-key")
+	_, _ = keyRepo.AddEndpoint(providers.ProviderGrok, "primary", upstream.URL+"/grok/v1", "grok-key")
 	list, _ := gk.List()
 	if len(list) == 0 {
 		t.Fatal("no gateway keys")
@@ -215,14 +257,11 @@ func TestRoutesForwardToExpectedUpstreams(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	app, _, keyRepo, st, raw := openTestApp(t, config.Config{})
-	settings := providers.NewSettingsRepo(st.DB())
-	_ = settings.SetBaseURL(providers.ProviderGrok, upstream.URL+"/grok/v1")
-	_ = settings.SetBaseURL(providers.ProviderTavily, upstream.URL+"/tavily")
-	_ = settings.SetBaseURL(providers.ProviderFirecrawl, upstream.URL+"/firecrawl")
-	_, _ = keyRepo.Add(providers.ProviderGrok, "g1", "grok-key")
-	_, _ = keyRepo.Add(providers.ProviderTavily, "t1", "tavily-key")
-	_, _ = keyRepo.Add(providers.ProviderFirecrawl, "f1", "firecrawl-key")
+	app, _, keyRepo, _, raw := openTestApp(t, config.Config{})
+	// Rows own their base URL; settings SetBaseURL is no longer used for routing.
+	_, _ = keyRepo.AddEndpoint(providers.ProviderGrok, "g1", upstream.URL+"/grok/v1", "grok-key")
+	_, _ = keyRepo.AddEndpoint(providers.ProviderTavily, "t1", upstream.URL+"/tavily", "tavily-key")
+	_, _ = keyRepo.AddEndpoint(providers.ProviderFirecrawl, "f1", upstream.URL+"/firecrawl", "firecrawl-key")
 
 	cases := []struct {
 		method string

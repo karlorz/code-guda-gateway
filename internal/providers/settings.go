@@ -39,7 +39,8 @@ func (r *SettingsRepo) GetBaseURL(provider string) (string, error) {
 	return baseURL, nil
 }
 
-// SetBaseURL persists the base URL for a provider.
+// SetBaseURL persists the base URL for a provider (creation default only).
+// The URL is validated with NormalizeBaseURL (no userinfo/query/fragment).
 func (r *SettingsRepo) SetBaseURL(provider, baseURL string) error {
 	if err := validateProvider(provider); err != nil {
 		return err
@@ -47,12 +48,16 @@ func (r *SettingsRepo) SetBaseURL(provider, baseURL string) error {
 	if baseURL == "" {
 		return fmt.Errorf("set base url: empty url")
 	}
+	normalized, err := NormalizeBaseURL(baseURL)
+	if err != nil {
+		return err
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := r.db.Exec(`
+	_, err = r.db.Exec(`
 		INSERT INTO provider_settings (provider, base_url, updated_at)
 		VALUES (?, ?, ?)
 		ON CONFLICT(provider) DO UPDATE SET base_url = excluded.base_url, updated_at = excluded.updated_at`,
-		provider, baseURL, now,
+		provider, normalized, now,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert provider_settings: %w", err)

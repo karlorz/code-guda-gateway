@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"fmt"
 	"strconv"
 	"time"
 )
@@ -22,6 +23,7 @@ type HealthItem struct {
 	KeyCount                 int          `json:"key_count"`
 	EnabledKeyCount          int          `json:"enabled_key_count"`
 	CooldownKeyCount         int          `json:"cooldown_key_count"`
+	DistinctBaseURLs         int          `json:"distinct_base_urls,omitempty"`
 	Status                   HealthStatus `json:"status"`
 	Reasons                  []string     `json:"reasons"`
 	LastUsedAt               *string      `json:"last_used_at,omitempty"`
@@ -37,7 +39,7 @@ func BuildHealth(settings *SettingsRepo, keys *KeyRepo) ([]HealthItem, error) {
 	var out []HealthItem
 	now := time.Now().UTC()
 	for _, provider := range []string{ProviderGrok, ProviderTavily, ProviderFirecrawl} {
-		baseURL, err := settings.GetBaseURL(provider)
+		settingsBaseURL, err := settings.GetBaseURL(provider)
 		if err != nil {
 			return nil, err
 		}
@@ -45,14 +47,24 @@ func BuildHealth(settings *SettingsRepo, keys *KeyRepo) ([]HealthItem, error) {
 		if err != nil {
 			return nil, err
 		}
-		item := HealthItem{Provider: provider, BaseURL: baseURL, Reasons: []string{}}
+		item := HealthItem{Provider: provider, Reasons: []string{}}
+		// Track distinct base URLs among non-archived endpoints for health display
+		// (settings base_url is creation default only, not live routing).
+		distinct := map[string]struct{}{}
+		enabledDistinct := map[string]struct{}{}
 		for _, k := range list {
 			if k.ArchivedAt != nil {
 				continue
 			}
 			item.KeyCount++
+			if k.BaseURL != "" {
+				distinct[k.BaseURL] = struct{}{}
+			}
 			if k.Enabled {
 				item.EnabledKeyCount++
+				if k.BaseURL != "" {
+					enabledDistinct[k.BaseURL] = struct{}{}
+				}
 			}
 			if k.CooldownUntil != nil {
 				if t, err := time.Parse(time.RFC3339Nano, *k.CooldownUntil); err == nil && t.After(now) {
@@ -63,6 +75,13 @@ func BuildHealth(settings *SettingsRepo, keys *KeyRepo) ([]HealthItem, error) {
 			item.LastSuccessAt = laterString(item.LastSuccessAt, k.LastSuccessAt)
 			applyLatestKeyEvent(&item, k)
 		}
+		// Prefer enabled endpoints for display; fall back to all non-archived.
+		displaySet := enabledDistinct
+		if len(displaySet) == 0 {
+			displaySet = distinct
+		}
+		item.DistinctBaseURLs = len(displaySet)
+		item.BaseURL = healthBaseURLLabel(displaySet, settingsBaseURL, item.EnabledKeyCount, item.KeyCount)
 		latestEventFailed := item.LastEventStatusClass != nil && *item.LastEventStatusClass != "2xx"
 		switch {
 		case item.KeyCount == 0:
@@ -86,6 +105,27 @@ func BuildHealth(settings *SettingsRepo, keys *KeyRepo) ([]HealthItem, error) {
 		out = append(out, item)
 	}
 	return out, nil
+}
+
+// healthBaseURLLabel describes live routing URLs, not the settings creation default.
+// Single distinct URL → that URL; mixed → "mixed (N endpoints)"; none → settings default.
+func healthBaseURLLabel(distinct map[string]struct{}, settingsDefault string, enabledCount, keyCount int) string {
+	switch len(distinct) {
+	case 0:
+		return settingsDefault
+	case 1:
+		for u := range distinct {
+			return u
+		}
+	}
+	n := enabledCount
+	if n == 0 {
+		n = keyCount
+	}
+	if n == 0 {
+		n = len(distinct)
+	}
+	return fmt.Sprintf("mixed (%d endpoints)", n)
 }
 
 func applyLatestKeyEvent(item *HealthItem, k DisplayProviderKey) {

@@ -95,3 +95,36 @@ func TestSetBaseURL_RejectsUnknownProvider(t *testing.T) {
 		t.Fatalf("SetBaseURL err = %v, want ErrUnknownProvider", err)
 	}
 }
+
+func TestSetBaseURL_RejectsInvalidURLs(t *testing.T) {
+	t.Parallel()
+	st := openTestDB(t)
+	svc := providers.NewSettingsRepo(st.DB())
+	invalids := []string{
+		"https://user:pass@example.com/v1",
+		"https://example.com/v1?api_key=secret",
+		"https://example.com/v1#frag",
+		"ftp://example.com/v1",
+		"/relative",
+	}
+	for _, raw := range invalids {
+		err := svc.SetBaseURL(providers.ProviderGrok, raw)
+		if err == nil {
+			t.Fatalf("SetBaseURL(%q) expected error", raw)
+		}
+		if !errors.Is(err, providers.ErrInvalidBaseURL) {
+			t.Fatalf("SetBaseURL(%q) err = %v, want ErrInvalidBaseURL", raw, err)
+		}
+	}
+	// Valid URL still works and is normalized (trailing slash stripped).
+	if err := svc.SetBaseURL(providers.ProviderGrok, "https://custom.example/v1/"); err != nil {
+		t.Fatalf("valid SetBaseURL: %v", err)
+	}
+	got, err := svc.GetBaseURL(providers.ProviderGrok)
+	if err != nil {
+		t.Fatalf("GetBaseURL: %v", err)
+	}
+	if got != "https://custom.example/v1" {
+		t.Fatalf("got %q, want normalized URL", got)
+	}
+}

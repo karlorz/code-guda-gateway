@@ -530,3 +530,273 @@ func TestMarkFailureWithoutCooldown_DoesNotDemote(t *testing.T) {
 		t.Fatalf("unexpected demotion on non-cool failure: %v", *got.LastFailedAt)
 	}
 }
+
+
+func TestAddEndpoint_StoresNormalizedURLAndEncryptedKey(t *testing.T) {
+	t.Parallel()
+	repo, st, _ := openKeyRepo(t)
+	raw := "tvly-endpoint-secret-key-11111"
+	d, err := repo.AddEndpoint(providers.ProviderTavily, "ep1", "https://proxy.example/tavily/", raw)
+	if err != nil {
+		t.Fatalf("AddEndpoint: %v", err)
+	}
+	if d.BaseURL != "https://proxy.example/tavily" {
+		t.Fatalf("display BaseURL = %q, want normalized without trailing slash", d.BaseURL)
+	}
+	if d.Name != "ep1" || d.Provider != providers.ProviderTavily {
+		t.Fatalf("display fields: %+v", d)
+	}
+
+	var storedURL, enc string
+	if err := st.DB().QueryRow(
+		`SELECT base_url, encrypted_key FROM provider_keys WHERE id = ?`, d.ID,
+	).Scan(&storedURL, &enc); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if storedURL != "https://proxy.example/tavily" {
+		t.Fatalf("stored base_url = %q", storedURL)
+	}
+	if enc == raw || strings.Contains(enc, raw) {
+		t.Fatal("raw key appears in encrypted_key")
+	}
+	got, err := repo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.BaseURL != "https://proxy.example/tavily" {
+		t.Fatalf("Get BaseURL = %q", got.BaseURL)
+	}
+}
+
+func TestSelectEndpoint_ReturnsURLAndKeyFromSameRow(t *testing.T) {
+	t.Parallel()
+	repo, _, _ := openKeyRepo(t)
+	rawA := "tvly-atomic-aaaa1111bbbb2222"
+	rawB := "tvly-atomic-cccc3333dddd4444"
+	urlA := "https://a.example/v1"
+	urlB := "https://b.example/v2"
+	a, err := repo.AddEndpoint(providers.ProviderTavily, "a", urlA, rawA)
+	if err != nil {
+		t.Fatalf("AddEndpoint a: %v", err)
+	}
+	b, err := repo.AddEndpoint(providers.ProviderTavily, "b", urlB, rawB)
+	if err != nil {
+		t.Fatalf("AddEndpoint b: %v", err)
+	}
+	wantByID := map[int64]struct {
+		url string
+		key string
+	}{
+		a.ID: {url: urlA, key: rawA},
+		b.ID: {url: urlB, key: rawB},
+	}
+	for i := 0; i < 20; i++ {
+		ep, err := repo.SelectEndpoint(providers.ProviderTavily)
+		if err != nil {
+			t.Fatalf("SelectEndpoint: %v", err)
+		}
+		want, ok := wantByID[ep.ID]
+		if !ok {
+			t.Fatalf("unexpected id %d", ep.ID)
+		}
+		if ep.BaseURL != want.url {
+			t.Fatalf("id %d BaseURL = %q, want %q", ep.ID, ep.BaseURL, want.url)
+		}
+		if ep.APIKey != want.key {
+			t.Fatalf("id %d APIKey mismatch for atomic pair", ep.ID)
+		}
+		if ep.Provider != providers.ProviderTavily {
+			t.Fatalf("provider = %q", ep.Provider)
+		}
+		if ep.BaseURL == urlA && ep.APIKey == rawB {
+			t.Fatal("atomic violation: URL A with key B")
+		}
+		if ep.BaseURL == urlB && ep.APIKey == rawA {
+			t.Fatal("atomic violation: URL B with key A")
+		}
+	}
+
+	if err := repo.Disable(b.ID); err != nil {
+		t.Fatalf("Disable b: %v", err)
+	}
+	ep, err := repo.SelectEndpoint(providers.ProviderTavily)
+	if err != nil {
+		t.Fatalf("SelectEndpoint a only: %v", err)
+	}
+	if ep.ID != a.ID || ep.BaseURL != urlA || ep.APIKey != rawA {
+		t.Fatalf("want row a pair, got id=%d url=%q key match=%v", ep.ID, ep.BaseURL, ep.APIKey == rawA)
+	}
+	if err := repo.Enable(b.ID); err != nil {
+		t.Fatalf("Enable b: %v", err)
+	}
+	if err := repo.Disable(a.ID); err != nil {
+		t.Fatalf("Disable a: %v", err)
+	}
+	ep, err = repo.SelectEndpoint(providers.ProviderTavily)
+	if err != nil {
+		t.Fatalf("SelectEndpoint b only: %v", err)
+	}
+	if ep.ID != b.ID || ep.BaseURL != urlB || ep.APIKey != rawB {
+		t.Fatalf("want row b pair, got id=%d url=%q key match=%v", ep.ID, ep.BaseURL, ep.APIKey == rawB)
+	}
+}
+
+func TestUpdateBaseURL_ClearsCooldownAndDemotion(t *testing.T) {
+	t.Parallel()
+	repo, _, _ := openKeyRepo(t)
+	d, err := repo.AddEndpoint(providers.ProviderGrok, "u", "https://api.x.ai/v1", "xai-update-url-key-11111111")
+	if err != nil {
+		t.Fatalf("AddEndpoint: %v", err)
+	}
+	until := time.Now().UTC().Add(time.Hour)
+	reason := "rate_limited"
+	if err := repo.MarkFailureWithCooldown(d.ID, 429, "limited", &until, &reason); err != nil {
+		t.Fatalf("MarkFailureWithCooldown: %v", err)
+	}
+	before, err := repo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get before: %v", err)
+	}
+	if before.CooldownUntil == nil || before.LastFailedAt == nil {
+		t.Fatalf("expected cool+demote before update: %+v", before)
+	}
+	consecBefore := before.ConsecutiveFailures
+	totalBefore := before.TotalFailures
+
+	newURL := "https://new.karldigi.dev/v1/"
+	if err := repo.UpdateBaseURL(d.ID, newURL); err != nil {
+		t.Fatalf("UpdateBaseURL: %v", err)
+	}
+	got, err := repo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get after: %v", err)
+	}
+	if got.BaseURL != "https://new.karldigi.dev/v1" {
+		t.Fatalf("BaseURL = %q", got.BaseURL)
+	}
+	if got.CooldownUntil != nil || got.CooldownReason != nil || got.LastFailedAt != nil {
+		t.Fatalf("expected clear cool+demote, got until=%v reason=%v failed=%v",
+			got.CooldownUntil, got.CooldownReason, got.LastFailedAt)
+	}
+	if got.ID != d.ID {
+		t.Fatalf("id changed: %d -> %d", d.ID, got.ID)
+	}
+	if got.ConsecutiveFailures != consecBefore || got.TotalFailures != totalBefore {
+		t.Fatalf("counters changed: consec %d->%d total %d->%d",
+			consecBefore, got.ConsecutiveFailures, totalBefore, got.TotalFailures)
+	}
+	if got.Fingerprint != before.Fingerprint {
+		t.Fatal("fingerprint should be unchanged on URL update")
+	}
+}
+
+func TestRotateKey_ClearsCooldownAndDemotionAndChangesFingerprint(t *testing.T) {
+	t.Parallel()
+	repo, _, _ := openKeyRepo(t)
+	oldRaw := "xai-rotate-old-key-1111111111"
+	d, err := repo.AddEndpoint(providers.ProviderGrok, "r", "https://api.x.ai/v1", oldRaw)
+	if err != nil {
+		t.Fatalf("AddEndpoint: %v", err)
+	}
+	until := time.Now().UTC().Add(time.Hour)
+	reason := "credential_error"
+	if err := repo.MarkFailureWithCooldown(d.ID, 401, "bad key", &until, &reason); err != nil {
+		t.Fatalf("MarkFailureWithCooldown: %v", err)
+	}
+	before, err := repo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get before: %v", err)
+	}
+	if before.CooldownUntil == nil || before.LastFailedAt == nil {
+		t.Fatalf("expected cool+demote before rotate: %+v", before)
+	}
+	consecBefore := before.ConsecutiveFailures
+	totalBefore := before.TotalFailures
+	oldFP := before.Fingerprint
+	oldURL := before.BaseURL
+
+	newRaw := "xai-rotate-new-key-2222222222"
+	if err := repo.RotateKey(d.ID, newRaw); err != nil {
+		t.Fatalf("RotateKey: %v", err)
+	}
+	got, err := repo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get after: %v", err)
+	}
+	if got.ID != d.ID {
+		t.Fatalf("id changed: %d -> %d", d.ID, got.ID)
+	}
+	if got.BaseURL != oldURL {
+		t.Fatalf("BaseURL changed on rotate: %q -> %q", oldURL, got.BaseURL)
+	}
+	if got.Fingerprint == oldFP {
+		t.Fatal("fingerprint should change after rotate")
+	}
+	if got.CooldownUntil != nil || got.CooldownReason != nil || got.LastFailedAt != nil {
+		t.Fatalf("expected clear cool+demote, got until=%v reason=%v failed=%v",
+			got.CooldownUntil, got.CooldownReason, got.LastFailedAt)
+	}
+	if got.ConsecutiveFailures != consecBefore || got.TotalFailures != totalBefore {
+		t.Fatalf("counters changed: consec %d->%d total %d->%d",
+			consecBefore, got.ConsecutiveFailures, totalBefore, got.TotalFailures)
+	}
+	raw, err := repo.RawKey(d.ID)
+	if err != nil {
+		t.Fatalf("RawKey: %v", err)
+	}
+	if raw != newRaw {
+		t.Fatalf("RawKey = %q, want new key", raw)
+	}
+	ep, err := repo.RawEndpoint(d.ID)
+	if err != nil {
+		t.Fatalf("RawEndpoint: %v", err)
+	}
+	if ep.APIKey != newRaw || ep.BaseURL != oldURL || ep.ID != d.ID {
+		t.Fatalf("RawEndpoint = %+v", ep)
+	}
+}
+
+func TestLegacyAdd_SnapshotsProviderDefault(t *testing.T) {
+	t.Parallel()
+	repo, st, _ := openKeyRepo(t)
+	settings := providers.NewSettingsRepo(st.DB())
+	custom := "https://custom-tavily.example/v1"
+	if err := settings.SetBaseURL(providers.ProviderTavily, custom); err != nil {
+		t.Fatalf("SetBaseURL: %v", err)
+	}
+	d, err := repo.Add(providers.ProviderTavily, "legacy", "tvly-legacy-key-material-xyz")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if d.BaseURL != custom {
+		t.Fatalf("display BaseURL = %q, want snapshot %q", d.BaseURL, custom)
+	}
+	var stored string
+	if err := st.DB().QueryRow(`SELECT base_url FROM provider_keys WHERE id = ?`, d.ID).Scan(&stored); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if stored != custom {
+		t.Fatalf("stored base_url = %q, want %q", stored, custom)
+	}
+	// Changing provider settings later must not rewrite the row.
+	if err := settings.SetBaseURL(providers.ProviderTavily, "https://other.example"); err != nil {
+		t.Fatalf("SetBaseURL again: %v", err)
+	}
+	got, err := repo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.BaseURL != custom {
+		t.Fatalf("BaseURL after settings change = %q, want frozen %q", got.BaseURL, custom)
+	}
+
+	// Without custom settings, snapshot compiled default.
+	repo2, _, _ := openKeyRepo(t)
+	d2, err := repo2.Add(providers.ProviderGrok, "def", "xai-default-snapshot-key-12345")
+	if err != nil {
+		t.Fatalf("Add grok: %v", err)
+	}
+	if d2.BaseURL != providers.DefaultGrokBaseURL {
+		t.Fatalf("grok snapshot = %q, want %q", d2.BaseURL, providers.DefaultGrokBaseURL)
+	}
+}

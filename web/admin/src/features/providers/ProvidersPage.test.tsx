@@ -88,7 +88,13 @@ describe('ProvidersPage pools', () => {
     });
   });
 
-  it('shows provider pool summary and paginated key rows', async () => {
+  it('labels provider settings as Default URL for new endpoints', async () => {
+    renderWithClient(<ProvidersPage />);
+    expect(await screen.findByText(/default url for new endpoints/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/default url for new endpoints/i)).toBeInTheDocument();
+  });
+
+    it('shows provider pool summary and paginated key rows', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
       if (path === '/admin/api/provider-settings') return { items: [] };
       if (path === '/admin/api/provider-health') return { items: [] };

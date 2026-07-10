@@ -30,6 +30,8 @@ export type ProviderKey = {
   provider?: string;
   Name?: string;
   name?: string;
+  BaseURL?: string;
+  base_url?: string;
   KeyPrefix?: string;
   key_prefix?: string;
   Fingerprint?: string;
