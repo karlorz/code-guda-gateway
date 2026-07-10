@@ -217,6 +217,17 @@ Loads `~/.secrets/guda-gateway.env` when present, uses the persistent pair
 `GUDA_ADMIN_COOKIE_SECURE=false`, builds `./guda-gateway` if missing, and
 health-checks `http://127.0.0.1:8080/healthz`. Log: `/tmp/guda-gateway-dev.log`.
 
+`--rebuild` only recompiles the Go binary from the already-embedded admin SPA.
+After changing React under `web/admin/`, run `./scripts/build.sh` (embeds the
+Vite build into `internal/adminweb/assets/dist` then builds both binaries), then
+`./scripts/dev-up.sh` (or hard-refresh the browser if the process was already
+replaced). For live frontend work, prefer Vite:
+
+```bash
+./scripts/dev-up.sh
+bun run --cwd web/admin dev
+```
+
 There are two local dev path setups. **Do not mix them** - the SQLite DB and
 master key file are a pair; if you seed keys with one master key and run the
 gateway with another, provider key decryption fails with
@@ -307,6 +318,47 @@ Smoke test (replace `<gateway-key>` with the value printed by `gateway-key creat
 curl -sS -H 'Authorization: Bearer <gateway-key>' http://127.0.0.1:8080/healthz
 ```
 
+## Provider key selection and cooldown
+
+Runtime selection is **sticky winner + failure demotion**, not classic
+round-robin:
+
+1. Eligible keys: enabled, not archived, not actively cooling
+   (`cooldown_until` null or past).
+2. Order: never-failed first (`last_failed_at IS NULL`), then oldest
+   `last_failed_at`, then lowest `id`.
+3. Cool-policy failures (429, Tavily plan-limit **432**, 5xx/408, 401/403,
+   network) set cooldown **and** `last_failed_at = now` so the key sorts to
+   the end after cool expires.
+4. Success clears demotion (`last_failed_at = NULL`).
+5. Defaults: rate/plan cool **60s**, transient **30s**, credential **1h**,
+   `max_retries` **3** (overridable via SQLite settings).
+
+Tavily upstream **432** is stored as key health `plan_limit_exceeded` and
+mapped to client **429** `tavily_plan_limit_exceeded` only if all attempts fail.
+
+### Admin pool controls
+
+On **Providers** (per-provider pool table) and **Provider Keys**:
+
+| Action | Effect |
+|---|---|
+| **Reset** / **Reset cool+order** | Clears cooldown and demotion |
+| **Promote** | Clears demotion only (`last_failed_at`) |
+| **Demote** | Sets `last_failed_at=now` (no cooldown) |
+| **Order** column | `front pack` vs `demoted · <time>` |
+
+CLI:
+
+```bash
+guda-gateway-admin provider-key reset-cooldown --id ID
+guda-gateway-admin provider-key reset-selection --id ID
+guda-gateway-admin provider-key demote --id ID
+```
+
+Pool STATUS `available` means enabled + not cooling + has a quota row. It does
+**not** mean remaining plan quota is non-zero; demotion/cooldown handle routing.
+
 ## Admin CLI
 
 Binary: `guda-gateway-admin`. Shared flags (before subcommand):
@@ -315,7 +367,8 @@ Binary: `guda-gateway-admin`. Shared flags (before subcommand):
 - `--master-key` (default `/etc/code-guda-gateway/master.key`)
 
 Subcommands include `db migrate`, `token init|rotate|verify`, `gateway-key`,
-`provider-key`, `settings`, `audit`, and `usage` — run with no args for usage.
+`provider-key` (including `reset-cooldown`, `reset-selection`, `demote`),
+`settings`, `audit`, and `usage` — run with no args for usage.
 `token init` and `token rotate` print the raw admin token once; pass
 `--save-env ~/.secrets/guda-gateway.env` in local dev to also persist
 `GUDA_ADMIN_TOKEN` for agent/browser smoke tests.
