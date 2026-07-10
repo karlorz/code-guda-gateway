@@ -17,3 +17,4 @@ internal/adminweb/assets/dist/*
 !internal/adminweb/assets/dist/.keep
 dist/
 .release-test/
+.worktrees/
