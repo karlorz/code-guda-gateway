@@ -564,7 +564,6 @@ func TestCLI_RecoveryWithoutService(t *testing.T) {
 	}
 }
 
-
 func TestProviderEndpointAdd_RequiresBaseURLAndMasksSecret(t *testing.T) {
 	dbPath, masterPath := testEnv(t)
 	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")

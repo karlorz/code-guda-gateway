@@ -1336,7 +1336,6 @@ func TestProviderKeys_ResetSelectionAndDemote(t *testing.T) {
 	}
 }
 
-
 func TestProviderEndpoint_CreateListWithBaseURL(t *testing.T) {
 	app, auth, _, _, _, _ := openAdminApp(t)
 	c, csrf := authenticatedAdminSession(t, app, auth)

@@ -801,13 +801,13 @@ func (h *Handler) handleProviderEndpointsUpdateQuota(w http.ResponseWriter, r *h
 		Detail:     detail,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":               "ok",
-		"id":                   updated.ID,
-		"quota_mode":           updated.QuotaMode,
-		"quota_flow":           updated.QuotaFlow,
-		"quota_base_url":       updated.QuotaBaseURL,
-		"quota_key_configured": updated.QuotaKeyConfigured,
-		"quota_key_prefix":     updated.QuotaKeyPrefix,
+		"status":                "ok",
+		"id":                    updated.ID,
+		"quota_mode":            updated.QuotaMode,
+		"quota_flow":            updated.QuotaFlow,
+		"quota_base_url":        updated.QuotaBaseURL,
+		"quota_key_configured":  updated.QuotaKeyConfigured,
+		"quota_key_prefix":      updated.QuotaKeyPrefix,
 		"quota_key_fingerprint": updated.QuotaKeyFingerprint,
 	})
 }

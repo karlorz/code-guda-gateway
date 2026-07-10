@@ -771,7 +771,6 @@ func TestProviderDefaultChange_DoesNotChangeEndpointQuotaURL(t *testing.T) {
 	}
 }
 
-
 // Compatibility: provider-level Refresh still uses Settings-backed Grok admin credentials.
 func TestRefresh_GrokProviderLevelStillUsesSettingsAdmin(t *testing.T) {
 	_, mk, keyRepo, settingsRepo := openQuotaTestDB(t)

@@ -531,7 +531,6 @@ func TestMarkFailureWithoutCooldown_DoesNotDemote(t *testing.T) {
 	}
 }
 
-
 func TestAddEndpoint_StoresNormalizedURLAndEncryptedKey(t *testing.T) {
 	t.Parallel()
 	repo, st, _ := openKeyRepo(t)
