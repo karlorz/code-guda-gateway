@@ -913,3 +913,319 @@ func TestSeedStyleSharedBase_CreatesRowsWithBaseURLAndNoSecretLeak(t *testing.T)
 		}
 	}
 }
+
+func TestProviderEndpointAdd_WithSeparateQuotaReadsTwoSecretsSecurely(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+
+	infKey := "xai-cli-inf-secret-aaaaaaaa"
+	quotaKey := "g2a-cli-quota-secret-bbbbbbbb"
+	quotaFile := filepath.Join(t.TempDir(), "quota.key")
+	if err := os.WriteFile(quotaFile, []byte("  "+quotaKey+"  \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	quotaBase := "https://grok2api.example/admin"
+
+	stdout, stderr, code := runCLI(t, dbPath, masterPath, infKey+"\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "sep-quota",
+		"--base-url", "https://new-api.example/v1",
+		"--quota-mode", "separate_credentials",
+		"--quota-flow", "grok2api_admin",
+		"--quota-base-url", quotaBase,
+		"--quota-key-file", quotaFile,
+	)
+	if code != 0 {
+		t.Fatalf("add exit %d stderr=%s stdout=%s", code, stderr, stdout)
+	}
+	combined := stdout + stderr
+	if strings.Contains(combined, infKey) || strings.Contains(combined, quotaKey) {
+		t.Fatalf("output leaked secrets: %q", combined)
+	}
+	if !strings.Contains(stdout, "quota_mode=separate_credentials") {
+		t.Fatalf("stdout missing quota mode: %q", stdout)
+	}
+
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, err := repo.ListAll()
+	if err != nil || len(all) != 1 {
+		t.Fatalf("list: len=%d err=%v", len(all), err)
+	}
+	got := all[0]
+	if got.QuotaMode != providers.QuotaSeparateCredentials {
+		t.Fatalf("QuotaMode=%q", got.QuotaMode)
+	}
+	if got.QuotaFlow != providers.QuotaFlowGrok2APIAdmin {
+		t.Fatalf("QuotaFlow=%q", got.QuotaFlow)
+	}
+	if got.QuotaBaseURL == nil || *got.QuotaBaseURL != quotaBase {
+		t.Fatalf("QuotaBaseURL=%v", got.QuotaBaseURL)
+	}
+	if !got.QuotaKeyConfigured {
+		t.Fatal("QuotaKeyConfigured=false")
+	}
+	resolved, err := repo.ResolveEndpointQuota(got.ID)
+	if err != nil {
+		t.Fatalf("ResolveEndpointQuota: %v", err)
+	}
+	if resolved.APIKey != quotaKey {
+		t.Fatalf("quota key=%q want %q", resolved.APIKey, quotaKey)
+	}
+	rawInf, err := repo.RawKey(got.ID)
+	if err != nil {
+		t.Fatalf("RawKey: %v", err)
+	}
+	if rawInf != infKey {
+		t.Fatalf("inference key=%q want %q", rawInf, infKey)
+	}
+
+	// separate without --quota-key-file must fail
+	_, stderr2, code2 := runCLI(t, dbPath, masterPath, "xai-other-inf-key-cccccccc\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "sep-missing-file",
+		"--base-url", "https://new-api.example/v1",
+		"--quota-mode", "separate_credentials",
+		"--quota-flow", "grok2api_admin",
+		"--quota-base-url", quotaBase,
+	)
+	if code2 == 0 {
+		t.Fatal("separate without --quota-key-file should fail")
+	}
+	if !strings.Contains(stderr2, "quota-key-file") {
+		t.Fatalf("stderr want quota-key-file hint: %q", stderr2)
+	}
+}
+
+func TestProviderEndpointSetQuota(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+	secret := "xai-set-quota-inf-key-111111"
+	stdout, _, code := runCLI(t, dbPath, masterPath, secret+"\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "setq",
+		"--base-url", "https://new-api.example/v1",
+	)
+	if code != 0 {
+		t.Fatalf("add exit %d out=%s", code, stdout)
+	}
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, _ := repo.ListAll()
+	idStr := strconv.FormatInt(all[0].ID, 10)
+	quotaBase := "https://g2a-quota.example/admin"
+
+	// Switch to separate without key (metadata only; key via rotate later)
+	setOut, setErr, c := runCLI(t, dbPath, masterPath, "",
+		"provider-endpoint", "set-quota",
+		"--id", idStr,
+		"--mode", "separate_credentials",
+		"--flow", "grok2api_admin",
+		"--base-url", quotaBase,
+	)
+	if c != 0 {
+		t.Fatalf("set-quota exit %d stderr=%s stdout=%s", c, setErr, setOut)
+	}
+	if strings.Contains(setOut+setErr, secret) {
+		t.Fatal("set-quota leaked inference secret")
+	}
+	got, _ := repo.Get(all[0].ID)
+	if got.QuotaMode != providers.QuotaSeparateCredentials {
+		t.Fatalf("mode=%q", got.QuotaMode)
+	}
+	if got.QuotaBaseURL == nil || *got.QuotaBaseURL != quotaBase {
+		t.Fatalf("quota base=%v", got.QuotaBaseURL)
+	}
+
+	// Switch back to disabled
+	if _, _, c := runCLI(t, dbPath, masterPath, "",
+		"provider-endpoint", "set-quota",
+		"--id", idStr,
+		"--mode", "disabled",
+		"--flow", "grok2api_admin",
+	); c != 0 {
+		t.Fatal("set-quota disabled")
+	}
+	got, _ = repo.Get(all[0].ID)
+	if got.QuotaMode != providers.QuotaDisabled {
+		t.Fatalf("mode after disable=%q", got.QuotaMode)
+	}
+	if got.QuotaBaseURL != nil {
+		t.Fatalf("quota base should be cleared, got %v", got.QuotaBaseURL)
+	}
+
+	// Invalid mode should fail
+	_, invErr, invCode := runCLI(t, dbPath, masterPath, "",
+		"provider-endpoint", "set-quota",
+		"--id", idStr,
+		"--mode", "not_a_mode",
+		"--flow", "grok2api_admin",
+	)
+	if invCode == 0 {
+		t.Fatal("invalid mode should fail")
+	}
+	if invErr == "" {
+		t.Fatal("expected error message for invalid mode")
+	}
+}
+
+func TestProviderEndpointRotateQuotaKey_UsesStdin(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+
+	infKey := "xai-rot-quota-inf-key-222222"
+	quotaKey := "g2a-rot-quota-initial-333333"
+	quotaFile := filepath.Join(t.TempDir(), "q.key")
+	if err := os.WriteFile(quotaFile, []byte(quotaKey+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, c := runCLI(t, dbPath, masterPath, infKey+"\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "rotq",
+		"--base-url", "https://new-api.example/v1",
+		"--quota-mode", "separate_credentials",
+		"--quota-flow", "grok2api_admin",
+		"--quota-base-url", "https://g2a.example/admin",
+		"--quota-key-file", quotaFile,
+	); c != 0 {
+		t.Fatal("add with separate quota")
+	}
+	mk, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := providers.NewKeyRepo(openDB(t, dbPath), mk)
+	all, _ := repo.ListAll()
+	idStr := strconv.FormatInt(all[0].ID, 10)
+
+	newQuota := "g2a-rot-quota-rotated-444444"
+	rotOut, rotErr, c := runCLI(t, dbPath, masterPath, newQuota+"\n",
+		"provider-endpoint", "rotate-quota-key", "--id", idStr,
+	)
+	if c != 0 {
+		t.Fatalf("rotate-quota-key exit %d stderr=%s stdout=%s", c, rotErr, rotOut)
+	}
+	combined := rotOut + rotErr
+	for _, s := range []string{infKey, quotaKey, newQuota} {
+		if strings.Contains(combined, s) {
+			t.Fatalf("rotate-quota-key output leaked %q: %q", s, combined)
+		}
+	}
+	if !strings.Contains(rotOut, "quota_key_prefix=") && !strings.Contains(rotOut, "prefix=") {
+		t.Fatalf("rotate output missing safe prefix: %q", rotOut)
+	}
+	resolved, err := repo.ResolveEndpointQuota(all[0].ID)
+	if err != nil {
+		t.Fatalf("ResolveEndpointQuota: %v", err)
+	}
+	if resolved.APIKey != newQuota {
+		t.Fatalf("stored quota key=%q want %q", resolved.APIKey, newQuota)
+	}
+	// Inference key untouched
+	rawInf, err := repo.RawKey(all[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawInf != infKey {
+		t.Fatalf("inference key changed: %q", rawInf)
+	}
+}
+
+func TestProviderEndpointList_ShowsSafeQuotaMetadataOnly(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+
+	infKey := "xai-list-quota-inf-secret-5555"
+	quotaKey := "g2a-list-quota-secret-666666"
+	quotaFile := filepath.Join(t.TempDir(), "list-q.key")
+	if err := os.WriteFile(quotaFile, []byte(quotaKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, c := runCLI(t, dbPath, masterPath, infKey+"\n",
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "listq",
+		"--base-url", "https://new-api.example/v1",
+		"--quota-mode", "separate_credentials",
+		"--quota-flow", "grok2api_admin",
+		"--quota-base-url", "https://g2a-list.example/admin",
+		"--quota-key-file", quotaFile,
+	); c != 0 {
+		t.Fatal("add")
+	}
+
+	list, stderr, code := runCLI(t, dbPath, masterPath, "", "provider-endpoint", "list")
+	if code != 0 {
+		t.Fatalf("list exit %d stderr=%s", code, stderr)
+	}
+	combined := list + stderr
+	if strings.Contains(combined, infKey) || strings.Contains(combined, quotaKey) {
+		t.Fatalf("list leaked secrets: %q", combined)
+	}
+	for _, col := range []string{"QUOTA_MODE", "QUOTA_FLOW", "QUOTA_BASE_URL", "QUOTA_CONFIGURED"} {
+		if !strings.Contains(list, col) {
+			t.Fatalf("list missing column %s: %q", col, list)
+		}
+	}
+	if !strings.Contains(list, "separate_credentials") {
+		t.Fatalf("list missing mode value: %q", list)
+	}
+	if !strings.Contains(list, "grok2api_admin") {
+		t.Fatalf("list missing flow value: %q", list)
+	}
+	if !strings.Contains(list, "g2a-list.example") {
+		t.Fatalf("list missing quota base url: %q", list)
+	}
+	// Ciphertext must never appear
+	db := openDB(t, dbPath)
+	var encQuota []byte
+	_ = db.QueryRow(`SELECT encrypted_quota_key FROM provider_keys LIMIT 1`).Scan(&encQuota)
+	if len(encQuota) > 0 && strings.Contains(list, string(encQuota)) {
+		t.Fatal("list leaked encrypted_quota_key ciphertext")
+	}
+}
+
+func TestLegacyGrokQuotaHelp_IsDeprecatedButAvailable(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	_, _, _ = runCLI(t, dbPath, masterPath, "", "db", "migrate")
+
+	// Help text marks legacy Grok quota surface as deprecated
+	_, helpErr, code := runCLI(t, dbPath, masterPath, "", "help")
+	if code != 0 {
+		t.Fatalf("help exit %d", code)
+	}
+	if !strings.Contains(helpErr, "deprecated") {
+		t.Fatalf("help missing deprecated note for legacy grok quota: %q", helpErr)
+	}
+	if !strings.Contains(helpErr, "set-quota-mode") && !strings.Contains(helpErr, "grok") {
+		t.Fatalf("help missing legacy grok quota commands: %q", helpErr)
+	}
+
+	// Commands still work
+	if _, _, c := runCLI(t, dbPath, masterPath, "", "grok", "set-quota-mode", "grok2api_admin"); c != 0 {
+		t.Fatal("legacy set-quota-mode must remain available")
+	}
+	out, _, c := runCLI(t, dbPath, masterPath, "", "grok", "get-quota-mode")
+	if c != 0 || strings.TrimSpace(out) != "grok2api_admin" {
+		t.Fatalf("legacy get-quota-mode: code=%d out=%q", c, out)
+	}
+
+	// Usage line for empty grok also mentions deprecation when possible
+	_, grokUsage, _ := runCLI(t, dbPath, masterPath, "", "grok")
+	if !strings.Contains(grokUsage, "set-quota-mode") {
+		t.Fatalf("grok usage missing set-quota-mode: %q", grokUsage)
+	}
+	if !strings.Contains(strings.ToLower(grokUsage), "deprecated") {
+		t.Fatalf("grok usage should note deprecation: %q", grokUsage)
+	}
+}

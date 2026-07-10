@@ -468,7 +468,7 @@ func (a *app) cmdProviderKey(args []string) int {
 
 func (a *app) cmdProviderEndpoint(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.stderr, "usage: provider-endpoint add|list|set-base-url|rotate-key|disable|enable|archive|restore|reset-cooldown|reset-selection|demote|delete")
+		fmt.Fprintln(a.stderr, "usage: provider-endpoint add|list|set-base-url|rotate-key|set-quota|rotate-quota-key|disable|enable|archive|restore|reset-cooldown|reset-selection|demote|delete")
 		return exitUsage
 	}
 	mk, err := a.masterKey()
@@ -506,14 +506,66 @@ func (a *app) cmdProviderEndpoint(args []string) int {
 			fmt.Fprintln(a.stderr, "empty provider key")
 			return exitUsage
 		}
-		d, err := repo.AddEndpoint(provider, name, baseURL, rawKey)
+
+		quotaMode, hasMode := flagValue(args[1:], "--quota-mode")
+		quotaFlow, hasFlow := flagValue(args[1:], "--quota-flow")
+		quotaBaseURL, _ := flagValue(args[1:], "--quota-base-url")
+		quotaKeyFile, hasQuotaKeyFile := flagValue(args[1:], "--quota-key-file")
+
+		var d providers.DisplayProviderKey
+		if hasMode || hasFlow || strings.TrimSpace(quotaBaseURL) != "" || hasQuotaKeyFile {
+			mode := providers.QuotaMode(strings.TrimSpace(quotaMode))
+			flow := providers.QuotaFlow(strings.TrimSpace(quotaFlow))
+			if !hasMode || !hasFlow {
+				defMode, defFlow, derr := providers.DefaultQuotaConfig(provider)
+				if derr != nil {
+					fmt.Fprintf(a.stderr, "provider-endpoint add: %v\n", derr)
+					return exitError
+				}
+				if !hasMode {
+					mode = defMode
+				}
+				if !hasFlow {
+					flow = defFlow
+				}
+			}
+			quota := providers.EndpointQuotaInput{
+				Mode:    mode,
+				Flow:    flow,
+				BaseURL: strings.TrimSpace(quotaBaseURL),
+			}
+			if mode == providers.QuotaSeparateCredentials {
+				if !hasQuotaKeyFile || strings.TrimSpace(quotaKeyFile) == "" {
+					fmt.Fprintln(a.stderr, "provider-endpoint add with separate_credentials requires --quota-key-file PATH")
+					return exitUsage
+				}
+				qKey, qerr := readSecretFile(quotaKeyFile)
+				if qerr != nil {
+					fmt.Fprintf(a.stderr, "provider-endpoint add: read --quota-key-file: %v\n", qerr)
+					return exitError
+				}
+				quota.RawKey = qKey
+			} else if hasQuotaKeyFile {
+				fmt.Fprintln(a.stderr, "provider-endpoint add: --quota-key-file is only valid with --quota-mode separate_credentials")
+				return exitUsage
+			}
+			d, err = repo.AddEndpointWithQuota(provider, name, baseURL, rawKey, quota)
+		} else {
+			d, err = repo.AddEndpoint(provider, name, baseURL, rawKey)
+		}
 		if err != nil {
 			fmt.Fprintf(a.stderr, "provider-endpoint add: %v\n", err)
 			return exitError
 		}
-		fmt.Fprintf(a.stdout, "id=%d provider=%s name=%s base_url=%s prefix=%s fingerprint=%s\n",
-			d.ID, d.Provider, d.Name, d.BaseURL, d.KeyPrefix, d.Fingerprint)
-		recordCLIAudit(st.DB(), "provider_endpoint.add", "provider_endpoint", strconv.FormatInt(d.ID, 10), "provider="+provider+";name="+name+";base_url="+d.BaseURL+";result=ok")
+		fmt.Fprintf(a.stdout, "id=%d provider=%s name=%s base_url=%s prefix=%s fingerprint=%s quota_mode=%s quota_flow=%s",
+			d.ID, d.Provider, d.Name, d.BaseURL, d.KeyPrefix, d.Fingerprint, d.QuotaMode, d.QuotaFlow)
+		if d.QuotaBaseURL != nil {
+			fmt.Fprintf(a.stdout, " quota_base_url=%s", *d.QuotaBaseURL)
+		}
+		fmt.Fprintf(a.stdout, " quota_key_configured=%v\n", d.QuotaKeyConfigured)
+		detail := "provider=" + provider + ";name=" + name + ";base_url=" + d.BaseURL +
+			";quota_mode=" + string(d.QuotaMode) + ";quota_flow=" + string(d.QuotaFlow) + ";result=ok"
+		recordCLIAudit(st.DB(), "provider_endpoint.add", "provider_endpoint", strconv.FormatInt(d.ID, 10), detail)
 		return exitOK
 	case "list":
 		all, err := repo.ListAll()
@@ -522,14 +574,27 @@ func (a *app) cmdProviderEndpoint(args []string) int {
 			return exitError
 		}
 		w := tabwriter.NewWriter(a.stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tPROVIDER\tNAME\tBASE_URL\tPREFIX\tFINGERPRINT\tENABLED\tCOOLDOWN_UNTIL")
+		fmt.Fprintln(w, "ID\tPROVIDER\tNAME\tBASE_URL\tPREFIX\tFINGERPRINT\tENABLED\tCOOLDOWN_UNTIL\tQUOTA_MODE\tQUOTA_FLOW\tQUOTA_BASE_URL\tQUOTA_CONFIGURED\tQUOTA_PREFIX\tQUOTA_FINGERPRINT")
 		for _, k := range all {
 			cd := ""
 			if k.CooldownUntil != nil {
 				cd = *k.CooldownUntil
 			}
-			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%v\t%s\n",
-				k.ID, k.Provider, k.Name, k.BaseURL, k.KeyPrefix, k.Fingerprint, k.Enabled, cd)
+			qBase := ""
+			if k.QuotaBaseURL != nil {
+				qBase = *k.QuotaBaseURL
+			}
+			qPrefix := ""
+			if k.QuotaKeyPrefix != nil {
+				qPrefix = *k.QuotaKeyPrefix
+			}
+			qFP := ""
+			if k.QuotaKeyFingerprint != nil {
+				qFP = *k.QuotaKeyFingerprint
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%v\t%s\t%s\t%s\t%s\t%v\t%s\t%s\n",
+				k.ID, k.Provider, k.Name, k.BaseURL, k.KeyPrefix, k.Fingerprint, k.Enabled, cd,
+				k.QuotaMode, k.QuotaFlow, qBase, k.QuotaKeyConfigured, qPrefix, qFP)
 		}
 		_ = w.Flush()
 		return exitOK
@@ -594,6 +659,92 @@ func (a *app) cmdProviderEndpoint(args []string) int {
 		fmt.Fprintf(a.stdout, "id=%d prefix=%s fingerprint=%s\n", updated.ID, updated.KeyPrefix, updated.Fingerprint)
 		recordCLIAudit(st.DB(), "provider_endpoint.rotate_key", "provider_endpoint", strconv.FormatInt(id, 10), "provider="+row.Provider+";name="+row.Name+";fingerprint="+updated.Fingerprint+";result=ok")
 		return exitOK
+	case "set-quota":
+		id, ok := flagInt64(args[1:], "--id")
+		modeStr, okM := flagValue(args[1:], "--mode")
+		flowStr, okF := flagValue(args[1:], "--flow")
+		if !ok || !okM || !okF || strings.TrimSpace(modeStr) == "" || strings.TrimSpace(flowStr) == "" {
+			fmt.Fprintln(a.stderr, "provider-endpoint set-quota requires --id, --mode, and --flow")
+			return exitUsage
+		}
+		baseURL, _ := flagValue(args[1:], "--base-url")
+		row, err := repo.Get(id)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint set-quota: %v\n", err)
+			return exitError
+		}
+		if err := repo.UpdateEndpointQuota(id, providers.EndpointQuotaInput{
+			Mode:    providers.QuotaMode(strings.TrimSpace(modeStr)),
+			Flow:    providers.QuotaFlow(strings.TrimSpace(flowStr)),
+			BaseURL: strings.TrimSpace(baseURL),
+		}); err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint set-quota: %v\n", err)
+			return exitError
+		}
+		updated, err := repo.Get(id)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint set-quota: %v\n", err)
+			return exitError
+		}
+		fmt.Fprintf(a.stdout, "id=%d quota_mode=%s quota_flow=%s", updated.ID, updated.QuotaMode, updated.QuotaFlow)
+		if updated.QuotaBaseURL != nil {
+			fmt.Fprintf(a.stdout, " quota_base_url=%s", *updated.QuotaBaseURL)
+		}
+		fmt.Fprintf(a.stdout, " quota_key_configured=%v\n", updated.QuotaKeyConfigured)
+		detail := "provider=" + row.Provider + ";name=" + row.Name +
+			";quota_mode=" + string(updated.QuotaMode) + ";quota_flow=" + string(updated.QuotaFlow) + ";result=ok"
+		if updated.QuotaBaseURL != nil {
+			detail += ";quota_base_url=" + *updated.QuotaBaseURL
+		}
+		recordCLIAudit(st.DB(), "provider_endpoint.update_quota", "provider_endpoint", strconv.FormatInt(id, 10), detail)
+		return exitOK
+	case "rotate-quota-key":
+		id, ok := flagInt64(args[1:], "--id")
+		if !ok {
+			fmt.Fprintln(a.stderr, "provider-endpoint rotate-quota-key requires --id")
+			return exitUsage
+		}
+		rawKey, err := readLine(a.stdin)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				fmt.Fprintln(a.stderr, "empty quota key")
+				return exitUsage
+			}
+			fmt.Fprintf(a.stderr, "read quota key from stdin: %v\n", err)
+			return exitError
+		}
+		rawKey = strings.TrimSpace(rawKey)
+		if rawKey == "" {
+			fmt.Fprintln(a.stderr, "empty quota key")
+			return exitUsage
+		}
+		row, err := repo.Get(id)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint rotate-quota-key: %v\n", err)
+			return exitError
+		}
+		if err := repo.RotateEndpointQuotaKey(id, rawKey); err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint rotate-quota-key: %v\n", err)
+			return exitError
+		}
+		updated, err := repo.Get(id)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "provider-endpoint rotate-quota-key: %v\n", err)
+			return exitError
+		}
+		qPrefix := ""
+		if updated.QuotaKeyPrefix != nil {
+			qPrefix = *updated.QuotaKeyPrefix
+		}
+		qFP := ""
+		if updated.QuotaKeyFingerprint != nil {
+			qFP = *updated.QuotaKeyFingerprint
+		}
+		fmt.Fprintf(a.stdout, "id=%d quota_key_prefix=%s quota_key_fingerprint=%s quota_key_configured=%v\n",
+			updated.ID, qPrefix, qFP, updated.QuotaKeyConfigured)
+		recordCLIAudit(st.DB(), "provider_endpoint.rotate_quota_key", "provider_endpoint", strconv.FormatInt(id, 10),
+			"provider="+row.Provider+";name="+row.Name+";quota_fingerprint="+qFP+";result=ok")
+		return exitOK
 	case "disable", "enable", "archive", "restore", "reset-cooldown", "reset-selection", "demote", "delete":
 		id, ok := flagInt64(args[1:], "--id")
 		if !ok {
@@ -635,6 +786,7 @@ func (a *app) cmdProviderEndpoint(args []string) int {
 func (a *app) cmdGrok(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(a.stderr, "usage: grok set-base-url|get-base-url|set-quota-mode|get-quota-mode|set-admin-base-url|get-admin-base-url|set-admin-key")
+		fmt.Fprintln(a.stderr, "note: global Grok quota settings (set-quota-mode, set-admin-base-url, set-admin-key) are deprecated through v0.4.x; prefer provider-endpoint set-quota / rotate-quota-key")
 		return exitUsage
 	}
 	st, err := a.openStore()
@@ -814,9 +966,15 @@ Commands:
   provider-key add --provider grok|tavily|firecrawl --name NAME (key on stdin only; never pass secrets as argv)
   provider-key list | disable|enable|archive|restore|reset-cooldown|reset-selection|demote|delete --id ID
   provider-endpoint add --provider grok|tavily|firecrawl --name NAME --base-url URL (key on stdin only)
+    [--quota-mode disabled|endpoint_credentials|separate_credentials]
+    [--quota-flow grok2api_admin|tavily_usage|firecrawl_credit_usage]
+    [--quota-base-url URL] [--quota-key-file PATH]  (PATH required for separate_credentials; never pass raw keys as flags)
   provider-endpoint list | set-base-url --id ID --url URL | rotate-key --id ID (key on stdin)
+  provider-endpoint set-quota --id ID --mode MODE --flow FLOW [--base-url URL]
+  provider-endpoint rotate-quota-key --id ID (quota key on stdin)
   provider-endpoint disable|enable|archive|restore|reset-cooldown|reset-selection|demote|delete --id ID
   grok set-base-url URL | get-base-url | set-quota-mode MODE | get-quota-mode | set-admin-base-url URL | get-admin-base-url | set-admin-key
+    (deprecated through v0.4.x: prefer provider-endpoint set-quota / rotate-quota-key for per-endpoint quota)
   audit tail [--limit N]
   db migrate`)
 }
@@ -851,4 +1009,18 @@ func readLine(r io.Reader) (string, error) {
 		return "", io.EOF
 	}
 	return sc.Text(), nil
+}
+
+// readSecretFile loads a secret from PATH, trims surrounding whitespace, and
+// rejects empty values. Never logs file contents.
+func readSecretFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	s := strings.TrimSpace(string(data))
+	if s == "" {
+		return "", errors.New("empty quota key")
+	}
+	return s, nil
 }
