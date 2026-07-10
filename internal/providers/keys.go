@@ -21,6 +21,7 @@ type DisplayProviderKey struct {
 	ID                       int64
 	Provider                 string
 	Name                     string
+	BaseURL                  string
 	KeyPrefix                string
 	Fingerprint              string
 	Enabled                  bool
@@ -44,6 +45,20 @@ type DisplayProviderKey struct {
 	UpdatedAt                string
 }
 
+// ProviderEndpoint is a compatibility alias for the display row of an atomic
+// provider endpoint (base URL + key metadata, no raw secret).
+type ProviderEndpoint = DisplayProviderKey
+
+// SelectedEndpoint is a decrypted atomic (base URL, API key) pair selected for
+// an upstream request.
+type SelectedEndpoint struct {
+	ID       int64
+	Provider string
+	Name     string
+	BaseURL  string
+	APIKey   string
+}
+
 // KeyRepo manages encrypted upstream provider keys in SQLite.
 type KeyRepo struct {
 	db        *sql.DB
@@ -55,15 +70,31 @@ func NewKeyRepo(db *sql.DB, masterKey []byte) *KeyRepo {
 	return &KeyRepo{db: db, masterKey: masterKey}
 }
 
-// Add stores an encrypted provider key. name must be unique per provider.
+// Add stores an encrypted provider key, snapshotting the provider's configured
+// (or compiled default) base URL into the row so each key is an atomic endpoint.
+// name must be unique per provider.
 // Duplicate (provider, name) is rejected with ErrDuplicateName via check-before-insert
 // (enforced in DB by migration 0003 unique index idx_provider_keys_provider_name).
 func (r *KeyRepo) Add(provider, name, rawKey string) (DisplayProviderKey, error) {
+	baseURL, err := NewSettingsRepo(r.db).GetBaseURL(provider)
+	if err != nil {
+		return DisplayProviderKey{}, err
+	}
+	return r.AddEndpoint(provider, name, baseURL, rawKey)
+}
+
+// AddEndpoint stores an encrypted provider key with an explicit endpoint base URL.
+// The base URL is normalized before insert.
+func (r *KeyRepo) AddEndpoint(provider, name, baseURL, rawKey string) (DisplayProviderKey, error) {
 	if err := validateProvider(provider); err != nil {
 		return DisplayProviderKey{}, err
 	}
 	if name == "" || rawKey == "" {
 		return DisplayProviderKey{}, fmt.Errorf("add provider key: name and raw key required")
+	}
+	normalized, err := NormalizeBaseURL(baseURL)
+	if err != nil {
+		return DisplayProviderKey{}, fmt.Errorf("add provider endpoint: %w", err)
 	}
 	var existing int
 	if err := r.db.QueryRow(
@@ -83,10 +114,10 @@ func (r *KeyRepo) Add(provider, name, rawKey string) (DisplayProviderKey, error)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	res, err := r.db.Exec(`
 		INSERT INTO provider_keys (
-			provider, name, encrypted_key, key_prefix, fingerprint, enabled,
+			provider, name, base_url, encrypted_key, key_prefix, fingerprint, enabled,
 			consecutive_failures, total_failures, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, 1, 0, 0, ?, ?)`,
-		provider, name, enc, prefix, fp, now, now,
+		) VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, ?, ?)`,
+		provider, name, normalized, enc, prefix, fp, now, now,
 	)
 	if err != nil {
 		return DisplayProviderKey{}, fmt.Errorf("insert provider_keys: %w", err)
@@ -96,6 +127,7 @@ func (r *KeyRepo) Add(provider, name, rawKey string) (DisplayProviderKey, error)
 		ID:          id,
 		Provider:    provider,
 		Name:        name,
+		BaseURL:     normalized,
 		KeyPrefix:   prefix,
 		Fingerprint: fp,
 		Enabled:     true,
@@ -110,7 +142,7 @@ func (r *KeyRepo) List(provider string) ([]DisplayProviderKey, error) {
 		return nil, err
 	}
 	rows, err := r.db.Query(`
-		SELECT id, provider, name, key_prefix, fingerprint, enabled,
+		SELECT id, provider, name, base_url, key_prefix, fingerprint, enabled,
 			cooldown_until, cooldown_reason, last_failed_at, last_used_at, last_success_at,
 			last_error_at, last_error_status, last_error_message_redacted,
 			archived_at, last_event_at, last_event_source, last_event_status_class,
@@ -135,7 +167,7 @@ func (r *KeyRepo) List(provider string) ([]DisplayProviderKey, error) {
 // Get returns one key by id (display fields only).
 func (r *KeyRepo) Get(id int64) (DisplayProviderKey, error) {
 	row := r.db.QueryRow(`
-		SELECT id, provider, name, key_prefix, fingerprint, enabled,
+		SELECT id, provider, name, base_url, key_prefix, fingerprint, enabled,
 			cooldown_until, cooldown_reason, last_failed_at, last_used_at, last_success_at,
 			last_error_at, last_error_status, last_error_message_redacted,
 			archived_at, last_event_at, last_event_source, last_event_status_class,
@@ -268,6 +300,7 @@ func (r *KeyRepo) Delete(id int64) error {
 }
 
 // SelectKey picks an enabled key not in cooldown, decrypts it, and updates last_used_at.
+// Compatibility wrapper over SelectEndpoint (returns id + raw key only).
 // Selection policy (sticky winner + failure demotion):
 //
 //	ORDER BY last_failed_at ASC NULLS FIRST, id ASC
@@ -275,56 +308,152 @@ func (r *KeyRepo) Delete(id int64) error {
 // Never-failed keys (NULL last_failed_at) sort first; among demoted keys the oldest
 // failure is tried first. Cooldown still excludes keys until cooldown_until.
 func (r *KeyRepo) SelectKey(provider string) (keyID int64, rawKey string, err error) {
+	endpoint, err := r.SelectEndpoint(provider)
+	return endpoint.ID, endpoint.APIKey, err
+}
+
+// SelectEndpoint picks an enabled endpoint not in cooldown, returns the atomic
+// (base URL, API key) pair from the same row, and updates last_used_at.
+func (r *KeyRepo) SelectEndpoint(provider string) (SelectedEndpoint, error) {
 	if err := validateProvider(provider); err != nil {
-		return 0, "", err
+		return SelectedEndpoint{}, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	var id int64
+	var name, baseURL string
 	var enc []byte
-	err = r.db.QueryRow(`
-		SELECT id, encrypted_key FROM provider_keys
+	err := r.db.QueryRow(`
+		SELECT id, provider, name, base_url, encrypted_key FROM provider_keys
 		WHERE provider = ? AND enabled = 1
 		  AND (cooldown_until IS NULL OR cooldown_until < ?)
 		  AND archived_at IS NULL
 		ORDER BY last_failed_at IS NOT NULL, last_failed_at ASC, id ASC
 		LIMIT 1`,
 		provider, now,
-	).Scan(&id, &enc)
+	).Scan(&id, &provider, &name, &baseURL, &enc)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, "", ErrNoEnabledKey
+		return SelectedEndpoint{}, ErrNoEnabledKey
 	}
 	if err != nil {
-		return 0, "", fmt.Errorf("select provider key: %w", err)
+		return SelectedEndpoint{}, fmt.Errorf("select provider endpoint: %w", err)
 	}
 	plain, err := secrets.Decrypt(r.masterKey, enc)
 	if err != nil {
-		return 0, "", fmt.Errorf("decrypt provider key: %w", err)
+		return SelectedEndpoint{}, fmt.Errorf("decrypt provider key: %w", err)
 	}
 	if _, err := r.db.Exec(
 		`UPDATE provider_keys SET last_used_at = ?, updated_at = ? WHERE id = ?`,
 		now, now, id,
 	); err != nil {
-		return 0, "", fmt.Errorf("update last_used_at: %w", err)
+		return SelectedEndpoint{}, fmt.Errorf("update last_used_at: %w", err)
 	}
-	return id, string(plain), nil
+	return SelectedEndpoint{
+		ID:       id,
+		Provider: provider,
+		Name:     name,
+		BaseURL:  baseURL,
+		APIKey:   string(plain),
+	}, nil
 }
 
 // RawKey decrypts the stored key for a specific row id without updating last_used_at.
 // Used by admin per-key quota refresh so selection stats are not perturbed.
 func (r *KeyRepo) RawKey(id int64) (string, error) {
+	ep, err := r.RawEndpoint(id)
+	if err != nil {
+		return "", err
+	}
+	return ep.APIKey, nil
+}
+
+// RawEndpoint decrypts the stored key and returns the atomic endpoint pair for a
+// specific row id without updating last_used_at.
+func (r *KeyRepo) RawEndpoint(id int64) (SelectedEndpoint, error) {
+	var provider, name, baseURL string
 	var enc []byte
-	err := r.db.QueryRow(`SELECT encrypted_key FROM provider_keys WHERE id = ?`, id).Scan(&enc)
+	err := r.db.QueryRow(
+		`SELECT id, provider, name, base_url, encrypted_key FROM provider_keys WHERE id = ?`, id,
+	).Scan(&id, &provider, &name, &baseURL, &enc)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("provider key %d: not found", id)
+		return SelectedEndpoint{}, fmt.Errorf("provider key %d: not found", id)
 	}
 	if err != nil {
-		return "", fmt.Errorf("load provider key: %w", err)
+		return SelectedEndpoint{}, fmt.Errorf("load provider key: %w", err)
 	}
 	plain, err := secrets.Decrypt(r.masterKey, enc)
 	if err != nil {
-		return "", fmt.Errorf("decrypt provider key: %w", err)
+		return SelectedEndpoint{}, fmt.Errorf("decrypt provider key: %w", err)
 	}
-	return string(plain), nil
+	return SelectedEndpoint{
+		ID:       id,
+		Provider: provider,
+		Name:     name,
+		BaseURL:  baseURL,
+		APIKey:   string(plain),
+	}, nil
+}
+
+// UpdateBaseURL sets a normalized endpoint base URL and clears cooldown/demotion
+// so the endpoint can re-enter the selection pack. Counters and ID are preserved.
+func (r *KeyRepo) UpdateBaseURL(id int64, baseURL string) error {
+	normalized, err := NormalizeBaseURL(baseURL)
+	if err != nil {
+		return fmt.Errorf("update base url: %w", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := r.db.Exec(`
+		UPDATE provider_keys SET
+			base_url = ?,
+			cooldown_until = NULL,
+			cooldown_reason = NULL,
+			last_failed_at = NULL,
+			updated_at = ?
+		WHERE id = ?`,
+		normalized, now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("update base url: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("provider key %d: not found", id)
+	}
+	return nil
+}
+
+// RotateKey replaces the encrypted key material, updates prefix/fingerprint, and
+// clears cooldown/demotion. ID, base URL, and failure counters are preserved.
+func (r *KeyRepo) RotateKey(id int64, rawKey string) error {
+	if rawKey == "" {
+		return fmt.Errorf("rotate key: raw key required")
+	}
+	prefix := keyPrefix(rawKey)
+	fp := fingerprint(rawKey)
+	enc, err := secrets.Encrypt(r.masterKey, []byte(rawKey))
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := r.db.Exec(`
+		UPDATE provider_keys SET
+			encrypted_key = ?,
+			key_prefix = ?,
+			fingerprint = ?,
+			cooldown_until = NULL,
+			cooldown_reason = NULL,
+			last_failed_at = NULL,
+			updated_at = ?
+		WHERE id = ?`,
+		enc, prefix, fp, now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("rotate key: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("provider key %d: not found", id)
+	}
+	return nil
 }
 
 // LastEvent is the latest control-plane or runtime event summary for a key.
@@ -470,7 +599,7 @@ func scanDisplayKey(row displayKeyScanner) (DisplayProviderKey, error) {
 	var archivedAt, lastEventAt, lastEventSource, lastEventStatusClass, lastEventMsg sql.NullString
 	var lastEventHTTPStatus sql.NullInt64
 	if err := row.Scan(
-		&d.ID, &d.Provider, &d.Name, &d.KeyPrefix, &d.Fingerprint, &enabled,
+		&d.ID, &d.Provider, &d.Name, &d.BaseURL, &d.KeyPrefix, &d.Fingerprint, &enabled,
 		&cooldownUntil, &cooldownReason, &lastFailedAt, &lastUsed, &lastSuccess,
 		&lastError, &lastStatus, &lastMsg,
 		&archivedAt, &lastEventAt, &lastEventSource, &lastEventStatusClass,
