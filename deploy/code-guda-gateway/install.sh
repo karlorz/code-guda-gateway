@@ -17,6 +17,7 @@ VAR_DIR="${CODE_GUDA_VAR_DIR:-/var/lib/code-guda-gateway}"
 SYSTEMD_DIR="${CODE_GUDA_SYSTEMD_DIR:-/etc/systemd/system}"
 CADDY_DIR="${CODE_GUDA_CADDY_DIR:-/etc/caddy}"
 UPDATE_PATH="${CODE_GUDA_UPDATE_PATH:-/usr/bin/update-code-guda-gateway}"
+LISTEN_ADDR="${CODE_GUDA_LISTEN_ADDR:-127.0.0.1:8080}"
 SKIP_CADDY="${CODE_GUDA_SKIP_CADDY:-0}"
 SKIP_PREREQS="${CODE_GUDA_SKIP_PREREQS:-0}"
 SKIP_SERVICE_RESTART="${CODE_GUDA_SKIP_SERVICE_RESTART:-0}"
@@ -220,7 +221,10 @@ install_systemd_and_caddy() {
 
   if [[ "$SKIP_CADDY" != "1" ]]; then
     run_privileged install -d -m 0755 "$(target_path "$CADDY_DIR")"
-    sed -e "s#{{DOMAIN}}#$DOMAIN#g" "$release_dir/scripts/templates/Caddyfile.code-guda-gateway" > "$(target_path "$CADDY_DIR/Caddyfile.code-guda-gateway")"
+    sed \
+      -e "s#{{DOMAIN}}#$DOMAIN#g" \
+      -e "s#{{LISTEN_ADDR}}#$LISTEN_ADDR#g" \
+      "$release_dir/scripts/templates/Caddyfile.code-guda-gateway" > "$(target_path "$CADDY_DIR/Caddyfile.code-guda-gateway")"
   fi
 }
 

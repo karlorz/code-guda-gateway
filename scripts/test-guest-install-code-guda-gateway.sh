@@ -27,6 +27,7 @@ CODE_GUDA_PACKAGE_TEST_MODE=1 "$ROOT/scripts/package-release.sh" \
   --version v9.9.9-test \
   --revision abc123def456 \
   --artifact-base "file://$DIST" \
+  --release-base "file://$DIST" \
   --out-dir "$DIST" \
   --platform linux-arm64
 
@@ -55,6 +56,27 @@ assert_contains "$FAKE_ROOT/usr/bin/update-code-guda-gateway" "curl -fsSL"
 assert_contains "$FAKE_ROOT/usr/bin/update-code-guda-gateway" "install.sh"
 if grep -E 'git (fetch|checkout|pull)' "$FAKE_ROOT/usr/bin/update-code-guda-gateway" >/dev/null; then
   fail "update wrapper still contains git pull workflow"
+fi
+
+# Second pass: render Caddyfile (no --skip-caddy) into a fresh fake root and
+# assert all template placeholders are substituted.
+FAKE_ROOT_CADDY="$TMP/root-caddy"
+CODE_GUDA_INSTALL_TEST_MODE=1 \
+CODE_GUDA_FAKE_UNAME_S=Linux \
+CODE_GUDA_FAKE_UNAME_M=aarch64 \
+INSTALL_ROOT="$FAKE_ROOT_CADDY" \
+  bash "$DIST/install.sh" \
+    --artifact-base "file://$DIST" \
+    --release-base "file://$DIST" \
+    --version v9.9.9-test \
+    --domain search.karldigi.dev \
+    --skip-service-restart
+CADDY_FILE="$FAKE_ROOT_CADDY/etc/caddy/Caddyfile.code-guda-gateway"
+assert_file "$CADDY_FILE"
+assert_contains "$CADDY_FILE" "search.karldigi.dev"
+assert_contains "$CADDY_FILE" "127.0.0.1:8080"
+if grep -E '\{\{[A-Z_]+\}\}' "$CADDY_FILE" >/dev/null; then
+  fail "Caddyfile contains unresolved template placeholders: $(grep -oE '\{\{[A-Z_]+\}\}' "$CADDY_FILE")"
 fi
 
 printf 'guest installer tests passed\n'
