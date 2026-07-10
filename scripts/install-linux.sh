@@ -20,6 +20,7 @@ TEST_MODE="${CODE_GUDA_GATEWAY_TEST_MODE:-0}"
 GO_VERSION="${GO_VERSION:-1.25.0}"
 INSTALL_PREREQS="${INSTALL_PREREQS:-1}"
 APT_UPDATED=0
+ARTIFACT_BASE="${ARTIFACT_BASE:-}"
 
 SRC_DIR="${SRC_DIR:-/opt/code-guda-gateway/src}"
 BIN_DIR="${BIN_DIR:-/opt/code-guda-gateway/bin}"
@@ -46,6 +47,7 @@ Options:
   --skip-build               Skip build/install binaries (for controlled tests).
   --skip-service-restart     Install files but do not restart systemd service.
   --render-only              Render config/unit/update files, then exit.
+  --artifact-base URL        Public artifact base used by update command.
   --print-privilege-mode     Print root or sudo based on effective uid, then exit.
   -h, --help                 Show this help.
 
@@ -106,6 +108,10 @@ while [[ $# -gt 0 ]]; do
     --skip-service-restart)
       SKIP_SERVICE_RESTART=1
       shift
+      ;;
+    --artifact-base)
+      ARTIFACT_BASE="${2:?--artifact-base requires URL}"
+      shift 2
       ;;
     --render-only)
       RENDER_ONLY=1
@@ -351,6 +357,7 @@ render_template_to() {
   content="${content//\{\{VAR_DIR\}\}/$VAR_DIR}"
   content="${content//\{\{REPO_URL\}\}/$REPO_URL}"
   content="${content//\{\{REPO_BRANCH\}\}/$REPO_BRANCH}"
+  content="${content//\{\{ARTIFACT_BASE\}\}/$ARTIFACT_BASE}"
   local tmp
   tmp="$(mktemp)"
   printf '%s\n' "$content" > "$tmp"

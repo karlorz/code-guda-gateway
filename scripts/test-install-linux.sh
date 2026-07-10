@@ -33,6 +33,7 @@ CODE_GUDA_GATEWAY_TEST_MODE=1 INSTALL_ROOT="$FAKE_ROOT" \
   --render-only \
   --repo-url https://example.invalid/karlorz/code-guda-gateway.git \
   --branch main \
+  --artifact-base https://raw.githubusercontent.com/karlorz/code-guda-gateway/main/deploy/code-guda-gateway \
   --domain search.karldigi.dev >/dev/null
 
 SERVICE="$FAKE_ROOT/etc/systemd/system/code-guda-gateway.service"
@@ -60,12 +61,13 @@ assert_contains "$BOOTSTRAP" "GUDA_ADMIN_COOKIE_SECURE=true"
 assert_contains "$CADDY" "search.karldigi.dev {"
 assert_contains "$CADDY" "reverse_proxy 127.0.0.1:8080"
 
-assert_contains "$UPDATE" "REPO_URL=\"https://example.invalid/karlorz/code-guda-gateway.git\""
-assert_contains "$UPDATE" "REPO_BRANCH=\"main\""
-assert_contains "$UPDATE" "SRC_DIR=\"/opt/code-guda-gateway/src\""
-assert_contains "$UPDATE" 'exec "$SRC_DIR/scripts/install-linux.sh"'
-assert_contains "$UPDATE" "--skip-source-sync"
-assert_contains "$UPDATE" '--source-dir "$SRC_DIR"'
+assert_contains "$UPDATE" "ARTIFACT_BASE="
+assert_contains "$UPDATE" "curl -fsSL"
+assert_contains "$UPDATE" "install.sh"
+assert_contains "$UPDATE" "raw.githubusercontent.com/karlorz/code-guda-gateway/main/deploy/code-guda-gateway"
+if grep -E 'git (fetch|checkout|pull)' "$UPDATE" >/dev/null; then
+  fail "update command must not depend on git pull"
+fi
 
 [[ "$(wc -c < "$MASTER" | tr -d ' ')" == "32" ]] || fail "master key should be 32 bytes"
 

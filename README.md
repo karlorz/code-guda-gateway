@@ -139,14 +139,66 @@ Update in place after the first install:
 update-code-guda-gateway
 ```
 
-The update command fetches the configured branch, reruns the installer, applies
-DB migrations, and restarts the service while preserving DB, master key,
-bootstrap env, admin token hash, provider keys, and gateway keys.
+The production update command fetches the public installer from
+`CODE_GUDA_ARTIFACT_BASE`, downloads a checksum-verified release artifact,
+reruns migrations, and restarts the service while preserving DB, master key,
+bootstrap env, admin token hash, provider keys, and gateway keys. The default
+artifact base is:
 
-If a host cannot clone the private repository yet, copy a source checkout to
-`/opt/code-guda-gateway/src` and run the installer with `--skip-source-sync`.
-The installed update command still expects working Git credentials before it can
-fetch future changes.
+```text
+https://raw.githubusercontent.com/karlorz/code-guda-gateway/main/deploy/code-guda-gateway
+```
+
+`kr01` does not need GitHub credentials for this path. The target host consumes
+only public, secret-free release artifacts from same-repo GitHub Releases.
+
+### Public release artifact deployment
+
+Build public deploy artifacts from a trusted workstation or CI environment:
+
+```bash
+REVISION="$(git rev-parse HEAD)"
+export CODE_GUDA_ARTIFACT_BASE="https://raw.githubusercontent.com/karlorz/code-guda-gateway/main/deploy/code-guda-gateway"
+export CODE_GUDA_RELEASE_BASE="https://github.com/karlorz/code-guda-gateway/releases/download"
+scripts/package-release.sh \
+  --version v0.3.1 \
+  --revision "$REVISION" \
+  --artifact-base "$CODE_GUDA_ARTIFACT_BASE" \
+  --release-base "$CODE_GUDA_RELEASE_BASE" \
+  --out-dir dist \
+  --platform linux-arm64
+```
+
+The tag-driven GitHub Actions release workflow publishes binary artifacts as
+same-repo GitHub Release assets and promotes the raw stable channel file:
+
+```text
+github.com/karlorz/code-guda-gateway
+├── releases/download/v0.3.1/
+│   ├── SHA256SUMS
+│   └── code-guda-gateway-v0.3.1-linux-arm64.tar.gz
+└── deploy/code-guda-gateway/
+    ├── install.sh
+    └── stable
+```
+
+Run on the target host:
+
+```bash
+curl -fsSL "$CODE_GUDA_ARTIFACT_BASE/install.sh" | bash
+curl -fsSL "$CODE_GUDA_ARTIFACT_BASE/install.sh" | bash -s -- --version v0.3.1
+```
+
+The installer does not clone the private repository and does not read provider
+secrets from the artifact. Runtime credentials remain in SQLite and the
+host-local master key. If this repository is private, raw and release asset
+URLs still require authentication, so the no-token-on-kr01 property requires
+public readability for these deploy surfaces.
+
+The source checkout path remains useful for local testing and emergency
+operator-driven fallback. It is not the routine production update path. For
+production, prefer public artifacts because they avoid host-local GitHub
+credentials and avoid fragile `.git` ownership or macOS metadata drift.
 
 ## Local development
 

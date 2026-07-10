@@ -15,3 +15,5 @@ web/admin/test-results/
 web/admin/playwright-report/
 internal/adminweb/assets/dist/*
 !internal/adminweb/assets/dist/.keep
+dist/
+.release-test/

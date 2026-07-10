@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Verify
+        run: |
+          bash scripts/test-package-release.sh
+          bash scripts/test-guest-install-code-guda-gateway.sh
+          bash scripts/test-install-linux.sh
+          go test ./...
+
+      - name: Build release artifacts
+        env:
+          TAG: ${{ github.ref_name }}
+          REVISION: ${{ github.sha }}
+          CODE_GUDA_ARTIFACT_BASE: https://raw.githubusercontent.com/karlorz/code-guda-gateway/main/deploy/code-guda-gateway
+          CODE_GUDA_RELEASE_BASE: https://github.com/karlorz/code-guda-gateway/releases/download
+        run: |
+          scripts/package-release.sh \
+            --version "$TAG" \
+            --revision "$REVISION" \
+            --artifact-base "$CODE_GUDA_ARTIFACT_BASE" \
+            --release-base "$CODE_GUDA_RELEASE_BASE" \
+            --out-dir dist \
+            --platform linux-arm64 \
+            --platform linux-amd64
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            dist/"$TAG"/SHA256SUMS \
+            dist/"$TAG"/code-guda-gateway-"$TAG"-linux-arm64.tar.gz \
+            dist/"$TAG"/code-guda-gateway-"$TAG"-linux-amd64.tar.gz \
+            --title "$TAG" \
+            --notes "code-guda-gateway $TAG"
+
+      - name: Promote stable channel on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git fetch origin main
+          git checkout -B main origin/main
+          mkdir -p deploy/code-guda-gateway
+          printf '%s\n' "$TAG" > deploy/code-guda-gateway/stable
+          sed \
+            -e 's#__CODE_GUDA_ARTIFACT_BASE__#https://raw.githubusercontent.com/karlorz/code-guda-gateway/main/deploy/code-guda-gateway#g' \
+            -e 's#__CODE_GUDA_RELEASE_BASE__#https://github.com/karlorz/code-guda-gateway/releases/download#g' \
+            scripts/guest-install-code-guda-gateway.sh > deploy/code-guda-gateway/install.sh
+          chmod +x deploy/code-guda-gateway/install.sh
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deploy/code-guda-gateway/stable deploy/code-guda-gateway/install.sh
+          git commit -m "chore(deploy): promote $TAG" || exit 0
+          git push origin main

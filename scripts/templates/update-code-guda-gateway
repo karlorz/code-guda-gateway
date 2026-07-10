@@ -1,19 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="{{REPO_URL}}"
-REPO_BRANCH="{{REPO_BRANCH}}"
-SRC_DIR="{{SRC_DIR}}"
+ARTIFACT_BASE="${CODE_GUDA_ARTIFACT_BASE:-{{ARTIFACT_BASE}}}"
 
-# Pull first so the subsequent installer run uses the updated scripts/templates.
-cd "$SRC_DIR"
-git fetch origin "$REPO_BRANCH" --prune
-git checkout "$REPO_BRANCH"
-git pull --ff-only origin "$REPO_BRANCH"
+if [[ -z "$ARTIFACT_BASE" || "$ARTIFACT_BASE" == "{{ARTIFACT_BASE}}" ]]; then
+  printf 'CODE_GUDA_ARTIFACT_BASE is required for update-code-guda-gateway\n' >&2
+  exit 2
+fi
 
-exec "$SRC_DIR/scripts/install-linux.sh" \
-  --repo-url "$REPO_URL" \
-  --branch "$REPO_BRANCH" \
-  --source-dir "$SRC_DIR" \
-  --skip-source-sync \
-  "$@"
+exec bash -c "$(curl -fsSL "${ARTIFACT_BASE%/}/install.sh")" -- "$@"
