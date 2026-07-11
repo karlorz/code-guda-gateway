@@ -486,13 +486,11 @@ describe('Provider Monitoring page', () => {
 
     expect(screen.getByRole('button', { name: /refresh quota for tavily-2/i })).toBeInTheDocument();
 
-    const more = screen.getByText('tavily-2').closest('tr')!;
-    const summary = within(more).getByText(/more actions/i);
-    fireEvent.click(summary);
-
-    expect(within(more).getByRole('button', { name: /promote tavily-2 in pool/i })).toBeInTheDocument();
-    expect(within(more).getByRole('button', { name: /demote tavily-2 in pool/i })).toBeInTheDocument();
-    expect(within(more).getByRole('button', { name: /reset selection state for tavily-2/i })).toBeInTheDocument();
+    const row = screen.getByText('tavily-2').closest('tr')!;
+    expect(within(row).getByRole('button', { name: /promote tavily-2 in pool/i })).toBeInTheDocument();
+    expect(within(row).getByRole('button', { name: /demote tavily-2 in pool/i })).toBeInTheDocument();
+    expect(within(row).getByRole('button', { name: /reset selection state for tavily-2/i })).toBeInTheDocument();
+    expect(within(row).queryByText(/more actions/i)).not.toBeInTheDocument();
   });
 
   it('does not render URL, key, enable, archive, restore, delete, or create controls', async () => {

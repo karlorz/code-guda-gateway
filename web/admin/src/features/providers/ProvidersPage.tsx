@@ -437,43 +437,35 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
                             <RefreshCw className={refreshOne.isPending && refreshOne.variables === id ? 'animate-spin' : ''} size={14} />
                             Refresh quota
                           </Button>
-                          <details className="relative text-left">
-                            <summary
-                              aria-label={`More actions for ${name}`}
-                              className="cursor-pointer list-none rounded-md border border-zinc-300 bg-white px-2.5 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-100"
+                          <div className="flex flex-wrap justify-end gap-1">
+                            <button
+                              aria-label={`Reset selection state for ${name}`}
+                              className="rounded px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 disabled:opacity-50"
+                              disabled={keyAction.isPending || !id}
+                              onClick={() => keyAction.mutate({ id, path: '/reset-cooldown' })}
+                              type="button"
                             >
-                              More actions
-                            </summary>
-                            <div className="absolute bottom-full right-0 z-20 mb-1 grid min-w-48 gap-1 rounded-md border border-zinc-200 bg-white p-1 shadow-lg">
-                              <button
-                                aria-label={`Reset selection state for ${name}`}
-                                className="rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-50"
-                                disabled={keyAction.isPending || !id}
-                                onClick={() => keyAction.mutate({ id, path: '/reset-cooldown' })}
-                                type="button"
-                              >
-                                Reset selection state
-                              </button>
-                              <button
-                                aria-label={`Promote ${name} in pool`}
-                                className="rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-50"
-                                disabled={keyAction.isPending || !id || !demoted}
-                                onClick={() => keyAction.mutate({ id, path: '/reset-selection' })}
-                                type="button"
-                              >
-                                Promote in pool
-                              </button>
-                              <button
-                                aria-label={`Demote ${name} in pool`}
-                                className="rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-50"
-                                disabled={keyAction.isPending || !id}
-                                onClick={() => keyAction.mutate({ id, path: '/demote' })}
-                                type="button"
-                              >
-                                Demote in pool
-                              </button>
-                            </div>
-                          </details>
+                              Reset
+                            </button>
+                            <button
+                              aria-label={`Promote ${name} in pool`}
+                              className="rounded px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 disabled:opacity-50"
+                              disabled={keyAction.isPending || !id || !demoted}
+                              onClick={() => keyAction.mutate({ id, path: '/reset-selection' })}
+                              type="button"
+                            >
+                              Promote
+                            </button>
+                            <button
+                              aria-label={`Demote ${name} in pool`}
+                              className="rounded px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 disabled:opacity-50"
+                              disabled={keyAction.isPending || !id}
+                              onClick={() => keyAction.mutate({ id, path: '/demote' })}
+                              type="button"
+                            >
+                              Demote
+                            </button>
+                          </div>
                         </div>
                       </td>
                     </tr>
