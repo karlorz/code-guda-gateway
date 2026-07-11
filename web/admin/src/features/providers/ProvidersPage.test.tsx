@@ -2,9 +2,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { ProvidersPage } from './ProvidersPage';
+import { isEnabledPoolRow, ProvidersPage } from './ProvidersPage';
 import { AdminLayout } from '../../routes/AdminLayout';
 import * as client from '../../api/client';
+import type { ProviderPoolRow } from '../../api/types';
 
 vi.mock('../../api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/client')>();
@@ -124,6 +125,17 @@ function defaultMock(path: string) {
   }
   throw new Error(`unexpected path ${path}`);
 }
+
+describe('isEnabledPoolRow', () => {
+  it('keeps available cooling and not_refreshed; drops disabled and archived', () => {
+    const base = { key: { id: 1, name: 'x' } } as ProviderPoolRow;
+    expect(isEnabledPoolRow({ ...base, status: 'available' })).toBe(true);
+    expect(isEnabledPoolRow({ ...base, status: 'cooling' })).toBe(true);
+    expect(isEnabledPoolRow({ ...base, status: 'not_refreshed' })).toBe(true);
+    expect(isEnabledPoolRow({ ...base, status: 'disabled' })).toBe(false);
+    expect(isEnabledPoolRow({ ...base, status: 'archived' })).toBe(false);
+  });
+});
 
 describe('Provider Monitoring page', () => {
   afterEach(() => {
@@ -254,6 +266,99 @@ describe('Provider Monitoring page', () => {
     const disabledRow = screen.getByText('grok-disabled-quota').closest('tr')!;
     expect(within(disabledRow).getByText('available')).toBeInTheDocument();
     expect(within(disabledRow).getAllByText(/^disabled$/i).length).toBeGreaterThan(0);
+  });
+
+  it('defaults pool view to enabled endpoints and can show disabled/archived via Show all', async () => {
+    vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
+      if (path === '/admin/api/provider-pools/tavily?limit=25&offset=0') {
+        return {
+          provider: 'tavily',
+          summary: {
+            provider: 'tavily',
+            key_count: 4,
+            enabled_key_count: 2,
+            available_key_count: 1,
+            cooling_key_count: 1,
+            refreshed_key_count: 2,
+          },
+          items: [
+            {
+              status: 'available',
+              key: { id: 1, provider: 'tavily', name: 'tavily-live', enabled: true, quota_mode: 'endpoint_credentials' },
+              quota: {
+                provider_key_id: 1,
+                provider: 'tavily',
+                available: true,
+                source: 'tavily_usage',
+                remaining: 10,
+                limit_value: 100,
+                checked_at: '2026-07-11T00:00:00Z',
+              },
+            },
+            {
+              status: 'cooling',
+              key: {
+                id: 2,
+                provider: 'tavily',
+                name: 'tavily-cool',
+                enabled: true,
+                cooldown_reason: 'rate_limited',
+                quota_mode: 'endpoint_credentials',
+              },
+            },
+            {
+              status: 'disabled',
+              key: { id: 3, provider: 'tavily', name: 'tavily-off', enabled: false, quota_mode: 'endpoint_credentials' },
+            },
+            {
+              status: 'archived',
+              key: {
+                id: 4,
+                provider: 'tavily',
+                name: 'tavily-old',
+                enabled: false,
+                archived_at: '2026-07-01T00:00:00Z',
+                quota_mode: 'endpoint_credentials',
+              },
+            },
+          ],
+          page: { limit: 25, offset: 0, total: 4 },
+        };
+      }
+      if (path.startsWith('/admin/api/provider-pools/')) {
+        return emptyPool(path.split('/')[4].split('?')[0]);
+      }
+      throw new Error(`unexpected path ${path}`);
+    });
+
+    renderWithClient(<ProvidersPage />);
+    await screen.findByText('Tavily Pool');
+
+    // Default: enabled only — live + cooling stay; disabled/archived hidden.
+    expect(screen.getByText('tavily-live')).toBeInTheDocument();
+    expect(screen.getByText('tavily-cool')).toBeInTheDocument();
+    expect(screen.queryByText('tavily-off')).not.toBeInTheDocument();
+    expect(screen.queryByText('tavily-old')).not.toBeInTheDocument();
+    expect(screen.getByTestId('pool-view-hint-tavily')).toHaveTextContent(/hiding 2 disabled\/archived/i);
+
+    const enabledOnly = screen.getByRole('button', { name: /show enabled tavily endpoints only/i });
+    const showAll = screen.getByRole('button', { name: /show all tavily endpoints/i });
+    expect(enabledOnly).toHaveAttribute('aria-pressed', 'true');
+    expect(showAll).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(showAll);
+    expect(await screen.findByText('tavily-off')).toBeInTheDocument();
+    expect(screen.getByText('tavily-old')).toBeInTheDocument();
+    expect(showAll).toHaveAttribute('aria-pressed', 'true');
+    expect(enabledOnly).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByTestId('pool-view-hint-tavily')).not.toBeInTheDocument();
+
+    fireEvent.click(enabledOnly);
+    await waitFor(() => {
+      expect(screen.queryByText('tavily-off')).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText('tavily-old')).not.toBeInTheDocument();
   });
 
   it('keeps provider tests, quota refresh, promote, demote, and reset controls', async () => {

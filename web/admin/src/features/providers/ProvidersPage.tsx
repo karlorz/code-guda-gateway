@@ -23,6 +23,14 @@ const PAGE_SIZE = 25;
 const QUOTA_SOURCE_DISABLED = 'quota_disabled';
 const QUOTA_SOURCE_NOT_CONFIGURED = 'quota_not_configured';
 
+/** Pool table view: default hides rows that cannot be selected for inference. */
+export type PoolRowView = 'enabled' | 'all';
+
+/** True when the row is eligible for the default monitoring view (in the live selection pack). */
+export function isEnabledPoolRow(row: ProviderPoolRow): boolean {
+  return row.status !== 'disabled' && row.status !== 'archived';
+}
+
 export function ProvidersPage() {
   const qc = useQueryClient();
   const health = useQuery({ queryKey: ['provider-health'], queryFn: () => apiFetch<ListResponse<ProviderHealth>>('/admin/api/provider-health') });
@@ -184,6 +192,8 @@ function quotaBadgeTone(state: QuotaOperationalState): 'good' | 'warn' | 'bad' {
 function ProviderPoolSection({ provider, sampleQuota }: { provider: string; sampleQuota?: ProviderQuota }) {
   const qc = useQueryClient();
   const [offset, setOffset] = useState(0);
+  // Default: only rows that can still be selected (hide disabled + archived clutter).
+  const [rowView, setRowView] = useState<PoolRowView>('enabled');
   const [refreshAllResult, setRefreshAllResult] = useState<RefreshAllKeyQuotasResult | null>(null);
   const pool = useQuery({
     queryKey: ['provider-pools', provider, offset],
@@ -233,6 +243,11 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
   const canNext = offset + PAGE_SIZE < total;
   const showSampleQuotaError = summary.refreshed_key_count === 0 && sampleQuota && !sampleQuota.available && sampleQuota.message_redacted;
 
+  const allItems = pool.data.items ?? [];
+  const visibleItems = rowView === 'all' ? allItems : allItems.filter(isEnabledPoolRow);
+  const hiddenCount = allItems.length - visibleItems.length;
+  const inactiveInSummary = Math.max(0, (summary.key_count ?? 0) - (summary.enabled_key_count ?? 0));
+
   return (
     <div className="border-t border-zinc-200 pt-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -267,6 +282,37 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
         </p>
       ) : null}
 
+      <div className="mt-2 flex flex-wrap items-center gap-2" data-testid={`pool-view-${provider}`}>
+        <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">View</span>
+        <Button
+          aria-label={`Show enabled ${provider} endpoints only`}
+          aria-pressed={rowView === 'enabled'}
+          onClick={() => setRowView('enabled')}
+          type="button"
+          variant={rowView === 'enabled' ? 'primary' : 'secondary'}
+        >
+          Enabled only
+        </Button>
+        <Button
+          aria-label={`Show all ${provider} endpoints`}
+          aria-pressed={rowView === 'all'}
+          onClick={() => setRowView('all')}
+          type="button"
+          variant={rowView === 'all' ? 'primary' : 'secondary'}
+        >
+          Show all
+        </Button>
+        {rowView === 'enabled' && (hiddenCount > 0 || inactiveInSummary > 0) ? (
+          <span className="text-xs text-zinc-500" data-testid={`pool-view-hint-${provider}`}>
+            {hiddenCount > 0
+              ? `Hiding ${hiddenCount} disabled/archived on this page`
+              : inactiveInSummary > 0
+                ? `${inactiveInSummary} disabled/archived in pool (use Show all)`
+                : null}
+          </span>
+        ) : null}
+      </div>
+
       {refreshAllResult ? (
         <p className="mt-1 text-xs text-zinc-600" data-testid={`refresh-all-result-${provider}`}>
           {`Refreshed ${refreshAllResult.succeeded} · Failed ${refreshAllResult.failed} · Skipped disabled ${refreshAllResult.skipped_disabled}${
@@ -293,7 +339,7 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
             </tr>
           </thead>
           <tbody>
-            {(pool.data.items ?? []).map((row) => {
+            {visibleItems.map((row) => {
               const id = keyID(row.key);
               const quotaState = deriveQuotaOperationalState(row);
               const cooldownReason = valueOf<string>(row.key as Record<string, unknown>, 'CooldownReason', 'cooldown_reason', '');
@@ -380,9 +426,13 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
                 </tr>
               );
             })}
-            {(pool.data.items?.length ?? 0) === 0 ? (
+            {visibleItems.length === 0 ? (
               <tr>
-                <td className="py-3 text-sm text-zinc-500" colSpan={7}>No keys</td>
+                <td className="py-3 text-sm text-zinc-500" colSpan={7}>
+                  {rowView === 'enabled' && allItems.length > 0
+                    ? 'No enabled endpoints on this page — use Show all or check Provider Endpoints'
+                    : 'No keys'}
+                </td>
               </tr>
             ) : null}
           </tbody>
