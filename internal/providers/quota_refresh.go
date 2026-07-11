@@ -525,12 +525,43 @@ func quotaCacheShell(provider, source, checked, expires string, keyID *int64) Qu
 
 func normalizeTavilyUsage(provider string, keyID *int64, checked, expires string, payload tavilyUsageResponse) QuotaCache {
 	q := quotaCacheShell(provider, "tavily_usage", checked, expires, keyID)
+	// Prefer per-key usage; account plan_usage is a coarser fallback for used
+	// only when key.usage is absent.
 	q.Used = payload.Key.Usage
-	q.LimitValue = payload.Key.Limit
-	if payload.Key.Limit != nil && payload.Key.Usage != nil {
-		rem := *payload.Key.Limit - *payload.Key.Usage
-		q.Remaining = &rem
+	if q.Used == nil {
+		q.Used = payload.Account.PlanUsage
 	}
+
+	// Tavily /usage does not expose a direct remaining field. Derive:
+	//  1. key.limit - key.usage when both present (key-scoped budget)
+	//  2. account.plan_limit - account.plan_usage when key.limit is missing
+	//     (common on real plans) so pool Known remaining can still sum
+	//  3. otherwise leave remaining nil — UI surfaces used-only
+	basis := ""
+	switch {
+	case payload.Key.Limit != nil && payload.Key.Usage != nil:
+		q.LimitValue = payload.Key.Limit
+		rem := *payload.Key.Limit - *payload.Key.Usage
+		if rem < 0 {
+			rem = 0
+		}
+		q.Remaining = &rem
+		basis = "key"
+	case payload.Key.Limit != nil:
+		// Limit without usage: still expose the ceiling; remaining unknown.
+		q.LimitValue = payload.Key.Limit
+	case payload.Account.PlanLimit != nil && payload.Account.PlanUsage != nil:
+		q.LimitValue = payload.Account.PlanLimit
+		rem := *payload.Account.PlanLimit - *payload.Account.PlanUsage
+		if rem < 0 {
+			rem = 0
+		}
+		q.Remaining = &rem
+		basis = "account_plan"
+	case payload.Account.PlanLimit != nil:
+		q.LimitValue = payload.Account.PlanLimit
+	}
+
 	q.Details = map[string]any{
 		"key_search_usage":    payload.Key.SearchUsage,
 		"key_extract_usage":   payload.Key.ExtractUsage,
@@ -542,6 +573,9 @@ func normalizeTavilyUsage(provider string, keyID *int64, checked, expires string
 		"account_plan_limit":  payload.Account.PlanLimit,
 		"account_paygo_usage": payload.Account.PaygoUsage,
 		"account_paygo_limit": payload.Account.PaygoLimit,
+	}
+	if basis != "" {
+		q.Details["remaining_basis"] = basis
 	}
 	return q
 }

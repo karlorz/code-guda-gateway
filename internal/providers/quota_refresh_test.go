@@ -78,6 +78,85 @@ func TestParseTavilyUsageQuota(t *testing.T) {
 	if q.Remaining == nil || *q.Remaining != 850 {
 		t.Fatalf("remaining = %#v", q.Remaining)
 	}
+	if q.Details["remaining_basis"] != "key" {
+		t.Fatalf("remaining_basis = %#v, want key", q.Details["remaining_basis"])
+	}
+}
+
+func TestParseTavilyUsageQuota_NoKeyLimitFallsBackToAccountPlan(t *testing.T) {
+	// Real Tavily responses often omit key.limit (or send null) while still
+	// reporting account plan_usage/plan_limit. Without a remaining value the
+	// pool summary cannot show Known remaining.
+	body := []byte(`{
+	  "key": {
+	    "usage": 42,
+	    "search_usage": 40,
+	    "extract_usage": 2
+	  },
+	  "account": {
+	    "current_plan": "Researcher",
+	    "plan_usage": 1200,
+	    "plan_limit": 5000,
+	    "paygo_usage": 0,
+	    "paygo_limit": 0
+	  }
+	}`)
+	var payload tavilyUsageResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	q := normalizeTavilyUsage(ProviderTavily, nil, "2026-07-08T00:00:00Z", "2026-07-08T00:05:00Z", payload)
+	if !q.Available {
+		t.Fatal("quota should be available")
+	}
+	if q.Used == nil || *q.Used != 42 {
+		t.Fatalf("used = %#v (prefer key.usage for used)", q.Used)
+	}
+	if q.LimitValue == nil || *q.LimitValue != 5000 {
+		t.Fatalf("limit = %#v, want account plan_limit", q.LimitValue)
+	}
+	if q.Remaining == nil || *q.Remaining != 3800 {
+		t.Fatalf("remaining = %#v, want plan_limit - plan_usage", q.Remaining)
+	}
+	if q.Details["remaining_basis"] != "account_plan" {
+		t.Fatalf("remaining_basis = %#v", q.Details["remaining_basis"])
+	}
+}
+
+func TestParseTavilyUsageQuota_UsageOnlyNoLimitNoRemaining(t *testing.T) {
+	body := []byte(`{
+	  "key": {"usage": 10},
+	  "account": {"current_plan": "Free"}
+	}`)
+	var payload tavilyUsageResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	q := normalizeTavilyUsage(ProviderTavily, nil, "2026-07-08T00:00:00Z", "2026-07-08T00:05:00Z", payload)
+	if !q.Available {
+		t.Fatal("quota should still be available (refresh succeeded)")
+	}
+	if q.Used == nil || *q.Used != 10 {
+		t.Fatalf("used = %#v", q.Used)
+	}
+	if q.Remaining != nil {
+		t.Fatalf("remaining = %#v, want nil when no key.limit and no plan_limit", q.Remaining)
+	}
+	if q.LimitValue != nil {
+		t.Fatalf("limit = %#v, want nil", q.LimitValue)
+	}
+}
+
+func TestParseTavilyUsageQuota_ClampsNegativeRemaining(t *testing.T) {
+	body := []byte(`{"key":{"usage":120,"limit":100},"account":{}}`)
+	var payload tavilyUsageResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	q := normalizeTavilyUsage(ProviderTavily, nil, "2026-07-08T00:00:00Z", "2026-07-08T00:05:00Z", payload)
+	if q.Remaining == nil || *q.Remaining != 0 {
+		t.Fatalf("remaining = %#v, want 0 when usage exceeds limit", q.Remaining)
+	}
 }
 
 func TestParseFirecrawlCreditUsageV2(t *testing.T) {
