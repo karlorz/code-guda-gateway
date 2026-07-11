@@ -813,6 +813,62 @@ func TestServer_MountsAdminRoutes(t *testing.T) {
 	}
 }
 
+func TestProviderPoolEndpoint_ViewEnabled(t *testing.T) {
+	app, auth, _, keyRepo, _, _ := openAdminApp(t)
+	c := loginSession(t, app, initToken(t, auth))
+	if _, err := keyRepo.AddEndpoint(providers.ProviderTavily, "live", "https://api.tavily.com", "tvly-live-key-aaaaaaaa"); err != nil {
+		t.Fatalf("Add live: %v", err)
+	}
+	off, err := keyRepo.AddEndpoint(providers.ProviderTavily, "off", "https://api.tavily.com", "tvly-off-key-bbbbbbbb")
+	if err != nil {
+		t.Fatalf("Add off: %v", err)
+	}
+	if err := keyRepo.Disable(off.ID); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/provider-pools/tavily?view=enabled", nil)
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enabled status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var enabled providers.ProviderPool
+	if err := json.Unmarshal(rec.Body.Bytes(), &enabled); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if enabled.Page.Total != 1 || len(enabled.Items) != 1 || enabled.Items[0].Key.Name != "live" {
+		t.Fatalf("enabled payload = %#v", enabled)
+	}
+	if enabled.Summary.KeyCount != 2 {
+		t.Fatalf("summary.KeyCount = %d want 2", enabled.Summary.KeyCount)
+	}
+
+	reqAll := httptest.NewRequest(http.MethodGet, "/admin/api/provider-pools/tavily?view=all", nil)
+	reqAll.AddCookie(c)
+	recAll := httptest.NewRecorder()
+	app.ServeHTTP(recAll, reqAll)
+	if recAll.Code != http.StatusOK {
+		t.Fatalf("all status=%d", recAll.Code)
+	}
+	var all providers.ProviderPool
+	if err := json.Unmarshal(recAll.Body.Bytes(), &all); err != nil {
+		t.Fatalf("json all: %v", err)
+	}
+	if all.Page.Total != 2 || len(all.Items) != 2 {
+		t.Fatalf("all payload = %#v", all)
+	}
+
+	reqBad := httptest.NewRequest(http.MethodGet, "/admin/api/provider-pools/tavily?view=nope", nil)
+	reqBad.AddCookie(c)
+	recBad := httptest.NewRecorder()
+	app.ServeHTTP(recBad, reqBad)
+	if recBad.Code != http.StatusBadRequest {
+		t.Fatalf("bad view status=%d body=%s", recBad.Code, recBad.Body.String())
+	}
+}
+
 func TestProviderPoolEndpointReturnsPaginatedRows(t *testing.T) {
 	app, auth, _, keyRepo, st, _ := openAdminApp(t)
 	token := initToken(t, auth)

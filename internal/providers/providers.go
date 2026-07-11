@@ -20,6 +20,8 @@ var (
 	ErrInvalidBaseURL = errors.New("providers: invalid base URL")
 	// ErrProviderKeyNotFound is returned when a provider_keys row id does not exist.
 	ErrProviderKeyNotFound = errors.New("providers: provider key not found")
+	// ErrInvalidPoolView is returned when ProviderPool receives an unknown view value.
+	ErrInvalidPoolView = errors.New("providers: invalid pool view")
 )
 
 func validateProvider(p string) error {

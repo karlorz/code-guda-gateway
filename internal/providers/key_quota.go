@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -24,10 +25,21 @@ type ProviderKeyQuota struct {
 	Details         map[string]any `json:"details,omitempty"`
 }
 
+// Pool list view constants for ProviderPool filtering.
+const (
+	// PoolViewEnabled (default) omits disabled and archived rows before pagination.
+	PoolViewEnabled = "enabled"
+	// PoolViewAll returns every pool row.
+	PoolViewAll = "all"
+)
+
 // PoolListOptions controls pagination for ProviderPool.
 type PoolListOptions struct {
 	Limit  int
 	Offset int
+	// View selects which rows appear in items/page: "enabled" (default) or "all".
+	// Summary counts always cover the full provider key set.
+	View string
 }
 
 // PageInfo describes a paginated result set.
@@ -206,12 +218,19 @@ func (r *KeyQuotaRepo) ListByProvider(provider string) (map[int64]ProviderKeyQuo
 // Summary counts are computed over ALL keys for the provider (not just the page).
 // KnownRemaining sums Remaining across keys whose derived status is available
 // and whose Remaining pointer is non-nil.
+//
+// View filters items/page only: "enabled" (default) drops disabled+archived
+// before limit/offset; "all" keeps every row. Summary always uses the full set.
 func (r *KeyQuotaRepo) ProviderPool(keys *KeyRepo, provider string, opts PoolListOptions) (ProviderPool, error) {
 	if err := validateProvider(provider); err != nil {
 		return ProviderPool{}, err
 	}
 	if keys == nil {
 		return ProviderPool{}, fmt.Errorf("provider pool: key repo required")
+	}
+	view, err := normalizePoolView(opts.View)
+	if err != nil {
+		return ProviderPool{}, err
 	}
 	limit, offset := ClampLimitOffset(opts.Limit, opts.Offset, 25, 100)
 
@@ -264,6 +283,18 @@ func (r *KeyQuotaRepo) ProviderPool(keys *KeyRepo, provider string, opts PoolLis
 		summary.KnownRemaining = &knownRemaining
 	}
 
+	// Filter for items/page after summary is complete.
+	if view == PoolViewEnabled {
+		filtered := make([]ProviderPoolRow, 0, len(all))
+		for _, row := range all {
+			if row.Status == PoolKeyStatusDisabled || row.Status == PoolKeyStatusArchived {
+				continue
+			}
+			filtered = append(filtered, row)
+		}
+		all = filtered
+	}
+
 	// Paginate key rows (ORDER BY id from List already).
 	total := len(all)
 	start := offset
@@ -286,6 +317,17 @@ func (r *KeyQuotaRepo) ProviderPool(keys *KeyRepo, provider string, opts PoolLis
 			Total:  total,
 		},
 	}, nil
+}
+
+func normalizePoolView(v string) (string, error) {
+	switch strings.TrimSpace(strings.ToLower(v)) {
+	case "", PoolViewEnabled:
+		return PoolViewEnabled, nil
+	case PoolViewAll:
+		return PoolViewAll, nil
+	default:
+		return "", fmt.Errorf("%w: %q", ErrInvalidPoolView, v)
+	}
 }
 
 // poolKeySkipReason returns a refresh-all skip reason when the key must not be refreshed, or "".
