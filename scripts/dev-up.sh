@@ -5,7 +5,7 @@
 #   scripts/dev-up.sh              # start API if not already healthy
 #   scripts/dev-up.sh --ui         # API + Vite admin HMR (preferred for web/admin work)
 #   scripts/dev-up.sh --ui-only    # Vite only (API must already be up)
-#   scripts/dev-up.sh --rebuild    # rebuild Go binary then start
+#   scripts/dev-up.sh --rebuild    # rebuild Go binary then (re)start so new routes load
 #   scripts/dev-up.sh --fg         # gateway in foreground (no nohup; ignores --ui)
 #   scripts/dev-up.sh --status
 #   scripts/dev-up.sh --stop       # stop gateway and Vite (if started by dev-up)
@@ -195,6 +195,18 @@ start_gateway() {
   load_env
   ensure_dirs
   ensure_binary
+
+  # A rebuild only updates the on-disk binary; an already-running process still
+  # serves the old routes (e.g. missing /admin/api/settings/display-timezone → 404).
+  if [[ "${REBUILD:-0}" == "1" ]] && is_healthy; then
+    echo "dev-up: --rebuild: restarting gateway to load new binary"
+    stop_gateway
+    # Brief wait so the port is free before re-bind.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      is_healthy && sleep 0.2 && continue
+      break
+    done
+  fi
 
   if is_healthy; then
     echo "dev-up: gateway already healthy at $(health_url)"
