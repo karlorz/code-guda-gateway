@@ -109,8 +109,9 @@ func TestParseTavilyUsageQuota_NoKeyLimitFallsBackToAccountPlan(t *testing.T) {
 	if !q.Available {
 		t.Fatal("quota should be available")
 	}
-	if q.Used == nil || *q.Used != 42 {
-		t.Fatalf("used = %#v (prefer key.usage for used)", q.Used)
+	// Account-plan basis uses plan units for used/limit/remaining so the triple is consistent.
+	if q.Used == nil || *q.Used != 1200 {
+		t.Fatalf("used = %#v, want account plan_usage", q.Used)
 	}
 	if q.LimitValue == nil || *q.LimitValue != 5000 {
 		t.Fatalf("limit = %#v, want account plan_limit", q.LimitValue)
@@ -122,6 +123,7 @@ func TestParseTavilyUsageQuota_NoKeyLimitFallsBackToAccountPlan(t *testing.T) {
 		t.Fatalf("remaining_basis = %#v", q.Details["remaining_basis"])
 	}
 }
+
 
 func TestParseTavilyUsageQuota_UsageOnlyNoLimitNoRemaining(t *testing.T) {
 	body := []byte(`{

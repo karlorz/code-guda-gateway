@@ -124,7 +124,7 @@ stop_pidfile() {
     local pid
     pid="$(cat "$f" 2>/dev/null || true)"
     if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
-      # Vite often has a process group; try group then pid.
+      # Prefer process-group kill when start used setsid (session leader == pid).
       kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
       for _ in 1 2 3 4 5 6 7 8 9 10; do
         kill -0 "$pid" 2>/dev/null || break
@@ -139,41 +139,34 @@ stop_pidfile() {
   fi
 }
 
+# Best-effort: kill listeners on port whose args match pattern (e.g. guda-gateway, vite).
+stop_listener_if() {
+  local port="$1"
+  local pattern="$2"
+  command -v lsof >/dev/null 2>&1 || return 0
+  local pids
+  pids="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)"
+  [[ -z "$pids" ]] && return 0
+  while read -r p; do
+    [[ -z "$p" ]] && continue
+    if ps -p "$p" -o args= 2>/dev/null | grep -Eq "$pattern"; then
+      kill "$p" 2>/dev/null || true
+    fi
+  done <<<"$pids"
+}
+
 stop_gateway() {
   stop_pidfile "$PID_FILE" "gateway"
-  # Best-effort: stop listeners on the configured port only if they look like guda-gateway.
   load_env
   local port="${ADDR##*:}"
-  if command -v lsof >/dev/null 2>&1; then
-    local pids
-    pids="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)"
-    if [[ -n "$pids" ]]; then
-      while read -r p; do
-        [[ -z "$p" ]] && continue
-        if ps -p "$p" -o args= 2>/dev/null | grep -q 'guda-gateway'; then
-          kill "$p" 2>/dev/null || true
-        fi
-      done <<<"$pids"
-    fi
-  fi
+  stop_listener_if "$port" 'guda-gateway'
 }
 
 stop_vite() {
   stop_pidfile "$VITE_PID_FILE" "vite"
-  # Best-effort: vite on VITE_PORT only if args look like admin vite.
-  if command -v lsof >/dev/null 2>&1; then
-    local pids
-    pids="$(lsof -nP -iTCP:"$VITE_PORT" -sTCP:LISTEN -t 2>/dev/null || true)"
-    if [[ -n "$pids" ]]; then
-      while read -r p; do
-        [[ -z "$p" ]] && continue
-        if ps -p "$p" -o args= 2>/dev/null | grep -Eq 'vite|web/admin'; then
-          kill "$p" 2>/dev/null || true
-        fi
-      done <<<"$pids"
-    fi
-  fi
+  stop_listener_if "$VITE_PORT" 'vite|web/admin'
 }
+
 
 ensure_dirs() {
   mkdir -p "$(dirname "$DB_PATH")" "$(dirname "$GUDA_MASTER_KEY_PATH")"
@@ -254,16 +247,23 @@ start_vite() {
   fi
 
   echo "dev-up: starting Vite HMR (proxy /admin/api → $GUDA_DEV_API)"
-  # setsid so --stop can signal the process group when available.
-  (
-    cd "$ADMIN_SRC"
-    # package.json "dev" already pins host; only pass port/strictPort so flags
-    # are not duplicated. GUDA_DEV_API selects the gateway proxy target.
-    exec env \
+  # Start under setsid when available so --stop can kill the process group;
+  # on macOS setsid is often missing — fall back to plain bg + lsof cleanup.
+  if command -v setsid >/dev/null 2>&1; then
+    setsid env \
       GUDA_DEV_API="$GUDA_DEV_API" \
-      bun run dev -- --port "$VITE_PORT" --strictPort
-  ) >"$VITE_LOG" 2>&1 &
+      bash -c "cd \"$ADMIN_SRC\" && exec bun run dev -- --port \"$VITE_PORT\" --strictPort" \
+      >"$VITE_LOG" 2>&1 &
+  else
+    (
+      cd "$ADMIN_SRC"
+      exec env \
+        GUDA_DEV_API="$GUDA_DEV_API" \
+        bun run dev -- --port "$VITE_PORT" --strictPort
+    ) >"$VITE_LOG" 2>&1 &
+  fi
   echo $! >"$VITE_PID_FILE"
+
 
   for _ in $(seq 1 50); do
     if is_vite_up; then

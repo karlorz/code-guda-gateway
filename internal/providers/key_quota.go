@@ -217,7 +217,8 @@ func (r *KeyQuotaRepo) ListByProvider(provider string) (map[int64]ProviderKeyQuo
 //
 // Summary counts are computed over ALL keys for the provider (not just the page).
 // KnownRemaining sums Remaining across keys whose derived status is available
-// and whose Remaining pointer is non-nil.
+// and whose Remaining pointer is non-nil. Account-scoped remaining
+// (details.remaining_basis == "account_plan") is counted once (max), not per key.
 //
 // View filters items/page only: "enabled" (default) drops disabled+archived
 // before limit/offset; "all" keeps every row. Summary always uses the full set.
@@ -250,9 +251,10 @@ func (r *KeyQuotaRepo) ProviderPool(keys *KeyRepo, provider string, opts PoolLis
 	}
 	var knownRemaining int64
 	var hasKnownRemaining bool
+	var accountPlanRemaining *int64
 
-	// Derive status for every key so summary counts are correct independent of pagination.
-	all := make([]ProviderPoolRow, 0, len(allKeys))
+	// Single pass: summary over full set; items source only includes rows for view.
+	itemsSrc := make([]ProviderPoolRow, 0, len(allKeys))
 	for _, k := range allKeys {
 		var qPtr *ProviderKeyQuota
 		if q, ok := quotaByKey[k.ID]; ok {
@@ -260,7 +262,7 @@ func (r *KeyQuotaRepo) ProviderPool(keys *KeyRepo, provider string, opts PoolLis
 			qPtr = &cp
 		}
 		status := derivePoolKeyStatus(k, qPtr != nil, now)
-		all = append(all, ProviderPoolRow{Key: k, Status: status, Quota: qPtr})
+		row := ProviderPoolRow{Key: k, Status: status, Quota: qPtr}
 
 		if k.Enabled && k.ArchivedAt == nil {
 			summary.EnabledKeyCount++
@@ -272,31 +274,35 @@ func (r *KeyQuotaRepo) ProviderPool(keys *KeyRepo, provider string, opts PoolLis
 		case PoolKeyStatusAvailable:
 			summary.AvailableKeyCount++
 			if qPtr != nil && qPtr.Remaining != nil {
-				knownRemaining += *qPtr.Remaining
-				hasKnownRemaining = true
+				if remainingBasis(qPtr) == "account_plan" {
+					// Shared account budget — do not multiply by key count.
+					if accountPlanRemaining == nil || *qPtr.Remaining > *accountPlanRemaining {
+						v := *qPtr.Remaining
+						accountPlanRemaining = &v
+					}
+				} else {
+					knownRemaining += *qPtr.Remaining
+					hasKnownRemaining = true
+				}
 			}
 		case PoolKeyStatusCooling:
 			summary.CoolingKeyCount++
 		}
+
+		if view == PoolViewAll || (status != PoolKeyStatusDisabled && status != PoolKeyStatusArchived) {
+			itemsSrc = append(itemsSrc, row)
+		}
+	}
+	if accountPlanRemaining != nil {
+		knownRemaining += *accountPlanRemaining
+		hasKnownRemaining = true
 	}
 	if hasKnownRemaining {
 		summary.KnownRemaining = &knownRemaining
 	}
 
-	// Filter for items/page after summary is complete.
-	if view == PoolViewEnabled {
-		filtered := make([]ProviderPoolRow, 0, len(all))
-		for _, row := range all {
-			if row.Status == PoolKeyStatusDisabled || row.Status == PoolKeyStatusArchived {
-				continue
-			}
-			filtered = append(filtered, row)
-		}
-		all = filtered
-	}
-
 	// Paginate key rows (ORDER BY id from List already).
-	total := len(all)
+	total := len(itemsSrc)
 	start := offset
 	if start > total {
 		start = total
@@ -305,7 +311,7 @@ func (r *KeyQuotaRepo) ProviderPool(keys *KeyRepo, provider string, opts PoolLis
 	if end > total {
 		end = total
 	}
-	items := all[start:end]
+	items := itemsSrc[start:end]
 
 	return ProviderPool{
 		Provider: provider,
@@ -318,6 +324,16 @@ func (r *KeyQuotaRepo) ProviderPool(keys *KeyRepo, provider string, opts PoolLis
 		},
 	}, nil
 }
+
+// remainingBasis returns details.remaining_basis when present (e.g. "key", "account_plan").
+func remainingBasis(q *ProviderKeyQuota) string {
+	if q == nil || q.Details == nil {
+		return ""
+	}
+	v, _ := q.Details["remaining_basis"].(string)
+	return v
+}
+
 
 func normalizePoolView(v string) (string, error) {
 	switch strings.TrimSpace(strings.ToLower(v)) {

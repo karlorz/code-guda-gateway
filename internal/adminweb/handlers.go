@@ -1155,13 +1155,11 @@ func (h *Handler) handleProviderPool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, offset := limitOffset(r)
-	view := r.URL.Query().Get("view")
-	if view == "" {
-		view = providers.PoolViewEnabled
-	}
+	// Empty view defaults inside normalizePoolView → PoolViewEnabled.
 	pool, err := h.deps.KeyQuotas.ProviderPool(h.deps.ProviderKeys, provider, providers.PoolListOptions{
-		Limit: limit, Offset: offset, View: view,
+		Limit: limit, Offset: offset, View: r.URL.Query().Get("view"),
 	})
+
 	if err != nil {
 		if errors.Is(err, providers.ErrInvalidPoolView) {
 			writeAPIError(w, http.StatusBadRequest, "bad_request", err.Error())

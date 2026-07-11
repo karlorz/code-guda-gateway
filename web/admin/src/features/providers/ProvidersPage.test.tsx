@@ -2,10 +2,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { isEnabledPoolRow, ProvidersPage } from './ProvidersPage';
+import { ProvidersPage } from './ProvidersPage';
 import { AdminLayout } from '../../routes/AdminLayout';
 import * as client from '../../api/client';
-import type { ProviderPoolRow } from '../../api/types';
 
 vi.mock('../../api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/client')>();
@@ -131,17 +130,6 @@ function defaultMock(path: string) {
   }
   throw new Error(`unexpected path ${path}`);
 }
-
-describe('isEnabledPoolRow', () => {
-  it('keeps available cooling and not_refreshed; drops disabled and archived', () => {
-    const base = { key: { id: 1, name: 'x' } } as ProviderPoolRow;
-    expect(isEnabledPoolRow({ ...base, status: 'available' })).toBe(true);
-    expect(isEnabledPoolRow({ ...base, status: 'cooling' })).toBe(true);
-    expect(isEnabledPoolRow({ ...base, status: 'not_refreshed' })).toBe(true);
-    expect(isEnabledPoolRow({ ...base, status: 'disabled' })).toBe(false);
-    expect(isEnabledPoolRow({ ...base, status: 'archived' })).toBe(false);
-  });
-});
 
 describe('Provider Monitoring page', () => {
   afterEach(() => {
@@ -489,7 +477,7 @@ describe('Provider Monitoring page', () => {
     const row = screen.getByText('tavily-2').closest('tr')!;
     expect(within(row).getByRole('button', { name: /promote tavily-2 in pool/i })).toBeInTheDocument();
     expect(within(row).getByRole('button', { name: /demote tavily-2 in pool/i })).toBeInTheDocument();
-    expect(within(row).getByRole('button', { name: /reset selection state for tavily-2/i })).toBeInTheDocument();
+    expect(within(row).getByRole('button', { name: /reset cooldown and pool order for tavily-2/i })).toBeInTheDocument();
     expect(within(row).queryByText(/more actions/i)).not.toBeInTheDocument();
   });
 

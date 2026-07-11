@@ -16,6 +16,13 @@ export default defineConfig(({ mode }) => {
   // loadEnv reads web/admin/.env*; process.env still wins for GUDA_DEV_API from dev-up.
   const env = loadEnv(mode, process.cwd(), '');
   const apiTarget = process.env.GUDA_DEV_API || env.GUDA_DEV_API || 'http://127.0.0.1:8080';
+  const adminApiProxy = {
+    '/admin/api': {
+      target: apiTarget,
+      changeOrigin: true,
+      secure: false,
+    },
+  };
 
   return {
     base: '/admin/',
@@ -24,32 +31,13 @@ export default defineConfig(({ mode }) => {
       host: '127.0.0.1',
       port: 5173,
       strictPort: true,
-      // Keep HMR on the same host/port the browser uses (no reverse-proxy dance).
-      hmr: {
-        host: '127.0.0.1',
-        port: 5173,
-        clientPort: 5173,
-      },
-      proxy: {
-        // Login, session, CSRF-mutating APIs — everything under /admin/api.
-        '/admin/api': {
-          target: apiTarget,
-          changeOrigin: true,
-          secure: false,
-        },
-      },
+      proxy: adminApiProxy,
     },
     preview: {
       host: '127.0.0.1',
       port: 4173,
       strictPort: true,
-      proxy: {
-        '/admin/api': {
-          target: apiTarget,
-          changeOrigin: true,
-          secure: false,
-        },
-      },
+      proxy: adminApiProxy,
     },
     test: {
       environment: 'jsdom',

@@ -209,3 +209,44 @@ func TestProviderPool_ViewEnabledExcludesDisabledAndArchived(t *testing.T) {
 		t.Fatal("invalid view: want error")
 	}
 }
+
+func TestProviderPool_AccountPlanRemainingCountedOnce(t *testing.T) {
+	keys, quotas, _ := openKeyQuotaDB(t)
+	k1, err := keys.AddEndpoint(providers.ProviderTavily, "a", "https://api.tavily.com", "tvly-a-key-aaaaaaaa")
+	if err != nil {
+		t.Fatalf("Add a: %v", err)
+	}
+	k2, err := keys.AddEndpoint(providers.ProviderTavily, "b", "https://api.tavily.com", "tvly-b-key-bbbbbbbb")
+	if err != nil {
+		t.Fatalf("Add b: %v", err)
+	}
+	rem := int64(3800)
+	limit := int64(5000)
+	used := int64(1200)
+	for _, id := range []int64{k1.ID, k2.ID} {
+		if err := quotas.Upsert(providers.ProviderKeyQuota{
+			ProviderKeyID: id,
+			Provider:      providers.ProviderTavily,
+			Source:        "tavily_usage",
+			Available:     true,
+			Used:          &used,
+			Remaining:     &rem,
+			LimitValue:    &limit,
+			CheckedAt:     "2026-07-09T00:00:00Z",
+			ExpiresAt:     "2026-07-09T00:05:00Z",
+			Details:       map[string]any{"remaining_basis": "account_plan"},
+		}); err != nil {
+			t.Fatalf("Upsert %d: %v", id, err)
+		}
+	}
+	page, err := quotas.ProviderPool(keys, providers.ProviderTavily, providers.PoolListOptions{Limit: 25})
+	if err != nil {
+		t.Fatalf("ProviderPool: %v", err)
+	}
+	if page.Summary.KnownRemaining == nil || *page.Summary.KnownRemaining != 3800 {
+		t.Fatalf("KnownRemaining = %#v, want 3800 once (not 7600)", page.Summary.KnownRemaining)
+	}
+	if page.Summary.AvailableKeyCount != 2 {
+		t.Fatalf("AvailableKeyCount = %d", page.Summary.AvailableKeyCount)
+	}
+}

@@ -566,13 +566,20 @@ Refresh-all skips disabled quota sidecars and reports refreshed, failed, and
 skipped-disabled counts.
 
 **Pool “Known remaining”** sums `quota.remaining` for **available** endpoints
-only (not cooling/disabled/archived). Provider parsers differ:
+only (not cooling/disabled/archived). Account-scoped remaining
+(`details.remaining_basis=account_plan`, common for Tavily when `key.limit` is
+missing) is counted **once** per provider, not once per key. Provider parsers:
 
 | Provider | Remaining source |
 |---|---|
-| Tavily | Derived: prefer `key.limit − key.usage`; if `key.limit` is missing (common), fall back to `account.plan_limit − account.plan_usage` (`details.remaining_basis` = `key` or `account_plan`). No direct remaining field. |
+| Tavily | Derived: prefer `key.limit − key.usage` (`remaining_basis=key`, additive); if `key.limit` is missing, use `account.plan_limit − account.plan_usage` with matching plan used/limit (`remaining_basis=account_plan`, de-duplicated in Known remaining). No direct remaining field. |
 | Firecrawl | Direct `remainingCredits` (with plan/one-time edge cases) |
 | Grok (Grok2API admin) | Sum of token mode `remaining` |
+
+**Pool list API:** `GET /admin/api/provider-pools/{provider}?view=enabled|all`
+(default `enabled` = selection-eligible rows only; `page.total` is filtered;
+summary always reflects the full key set). UI chips: **Active pool** /
+**All endpoints**.
 
 If rows show **used N** but the pool has no Known remaining, refresh after a
 binary that includes the Tavily fallback, or the upstream response has no

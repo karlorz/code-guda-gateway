@@ -26,11 +26,6 @@ const QUOTA_SOURCE_NOT_CONFIGURED = 'quota_not_configured';
 /** Pool table view: default hides rows that cannot be selected for inference. */
 export type PoolRowView = 'enabled' | 'all';
 
-/** True when the row is eligible for the default monitoring view (in the live selection pack). */
-export function isEnabledPoolRow(row: ProviderPoolRow): boolean {
-  return row.status !== 'disabled' && row.status !== 'archived';
-}
-
 export function ProvidersPage() {
   const qc = useQueryClient();
   const health = useQuery({ queryKey: ['provider-health'], queryFn: () => apiFetch<ListResponse<ProviderHealth>>('/admin/api/provider-health') });
@@ -49,11 +44,8 @@ export function ProvidersPage() {
     <div>
       <PageHeader
         actions={
-          <Link
-            className="inline-flex h-9 items-center rounded-md bg-zinc-950 px-3 text-sm font-medium text-white hover:bg-zinc-800"
-            to="/provider-keys"
-          >
-            Manage Provider Endpoints
+          <Link to="/provider-keys">
+            <Button type="button">Manage Provider Endpoints</Button>
           </Link>
         }
         description="Inference readiness, selection order, cooldown, and per-endpoint quota."
@@ -123,14 +115,16 @@ function detailNumber(details: ProviderQuota['details'] | ProviderKeyQuota['deta
 
 function quotaRemainingLabel(quota: ProviderQuota | ProviderKeyQuota): string | null {
   if (!quota.available) return null;
+  const basis = typeof quota.details?.remaining_basis === 'string' ? quota.details.remaining_basis : '';
+  const accountNote = basis === 'account_plan' ? ' (account plan)' : '';
   if (quota.remaining != null) {
-    if (quota.limit_value != null) return `${quota.remaining} / ${quota.limit_value} remaining`;
+    if (quota.limit_value != null) return `${quota.remaining} / ${quota.limit_value} remaining${accountNote}`;
     const plan = detailNumber(quota.details, 'plan_credits');
     const extra = detailNumber(quota.details, 'extra_credits_remaining');
     if (plan != null && extra != null && extra > 0) {
       return `${quota.remaining} credits remaining (${plan} plan + ${extra} one-time)`;
     }
-    return `${quota.remaining} remaining`;
+    return `${quota.remaining} remaining${accountNote}`;
   }
   // A quota row exists (key was refreshed) but the provider didn't return a
   // computable remaining (e.g. Tavily has no top-level key.limit). Surface the
@@ -202,7 +196,7 @@ function quotaBadgeTone(state: QuotaOperationalState): 'good' | 'warn' | 'bad' {
   return 'bad';
 }
 
-function emptySummary(provider: string) {
+function emptySummary(provider: string): ProviderPool['summary'] {
   return {
     provider,
     key_count: 0,
@@ -210,7 +204,6 @@ function emptySummary(provider: string) {
     available_key_count: 0,
     cooling_key_count: 0,
     refreshed_key_count: 0,
-    known_remaining: undefined as number | undefined,
   };
 }
 
@@ -437,35 +430,36 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
                             <RefreshCw className={refreshOne.isPending && refreshOne.variables === id ? 'animate-spin' : ''} size={14} />
                             Refresh quota
                           </Button>
-                          <div className="flex flex-wrap justify-end gap-1">
-                            <button
-                              aria-label={`Reset selection state for ${name}`}
-                              className="rounded px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 disabled:opacity-50"
-                              disabled={keyAction.isPending || !id}
-                              onClick={() => keyAction.mutate({ id, path: '/reset-cooldown' })}
-                              type="button"
-                            >
-                              Reset
-                            </button>
-                            <button
-                              aria-label={`Promote ${name} in pool`}
-                              className="rounded px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 disabled:opacity-50"
-                              disabled={keyAction.isPending || !id || !demoted}
-                              onClick={() => keyAction.mutate({ id, path: '/reset-selection' })}
-                              type="button"
-                            >
-                              Promote
-                            </button>
-                            <button
-                              aria-label={`Demote ${name} in pool`}
-                              className="rounded px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 disabled:opacity-50"
-                              disabled={keyAction.isPending || !id}
-                              onClick={() => keyAction.mutate({ id, path: '/demote' })}
-                              type="button"
-                            >
-                              Demote
-                            </button>
-                          </div>
+                          <Button
+                            aria-label={`Reset cooldown and pool order for ${name}`}
+                            className="h-8 px-2 text-xs"
+                            disabled={keyAction.isPending || !id}
+                            onClick={() => keyAction.mutate({ id, path: '/reset-cooldown' })}
+                            type="button"
+                            variant="secondary"
+                          >
+                            Reset
+                          </Button>
+                          <Button
+                            aria-label={`Promote ${name} in pool`}
+                            className="h-8 px-2 text-xs"
+                            disabled={keyAction.isPending || !id || !demoted}
+                            onClick={() => keyAction.mutate({ id, path: '/reset-selection' })}
+                            type="button"
+                            variant="secondary"
+                          >
+                            Promote
+                          </Button>
+                          <Button
+                            aria-label={`Demote ${name} in pool`}
+                            className="h-8 px-2 text-xs"
+                            disabled={keyAction.isPending || !id}
+                            onClick={() => keyAction.mutate({ id, path: '/demote' })}
+                            type="button"
+                            variant="secondary"
+                          >
+                            Demote
+                          </Button>
                         </div>
                       </td>
                     </tr>

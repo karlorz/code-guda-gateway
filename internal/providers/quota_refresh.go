@@ -527,36 +527,30 @@ func normalizeTavilyUsage(provider string, keyID *int64, checked, expires string
 	q := quotaCacheShell(provider, "tavily_usage", checked, expires, keyID)
 	// Prefer per-key usage; account plan_usage is a coarser fallback for used
 	// only when key.usage is absent.
-	q.Used = payload.Key.Usage
-	if q.Used == nil {
-		q.Used = payload.Account.PlanUsage
-	}
+	q.Used = coalesceInt64(payload.Key.Usage, payload.Account.PlanUsage)
 
 	// Tavily /usage does not expose a direct remaining field. Derive:
-	//  1. key.limit - key.usage when both present (key-scoped budget)
+	//  1. key.limit - key.usage when both present (key-scoped budget, additive
+	//     across keys in KnownRemaining)
 	//  2. account.plan_limit - account.plan_usage when key.limit is missing
-	//     (common on real plans) so pool Known remaining can still sum
+	//     (account-scoped — same figure for every key on the plan; pool
+	//     KnownRemaining counts it once via remaining_basis=account_plan)
 	//  3. otherwise leave remaining nil — UI surfaces used-only
 	basis := ""
 	switch {
 	case payload.Key.Limit != nil && payload.Key.Usage != nil:
 		q.LimitValue = payload.Key.Limit
-		rem := *payload.Key.Limit - *payload.Key.Usage
-		if rem < 0 {
-			rem = 0
-		}
-		q.Remaining = &rem
+		q.Remaining = remainingFromLimitUsage(payload.Key.Limit, payload.Key.Usage)
 		basis = "key"
 	case payload.Key.Limit != nil:
 		// Limit without usage: still expose the ceiling; remaining unknown.
 		q.LimitValue = payload.Key.Limit
 	case payload.Account.PlanLimit != nil && payload.Account.PlanUsage != nil:
+		// Account-scoped units: used/limit/remaining all from plan fields so
+		// the per-key row is internally consistent (remaining = limit − used).
+		q.Used = payload.Account.PlanUsage
 		q.LimitValue = payload.Account.PlanLimit
-		rem := *payload.Account.PlanLimit - *payload.Account.PlanUsage
-		if rem < 0 {
-			rem = 0
-		}
-		q.Remaining = &rem
+		q.Remaining = remainingFromLimitUsage(payload.Account.PlanLimit, payload.Account.PlanUsage)
 		basis = "account_plan"
 	case payload.Account.PlanLimit != nil:
 		q.LimitValue = payload.Account.PlanLimit
@@ -579,6 +573,7 @@ func normalizeTavilyUsage(provider string, keyID *int64, checked, expires string
 	}
 	return q
 }
+
 
 func normalizeFirecrawlCreditUsage(provider string, keyID *int64, checked, expires string, payload firecrawlCreditUsageResponse) QuotaCache {
 	q := quotaCacheShell(provider, "firecrawl_credit_usage", checked, expires, keyID)
@@ -663,6 +658,18 @@ func coalesceInt64(a, b *int64) *int64 {
 	return b
 }
 
+// remainingFromLimitUsage returns max(0, *limit − *usage) when both are set.
+func remainingFromLimitUsage(limit, usage *int64) *int64 {
+	if limit == nil || usage == nil {
+		return nil
+	}
+	rem := *limit - *usage
+	if rem < 0 {
+		rem = 0
+	}
+	return &rem
+}
+
 func clampUsedNonNegative(used *int64) *int64 {
 	if used != nil && *used < 0 {
 		zero := int64(0)
@@ -670,6 +677,7 @@ func clampUsedNonNegative(used *int64) *int64 {
 	}
 	return used
 }
+
 
 func quotaFailure(provider, source, checked, expires string, keyID *int64, err error) QuotaCache {
 	msg := "quota refresh failed"
