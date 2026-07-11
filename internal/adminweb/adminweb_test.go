@@ -137,7 +137,7 @@ func csrfForTest(t *testing.T, app http.Handler, c *http.Cookie) string {
 }
 
 func TestAdminLogin_GETReturnsLoginPage(t *testing.T) {
-	app, auth, _, _, _, _ := openAdminApp(t)
+	app, _, _, _, _, _ := openAdminApp(t)
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, req)
@@ -145,18 +145,28 @@ func TestAdminLogin_GETReturnsLoginPage(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	html := rec.Body.String()
-	if !strings.Contains(html, `id="token"`) && !strings.Contains(html, "guda-gateway-admin") {
-		t.Fatalf("expected login form or init message, got: %s", truncate(html, 200))
+	// Unauthenticated /admin must serve the React SPA shell (or missing-assets
+	// fallback), not the legacy Go login.html template.
+	if strings.Contains(html, `id="token"`) && strings.Contains(html, "Or POST JSON") {
+		t.Fatalf("got legacy Go login template; want SPA shell: %s", truncate(html, 200))
 	}
-	has, _ := auth.HasToken()
-	if !has {
-		if !strings.Contains(html, "guda-gateway-admin") {
-			t.Fatal("expected CLI init message when no token")
-		}
-		return
+	if !strings.Contains(html, `id="root"`) && !strings.Contains(html, "Admin UI assets not built") {
+		t.Fatalf("expected SPA shell or missing-assets page, got: %s", truncate(html, 200))
 	}
-	if !strings.Contains(html, `type="password"`) {
-		t.Fatal("expected password token input")
+}
+
+func TestAdminAssets_UnauthenticatedSPAAssetNotLoginHTML(t *testing.T) {
+	app, _, _, _, _, _ := openAdminApp(t)
+	// Even without a session, SPA asset paths must not return the legacy login form.
+	req := httptest.NewRequest(http.MethodGet, "/admin/assets/does-not-exist.js", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, truncate(rec.Body.String(), 200))
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "Or POST JSON") || strings.Contains(body, `name="token"`) {
+		t.Fatal("unauthenticated asset path returned legacy login HTML")
 	}
 }
 
@@ -248,10 +258,9 @@ func TestAdminStatic_APINeverFallsBackToSPA(t *testing.T) {
 }
 
 func TestAdminStatic_MissingAssetsFallbackPage(t *testing.T) {
-	app, auth, _, _, _, _ := openAdminApp(t)
-	c := loginSession(t, app, initToken(t, auth))
+	app, _, _, _, _, _ := openAdminApp(t)
+	// SPA shell is public; session is not required to load /admin HTML/assets.
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
-	req.AddCookie(c)
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

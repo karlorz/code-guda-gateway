@@ -107,38 +107,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+// Always serve the embedded React SPA for /admin GET (including login).
+// Auth is enforced on /admin/api/*; LoginPage in the SPA handles unauthenticated UI.
 func (h *Handler) servePage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	sid := adminauth.SessionIDFromRequest(r)
-	valid, err := h.deps.Auth.ValidateSession(sid)
-	if err != nil {
-		if errors.Is(err, adminauth.ErrSessionInvalid) {
-			h.renderLogin(w, r)
-			return
-		}
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if !valid {
-		h.renderLogin(w, r)
-		return
-	}
 	serveSPA(w, r)
-}
-
-func (h *Handler) renderLogin(w http.ResponseWriter, r *http.Request) {
-	has, err := h.deps.Auth.HasToken()
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = h.templates.ExecuteTemplate(w, "login", map[string]any{
-		"TokenNotInitialized": !has,
-	})
 }
 
 type providerRow struct {
