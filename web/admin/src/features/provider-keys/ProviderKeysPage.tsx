@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import { Plus } from 'lucide-react';
 import { apiFetch } from '../../api/client';
 import type { EndpointQuotaInput, ListResponse, ProviderKey, ProviderSetting, QuotaMode } from '../../api/types';
-import { Badge, Button, Panel, valueOf } from '../../components/ui';
+import { Badge, Button, PageHeader, Panel, valueOf } from '../../components/ui';
 import { ResourceTable } from '../gateway-keys/GatewayKeysPage';
 import { EndpointDefaultsPanel } from './EndpointDefaultsPanel';
 import { EndpointEditorSheet, quotaModeLabel } from './EndpointEditorSheet';
@@ -148,36 +148,43 @@ export function ProviderKeysPage() {
   });
 
   const editing = sheet && sheet !== 'create' ? sheet : null;
+  const endpoints = data?.items ?? [];
+  const disabledCount = endpoints.filter((endpoint) => !endpointField(endpoint, 'Enabled', 'enabled', false)).length;
+  const disabledLabel = `${disabledCount} disabled endpoint${disabledCount === 1 ? '' : 's'}`;
 
   return (
     <div>
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold">Provider Endpoints</h1>
-          <p className="mt-1 text-sm text-zinc-600">
-            Configure inference routes and quota sidecars. Endpoint name does not define routing priority.
-          </p>
-        </div>
-        <Link className="text-sm font-medium text-zinc-900 underline underline-offset-2" to="/providers">
-          Provider Monitoring
-        </Link>
-      </div>
-
-      <Panel
-        title="Endpoints"
-        action={
+      <PageHeader
+        actions={
           <Button onClick={() => setSheet('create')} type="button">
             <Plus size={16} />
             Add endpoint
           </Button>
         }
+        description="Configure inference routes and quota sidecars. Endpoint name does not define routing priority."
+        title="Provider Endpoints"
+      />
+
+      <Panel
+        title="Endpoints"
+        action={
+          <Link className="text-sm font-medium text-zinc-900 underline underline-offset-2" to="/providers">
+            Provider Monitoring
+          </Link>
+        }
       >
         <div className="mb-4">
           <EndpointDefaultsPanel />
         </div>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-500">
+          <span>
+            {endpoints.length} endpoint{endpoints.length === 1 ? '' : 's'}
+          </span>
+          {disabledCount > 0 ? <Badge tone="warn">{disabledLabel}</Badge> : null}
+        </div>
         <ResourceTable
           empty="No provider endpoints"
-          rows={(data?.items ?? []).map((row) => {
+          rows={endpoints.map((row) => {
             const record = row as Record<string, unknown>;
             const id = valueOf<number>(record, 'ID', 'id', 0);
             const enabled = valueOf<boolean>(record, 'Enabled', 'enabled', false);
@@ -276,4 +283,3 @@ export function ProviderKeysPage() {
     </div>
   );
 }
-

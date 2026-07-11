@@ -141,6 +141,15 @@ describe('Provider Endpoints navigation and page', () => {
     expect(await screen.findByRole('heading', { name: 'Provider Endpoints' })).toBeInTheDocument();
   });
 
+  it('uses shared page chrome and reports disabled endpoint inventory', async () => {
+    mockDefaultEndpoints([listItem, { ...listItemAlt, enabled: false }]);
+    renderWithClient(<ProviderKeysPage />);
+    expect(await screen.findByRole('heading', { name: 'Provider Endpoints' })).toBeInTheDocument();
+    // Wait for query resolution — heading is static and would race on empty inventory.
+    expect(await screen.findByText('1 disabled endpoint')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /add endpoint/i })).toBeInTheDocument();
+  });
+
   it('opens endpoint create in a side sheet', async () => {
     renderWithClient(<ProviderKeysPage />);
     await screen.findByText('primary');
