@@ -15,7 +15,7 @@ import type {
   QuotaOperationalState,
   RefreshAllKeyQuotasResult,
 } from '../../api/types';
-import { Badge, Button, Panel, valueOf } from '../../components/ui';
+import { Badge, Button, PageHeader, Panel, SummaryGrid, SummaryMetric, valueOf } from '../../components/ui';
 
 const POOL_PROVIDERS = ['grok', 'tavily', 'firecrawl'] as const;
 const PAGE_SIZE = 25;
@@ -47,35 +47,48 @@ export function ProvidersPage() {
 
   return (
     <div>
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold">Provider Monitoring</h1>
-          <p className="mt-1 text-sm text-zinc-600">
-            Inference readiness, pool order, cooldown, and per-endpoint quota. Configure endpoints separately.
-          </p>
-        </div>
-        <Link className="text-sm font-medium text-zinc-900 underline underline-offset-2" to="/provider-keys">
-          Manage Provider Endpoints
-        </Link>
-      </div>
-      <Panel title="Health">
-        <div className="grid gap-2 md:grid-cols-3">
-          {(health.data?.items ?? []).map((item) => (
-            <div className="border-t border-zinc-200 py-3" key={item.provider}>
-              <div className="flex items-center justify-between">
-                <strong>{item.provider}</strong>
-                <Badge tone={item.status === 'healthy' ? 'good' : item.status === 'missing_key' || item.status === 'degraded' ? 'bad' : 'warn'}>{item.status}</Badge>
-              </div>
-              <p className="mt-2 text-sm text-zinc-600">{item.enabled_key_count}/{item.key_count} enabled</p>
-              {(item.reasons ?? []).map((reason) => (
-                <p className="mt-1 text-xs text-zinc-500" key={reason}>{reason}</p>
-              ))}
-              <Button className="mt-3" onClick={() => postAction.mutate(`/admin/api/providers/${item.provider}/test`)} type="button" variant="secondary">
-                <TestTube2 size={16} />
-                Select key
-              </Button>
-            </div>
-          ))}
+      <PageHeader
+        actions={
+          <Link
+            className="inline-flex h-9 items-center rounded-md bg-zinc-950 px-3 text-sm font-medium text-white hover:bg-zinc-800"
+            to="/provider-keys"
+          >
+            Manage Provider Endpoints
+          </Link>
+        }
+        description="Inference readiness, selection order, cooldown, and per-endpoint quota."
+        title="Provider Monitoring"
+      />
+      <Panel title="Provider readiness">
+        <div className="grid gap-3 md:grid-cols-3">
+          {(health.data?.items ?? []).map((item) => {
+            const reason = (item.reasons ?? [])[0];
+            return (
+              <article
+                className="rounded-lg border border-zinc-200 bg-white p-3"
+                data-testid={`provider-health-${item.provider}`}
+                key={item.provider}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <strong className="capitalize">{item.provider}</strong>
+                  <Badge tone={item.status === 'healthy' ? 'good' : item.status === 'missing_key' || item.status === 'degraded' ? 'bad' : 'warn'}>
+                    {item.status}
+                  </Badge>
+                </div>
+                <p className="mt-2 text-sm text-zinc-600">{item.enabled_key_count}/{item.key_count} active</p>
+                {reason ? <p className="mt-1 truncate text-xs text-zinc-500" title={reason}>{reason}</p> : null}
+                <Button
+                  className="mt-3"
+                  onClick={() => postAction.mutate(`/admin/api/providers/${item.provider}/test`)}
+                  type="button"
+                  variant="secondary"
+                >
+                  <TestTube2 size={16} />
+                  Select key
+                </Button>
+              </article>
+            );
+          })}
         </div>
       </Panel>
       <Panel title="Provider Pools">
@@ -192,12 +205,15 @@ function quotaBadgeTone(state: QuotaOperationalState): 'good' | 'warn' | 'bad' {
 function ProviderPoolSection({ provider, sampleQuota }: { provider: string; sampleQuota?: ProviderQuota }) {
   const qc = useQueryClient();
   const [offset, setOffset] = useState(0);
-  // Default: only rows that can still be selected (hide disabled + archived clutter).
-  const [rowView, setRowView] = useState<PoolRowView>('enabled');
+  // Server-side view: default enabled (selection-eligible); Show all for full inventory.
+  const [view, setView] = useState<PoolRowView>('enabled');
   const [refreshAllResult, setRefreshAllResult] = useState<RefreshAllKeyQuotasResult | null>(null);
   const pool = useQuery({
-    queryKey: ['provider-pools', provider, offset],
-    queryFn: () => apiFetch<ProviderPool>(`/admin/api/provider-pools/${provider}?limit=${PAGE_SIZE}&offset=${offset}`),
+    queryKey: ['provider-pools', provider, offset, view],
+    queryFn: () =>
+      apiFetch<ProviderPool>(
+        `/admin/api/provider-pools/${provider}?limit=${PAGE_SIZE}&offset=${offset}&view=${view}`,
+      ),
   });
 
   const invalidatePool = () => {
@@ -243,9 +259,7 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
   const canNext = offset + PAGE_SIZE < total;
   const showSampleQuotaError = summary.refreshed_key_count === 0 && sampleQuota && !sampleQuota.available && sampleQuota.message_redacted;
 
-  const allItems = pool.data.items ?? [];
-  const visibleItems = rowView === 'all' ? allItems : allItems.filter(isEnabledPoolRow);
-  const hiddenCount = allItems.length - visibleItems.length;
+  const items = pool.data.items ?? [];
   const inactiveInSummary = Math.max(0, (summary.key_count ?? 0) - (summary.enabled_key_count ?? 0));
 
   return (
@@ -254,7 +268,7 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
         <h3 className="text-sm font-semibold text-zinc-950">{providerTitle(provider)}</h3>
         <div className="flex flex-wrap gap-2">
           <Button
-            aria-label={`Refresh sample for ${provider}`}
+            aria-label={`Refresh quota sample for ${provider}`}
             disabled={refreshSample.isPending}
             onClick={() => refreshSample.mutate()}
             type="button"
@@ -264,51 +278,61 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
             Refresh sample
           </Button>
           <Button
-            aria-label={`Refresh all ${provider} keys`}
+            aria-label={`Refresh all ${provider} endpoint quotas`}
             disabled={refreshAll.isPending}
             onClick={() => refreshAll.mutate()}
             type="button"
             variant="secondary"
           >
             <RefreshCw className={refreshAll.isPending ? 'animate-spin' : ''} size={14} />
-            Refresh all
+            Refresh all quotas
           </Button>
         </div>
       </div>
 
       {summary ? (
-        <p className="mt-2 text-sm text-zinc-600">
-          {`Enabled ${summary.enabled_key_count ?? 0} · Available ${summary.available_key_count ?? 0} · Cooling ${summary.cooling_key_count ?? 0} · Refreshed ${summary.refreshed_key_count ?? 0}${summary.known_remaining != null ? ` · KnownRemaining ${summary.known_remaining}` : ''}`}
-        </p>
+        <div data-testid={`pool-summary-${provider}`}>
+          <SummaryGrid className="mt-3 lg:grid-cols-5">
+            <SummaryMetric label="Enabled" testId={`pool-summary-${provider}-enabled`} value={summary.enabled_key_count ?? 0} />
+            <SummaryMetric label="Available" testId={`pool-summary-${provider}-available`} tone="good" value={summary.available_key_count ?? 0} />
+            <SummaryMetric label="Cooling" testId={`pool-summary-${provider}-cooling`} tone="warn" value={summary.cooling_key_count ?? 0} />
+            <SummaryMetric label="Refreshed" testId={`pool-summary-${provider}-refreshed`} value={summary.refreshed_key_count ?? 0} />
+            {summary.known_remaining != null ? (
+              <SummaryMetric label="Known remaining" testId={`pool-summary-${provider}-remaining`} value={summary.known_remaining} />
+            ) : null}
+          </SummaryGrid>
+        </div>
       ) : null}
 
       <div className="mt-2 flex flex-wrap items-center gap-2" data-testid={`pool-view-${provider}`}>
         <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">View</span>
         <Button
           aria-label={`Show enabled ${provider} endpoints only`}
-          aria-pressed={rowView === 'enabled'}
-          onClick={() => setRowView('enabled')}
+          aria-pressed={view === 'enabled'}
+          onClick={() => {
+            setView('enabled');
+            setOffset(0);
+          }}
           type="button"
-          variant={rowView === 'enabled' ? 'primary' : 'secondary'}
+          variant={view === 'enabled' ? 'primary' : 'secondary'}
         >
           Enabled only
         </Button>
         <Button
           aria-label={`Show all ${provider} endpoints`}
-          aria-pressed={rowView === 'all'}
-          onClick={() => setRowView('all')}
+          aria-pressed={view === 'all'}
+          onClick={() => {
+            setView('all');
+            setOffset(0);
+          }}
           type="button"
-          variant={rowView === 'all' ? 'primary' : 'secondary'}
+          variant={view === 'all' ? 'primary' : 'secondary'}
         >
           Show all
         </Button>
-        {rowView === 'enabled' && (hiddenCount > 0 || inactiveInSummary > 0) ? (
+        {view === 'enabled' && inactiveInSummary > 0 ? (
           <span className="text-xs text-zinc-500" data-testid={`pool-view-hint-${provider}`}>
-            {hiddenCount > 0
-              ? `Hiding ${hiddenCount} disabled/archived on this page`
-              : inactiveInSummary > 0
-                ? `${inactiveInSummary} disabled/archived in pool (use Show all)`
-                : null}
+            {`${inactiveInSummary} disabled/archived in pool — Show all or manage on Provider Endpoints`}
           </span>
         ) : null}
       </div>
@@ -339,7 +363,7 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
             </tr>
           </thead>
           <tbody>
-            {visibleItems.map((row) => {
+            {items.map((row) => {
               const id = keyID(row.key);
               const quotaState = deriveQuotaOperationalState(row);
               const cooldownReason = valueOf<string>(row.key as Record<string, unknown>, 'CooldownReason', 'cooldown_reason', '');
@@ -426,11 +450,11 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
                 </tr>
               );
             })}
-            {visibleItems.length === 0 ? (
+            {items.length === 0 ? (
               <tr>
                 <td className="py-3 text-sm text-zinc-500" colSpan={7}>
-                  {rowView === 'enabled' && allItems.length > 0
-                    ? 'No enabled endpoints on this page — use Show all or check Provider Endpoints'
+                  {view === 'enabled' && inactiveInSummary > 0
+                    ? 'No enabled endpoints — use Show all or check Provider Endpoints'
                     : 'No keys'}
                 </td>
               </tr>

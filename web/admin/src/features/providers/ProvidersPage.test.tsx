@@ -50,12 +50,18 @@ function emptyPool(provider: string) {
 
 function defaultMock(path: string) {
   if (path === '/admin/api/provider-health') {
-    return { items: [{ provider: 'tavily', status: 'healthy', key_count: 1, enabled_key_count: 1, cooldown_key_count: 0, reasons: [] }] };
+    return {
+      items: [
+        { provider: 'grok', status: 'healthy', key_count: 2, enabled_key_count: 2, cooldown_key_count: 1, reasons: [] },
+        { provider: 'tavily', status: 'degraded', key_count: 3, enabled_key_count: 2, cooldown_key_count: 1, reasons: ['one endpoint disabled'] },
+        { provider: 'firecrawl', status: 'healthy', key_count: 1, enabled_key_count: 1, cooldown_key_count: 0, reasons: [] },
+      ],
+    };
   }
   if (path === '/admin/api/provider-quotas') {
     return { items: [] };
   }
-  if (path === '/admin/api/provider-pools/tavily?limit=25&offset=0') {
+  if (path.startsWith('/admin/api/provider-pools/tavily?') && path.includes('offset=0')) {
     return {
       provider: 'tavily',
       summary: {
@@ -179,6 +185,37 @@ describe('Provider Monitoring page', () => {
     expect(screen.queryByText(/^settings$/i)).not.toBeInTheDocument();
   });
 
+  it('renders one compact health card for each provider', async () => {
+    renderWithClient(<ProvidersPage />);
+    await screen.findByRole('heading', { name: 'Provider Monitoring' });
+    expect(await screen.findByTestId('provider-health-grok')).toHaveTextContent('2/2 active');
+    expect(screen.getByTestId('provider-health-tavily')).toHaveTextContent('2/3 active');
+    expect(screen.getByTestId('provider-health-tavily')).toHaveTextContent('one endpoint disabled');
+    expect(screen.getByTestId('provider-health-firecrawl')).toHaveTextContent('1/1 active');
+  });
+
+  it('renders the full-pool metric strip and omits unknown remaining', async () => {
+    renderWithClient(<ProvidersPage />);
+    await screen.findByText('Tavily Pool');
+    const summary = screen.getByTestId('pool-summary-tavily');
+    expect(within(summary).getByText('Enabled')).toBeInTheDocument();
+    expect(within(summary).getByTestId('pool-summary-tavily-enabled')).toHaveTextContent('3');
+    expect(within(summary).getByTestId('pool-summary-tavily-available')).toHaveTextContent('2');
+    expect(within(summary).getByTestId('pool-summary-tavily-cooling')).toHaveTextContent('1');
+    expect(within(summary).getByTestId('pool-summary-tavily-refreshed')).toHaveTextContent('2');
+    expect(within(summary).getByTestId('pool-summary-tavily-remaining')).toHaveTextContent('427');
+
+    const grokSummary = screen.getByTestId('pool-summary-grok');
+    expect(within(grokSummary).queryByText('Known remaining')).not.toBeInTheDocument();
+  });
+
+  it('uses explicit quota language for pool actions', async () => {
+    renderWithClient(<ProvidersPage />);
+    await screen.findByText('Tavily Pool');
+    expect(screen.getByRole('button', { name: /refresh quota sample for tavily/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /refresh all tavily endpoint quotas/i })).toBeInTheDocument();
+  });
+
   it('shows inference, pool order, and quota as separate columns', async () => {
     renderWithClient(<ProvidersPage />);
     await screen.findByText('Tavily Pool');
@@ -195,7 +232,7 @@ describe('Provider Monitoring page', () => {
   it('shows disabled and not configured quota states', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
       if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
-      if (path === '/admin/api/provider-pools/grok?limit=25&offset=0') {
+      if (path.startsWith('/admin/api/provider-pools/grok?') && path.includes('offset=0')) {
         return {
           provider: 'grok',
           summary: {
@@ -268,10 +305,56 @@ describe('Provider Monitoring page', () => {
     expect(within(disabledRow).getAllByText(/^disabled$/i).length).toBeGreaterThan(0);
   });
 
-  it('defaults pool view to enabled endpoints and can show disabled/archived via Show all', async () => {
+  it('defaults pool fetch to view=enabled and refetches view=all on Show all', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
       if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
-      if (path === '/admin/api/provider-pools/tavily?limit=25&offset=0') {
+      if (path.startsWith('/admin/api/provider-pools/tavily?')) {
+        const viewAll = path.includes('view=all');
+        const items = [
+          {
+            status: 'available' as const,
+            key: { id: 1, provider: 'tavily', name: 'tavily-live', enabled: true, quota_mode: 'endpoint_credentials' as const },
+            quota: {
+              provider_key_id: 1,
+              provider: 'tavily',
+              available: true,
+              source: 'tavily_usage',
+              remaining: 10,
+              limit_value: 100,
+              checked_at: '2026-07-11T00:00:00Z',
+            },
+          },
+          {
+            status: 'cooling' as const,
+            key: {
+              id: 2,
+              provider: 'tavily',
+              name: 'tavily-cool',
+              enabled: true,
+              cooldown_reason: 'rate_limited',
+              quota_mode: 'endpoint_credentials' as const,
+            },
+          },
+        ];
+        if (viewAll) {
+          items.push(
+            {
+              status: 'disabled' as const,
+              key: { id: 3, provider: 'tavily', name: 'tavily-off', enabled: false, quota_mode: 'endpoint_credentials' as const },
+            } as any,
+            {
+              status: 'archived' as const,
+              key: {
+                id: 4,
+                provider: 'tavily',
+                name: 'tavily-old',
+                enabled: false,
+                archived_at: '2026-07-01T00:00:00Z',
+                quota_mode: 'endpoint_credentials' as const,
+              },
+            } as any,
+          );
+        }
         return {
           provider: 'tavily',
           summary: {
@@ -282,48 +365,8 @@ describe('Provider Monitoring page', () => {
             cooling_key_count: 1,
             refreshed_key_count: 2,
           },
-          items: [
-            {
-              status: 'available',
-              key: { id: 1, provider: 'tavily', name: 'tavily-live', enabled: true, quota_mode: 'endpoint_credentials' },
-              quota: {
-                provider_key_id: 1,
-                provider: 'tavily',
-                available: true,
-                source: 'tavily_usage',
-                remaining: 10,
-                limit_value: 100,
-                checked_at: '2026-07-11T00:00:00Z',
-              },
-            },
-            {
-              status: 'cooling',
-              key: {
-                id: 2,
-                provider: 'tavily',
-                name: 'tavily-cool',
-                enabled: true,
-                cooldown_reason: 'rate_limited',
-                quota_mode: 'endpoint_credentials',
-              },
-            },
-            {
-              status: 'disabled',
-              key: { id: 3, provider: 'tavily', name: 'tavily-off', enabled: false, quota_mode: 'endpoint_credentials' },
-            },
-            {
-              status: 'archived',
-              key: {
-                id: 4,
-                provider: 'tavily',
-                name: 'tavily-old',
-                enabled: false,
-                archived_at: '2026-07-01T00:00:00Z',
-                quota_mode: 'endpoint_credentials',
-              },
-            },
-          ],
-          page: { limit: 25, offset: 0, total: 4 },
+          items: viewAll ? items : items.filter((r) => r.status === 'available' || r.status === 'cooling'),
+          page: { limit: 25, offset: 0, total: viewAll ? 4 : 2 },
         };
       }
       if (path.startsWith('/admin/api/provider-pools/')) {
@@ -335,38 +378,38 @@ describe('Provider Monitoring page', () => {
     renderWithClient(<ProvidersPage />);
     await screen.findByText('Tavily Pool');
 
-    // Default: enabled only — live + cooling stay; disabled/archived hidden.
+    await waitFor(() => {
+      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith(
+        expect.stringMatching(/\/admin\/api\/provider-pools\/tavily\?.*view=enabled/),
+      );
+    });
+
     expect(screen.getByText('tavily-live')).toBeInTheDocument();
     expect(screen.getByText('tavily-cool')).toBeInTheDocument();
     expect(screen.queryByText('tavily-off')).not.toBeInTheDocument();
-    expect(screen.queryByText('tavily-old')).not.toBeInTheDocument();
-    expect(screen.getByTestId('pool-view-hint-tavily')).toHaveTextContent(/hiding 2 disabled\/archived/i);
+    expect(screen.getByTestId('pool-view-hint-tavily')).toHaveTextContent(/2 disabled\/archived in pool/i);
 
-    const enabledOnly = screen.getByRole('button', { name: /show enabled tavily endpoints only/i });
-    const showAll = screen.getByRole('button', { name: /show all tavily endpoints/i });
-    expect(enabledOnly).toHaveAttribute('aria-pressed', 'true');
-    expect(showAll).toHaveAttribute('aria-pressed', 'false');
-
-    fireEvent.click(showAll);
+    fireEvent.click(screen.getByRole('button', { name: /show all tavily endpoints/i }));
+    await waitFor(() => {
+      expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith(
+        expect.stringMatching(/\/admin\/api\/provider-pools\/tavily\?.*view=all/),
+      );
+    });
+    // Toggle resets pagination to first page (offset=0).
+    expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith(
+      expect.stringMatching(/\/admin\/api\/provider-pools\/tavily\?.*offset=0.*view=all|view=all.*offset=0/),
+    );
     expect(await screen.findByText('tavily-off')).toBeInTheDocument();
     expect(screen.getByText('tavily-old')).toBeInTheDocument();
-    expect(showAll).toHaveAttribute('aria-pressed', 'true');
-    expect(enabledOnly).toHaveAttribute('aria-pressed', 'false');
     expect(screen.queryByTestId('pool-view-hint-tavily')).not.toBeInTheDocument();
-
-    fireEvent.click(enabledOnly);
-    await waitFor(() => {
-      expect(screen.queryByText('tavily-off')).not.toBeInTheDocument();
-    });
-    expect(screen.queryByText('tavily-old')).not.toBeInTheDocument();
   });
 
   it('keeps provider tests, quota refresh, promote, demote, and reset controls', async () => {
     renderWithClient(<ProvidersPage />);
     await screen.findByText('Tavily Pool');
-    expect(screen.getByRole('button', { name: /select key/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /refresh all tavily keys/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /refresh sample for tavily/i })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /select key/i }).length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: /refresh all tavily endpoint quotas/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /refresh quota sample for tavily/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /refresh key 6/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /promote key 5/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /demote key 6/i })).toBeInTheDocument();
@@ -390,7 +433,7 @@ describe('Provider Monitoring page', () => {
   it('reports refreshed failed and skipped-disabled refresh-all counts', async () => {
     renderWithClient(<ProvidersPage />);
     await screen.findByText('Tavily Pool');
-    fireEvent.click(screen.getByRole('button', { name: /refresh all tavily keys/i }));
+    fireEvent.click(screen.getByRole('button', { name: /refresh all tavily endpoint quotas/i }));
     await waitFor(() => {
       expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-key-quotas/tavily/refresh-all', { method: 'POST' });
     });
@@ -402,7 +445,7 @@ describe('Provider Monitoring page', () => {
   it('disables refresh-one when quota is disabled', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
       if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
-      if (path === '/admin/api/provider-pools/grok?limit=25&offset=0') {
+      if (path.startsWith('/admin/api/provider-pools/grok?') && path.includes('offset=0')) {
         return {
           provider: 'grok',
           summary: {
@@ -442,7 +485,7 @@ describe('Provider Monitoring page', () => {
   it('shows provider pool summary and paginated key rows', async () => {
     renderWithClient(<ProvidersPage />);
     expect(await screen.findByText('Tavily Pool')).toBeInTheDocument();
-    expect(screen.getByText(/Enabled 3/)).toBeInTheDocument();
+    expect(screen.getByTestId('pool-summary-tavily-enabled')).toHaveTextContent('3');
     expect(screen.getByText('tavily-1')).toBeInTheDocument();
     expect(screen.getByText('plan_limit_exceeded')).toBeInTheDocument();
     expect(screen.getByText('427 / 1000 remaining')).toBeInTheDocument();
@@ -465,7 +508,7 @@ describe('Provider Monitoring page', () => {
           ],
         };
       }
-      if (path === '/admin/api/provider-pools/grok?limit=25&offset=0') {
+      if (path.startsWith('/admin/api/provider-pools/grok?') && path.includes('offset=0')) {
         return {
           provider: 'grok',
           summary: {
@@ -511,7 +554,7 @@ describe('Provider Monitoring page', () => {
 
     renderWithClient(<ProvidersPage />);
     expect(await screen.findByText('Grok Pool')).toBeInTheDocument();
-    expect(screen.getByText(/KnownRemaining 310018/)).toBeInTheDocument();
+    expect(screen.getByTestId('pool-summary-grok-remaining')).toHaveTextContent('310018');
     expect(screen.getByText('310018 / 364150 remaining')).toBeInTheDocument();
     expect(screen.queryByText('upstream quota not available')).not.toBeInTheDocument();
   });
@@ -519,7 +562,7 @@ describe('Provider Monitoring page', () => {
   it('shows usage not "not refreshed" when quota row exists but remaining is null', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
       if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
-      if (path === '/admin/api/provider-pools/tavily?limit=25&offset=0') {
+      if (path.startsWith('/admin/api/provider-pools/tavily?') && path.includes('offset=0')) {
         return {
           provider: 'tavily',
           summary: {
@@ -568,7 +611,7 @@ describe('Provider Monitoring page', () => {
   it('reads cooldown reason from PascalCase Go JSON', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
       if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
-      if (path === '/admin/api/provider-pools/tavily?limit=25&offset=0') {
+      if (path.startsWith('/admin/api/provider-pools/tavily?') && path.includes('offset=0')) {
         return {
           provider: 'tavily',
           summary: {
@@ -610,7 +653,7 @@ describe('Provider Monitoring page', () => {
   it('refreshes all keys for one provider', async () => {
     renderWithClient(<ProvidersPage />);
     await screen.findByText('Tavily Pool');
-    fireEvent.click(screen.getByRole('button', { name: /refresh all tavily keys/i }));
+    fireEvent.click(screen.getByRole('button', { name: /refresh all tavily endpoint quotas/i }));
     await waitFor(() => {
       expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/provider-key-quotas/tavily/refresh-all', { method: 'POST' });
     });
