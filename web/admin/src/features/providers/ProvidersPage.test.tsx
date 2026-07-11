@@ -303,7 +303,7 @@ describe('Provider Monitoring page', () => {
     expect(within(disabledRow).getAllByText(/^disabled$/i).length).toBeGreaterThan(0);
   });
 
-  it('defaults pool fetch to view=enabled and refetches view=all on Show all', async () => {
+  it('defaults to Active pool and refetches All endpoints from offset zero', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
       if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
       if (path.startsWith('/admin/api/provider-pools/tavily?')) {
@@ -382,11 +382,26 @@ describe('Provider Monitoring page', () => {
       );
     });
 
+    const activeChip = screen.getByRole('button', { name: /show active tavily pool/i });
+    const allChip = screen.getByRole('button', { name: /show all tavily endpoints/i });
+    expect(activeChip).toHaveAttribute('aria-pressed', 'true');
+    expect(activeChip).toHaveTextContent('Active pool');
+    expect(activeChip).toHaveTextContent('2');
+    expect(allChip).toHaveAttribute('aria-pressed', 'false');
+    expect(allChip).toHaveTextContent('All endpoints');
+    expect(allChip).toHaveTextContent('4');
+    expect(screen.getByTestId('pool-view-hint-tavily')).toHaveTextContent(
+      'Active pool includes available and cooling endpoints. Disabled and archived endpoints appear under All endpoints.',
+    );
+
     expect(screen.getByText('tavily-cool')).toBeInTheDocument();
     expect(screen.queryByText('tavily-off')).not.toBeInTheDocument();
-    expect(screen.getByTestId('pool-view-hint-tavily')).toHaveTextContent(/2 disabled\/archived in pool/i);
 
-    fireEvent.click(screen.getByRole('button', { name: /show all tavily endpoints/i }));
+    fireEvent.click(allChip);
+
+    await waitFor(() => expect(allChip).toHaveAttribute('aria-pressed', 'true'));
+    expect(screen.queryByTestId('pool-view-hint-tavily')).not.toBeInTheDocument();
+
     await waitFor(() => {
       expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith(
         expect.stringMatching(/\/admin\/api\/provider-pools\/tavily\?.*view=all/),
@@ -398,7 +413,6 @@ describe('Provider Monitoring page', () => {
     );
     expect(await screen.findByText('tavily-off')).toBeInTheDocument();
     expect(screen.getByText('tavily-old')).toBeInTheDocument();
-    expect(screen.queryByTestId('pool-view-hint-tavily')).not.toBeInTheDocument();
   });
 
   it('keeps pool title and summary mounted while view refetches', async () => {
@@ -466,15 +480,19 @@ describe('Provider Monitoring page', () => {
     expect(screen.getByText('Tavily Pool')).toBeInTheDocument();
   });
 
-  it('keeps provider tests, quota refresh, promote, demote, and reset controls', async () => {
+  it('keeps quota refresh visible and exposes endpoint-specific secondary selection actions', async () => {
     renderWithClient(<ProvidersPage />);
-    expect(await screen.findByRole('button', { name: /refresh key 6/i })).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: /select key/i }).length).toBeGreaterThan(0);
-    expect(screen.getByRole('button', { name: /refresh all tavily endpoint quotas/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /refresh quota sample for tavily/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /promote key 5/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /demote key 6/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /reset cool and order for key 6/i })).toBeInTheDocument();
+    await screen.findByText('tavily-2');
+
+    expect(screen.getByRole('button', { name: /refresh quota for tavily-2/i })).toBeInTheDocument();
+
+    const more = screen.getByText('tavily-2').closest('tr')!;
+    const summary = within(more).getByText(/more actions/i);
+    fireEvent.click(summary);
+
+    expect(within(more).getByRole('button', { name: /promote tavily-2 in pool/i })).toBeInTheDocument();
+    expect(within(more).getByRole('button', { name: /demote tavily-2 in pool/i })).toBeInTheDocument();
+    expect(within(more).getByRole('button', { name: /reset selection state for tavily-2/i })).toBeInTheDocument();
   });
 
   it('does not render URL, key, enable, archive, restore, delete, or create controls', async () => {
@@ -540,7 +558,7 @@ describe('Provider Monitoring page', () => {
     });
     renderWithClient(<ProvidersPage />);
     await screen.findByText('grok-off');
-    expect(screen.getByRole('button', { name: /refresh key 10/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /refresh quota for grok-off/i })).toBeDisabled();
   });
 
   it('shows provider pool summary and paginated key rows', async () => {

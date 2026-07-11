@@ -15,7 +15,7 @@ import type {
   QuotaOperationalState,
   RefreshAllKeyQuotasResult,
 } from '../../api/types';
-import { Badge, Button, PageHeader, Panel, SummaryGrid, SummaryMetric, valueOf } from '../../components/ui';
+import { Badge, Button, FilterChip, PageHeader, Panel, SummaryGrid, SummaryMetric, valueOf } from '../../components/ui';
 
 const POOL_PROVIDERS = ['grok', 'tavily', 'firecrawl'] as const;
 const PAGE_SIZE = 25;
@@ -217,7 +217,7 @@ function emptySummary(provider: string) {
 function ProviderPoolSection({ provider, sampleQuota }: { provider: string; sampleQuota?: ProviderQuota }) {
   const qc = useQueryClient();
   const [offset, setOffset] = useState(0);
-  // Server-side view: default enabled (selection-eligible); Show all for full inventory.
+  // Server-side view: default enabled (selection-eligible); All endpoints for full inventory.
   const [view, setView] = useState<PoolRowView>('enabled');
   const [refreshAllResult, setRefreshAllResult] = useState<RefreshAllKeyQuotasResult | null>(null);
   const pool = useQuery({
@@ -314,38 +314,38 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
         </SummaryGrid>
       </div>
 
-      <div className="mt-2 flex flex-wrap items-center gap-2" data-testid={`pool-view-${provider}`}>
-        <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">View</span>
-        <Button
-          aria-label={`Show enabled ${provider} endpoints only`}
-          aria-pressed={view === 'enabled'}
-          onClick={() => {
-            setView('enabled');
-            setOffset(0);
-          }}
-          type="button"
-          variant={view === 'enabled' ? 'primary' : 'secondary'}
-        >
-          Enabled only
-        </Button>
-        <Button
-          aria-label={`Show all ${provider} endpoints`}
-          aria-pressed={view === 'all'}
-          onClick={() => {
-            setView('all');
-            setOffset(0);
-          }}
-          type="button"
-          variant={view === 'all' ? 'primary' : 'secondary'}
-        >
-          Show all
-        </Button>
-        {view === 'enabled' && inactiveInSummary > 0 ? (
-          <span className="text-xs text-zinc-500" data-testid={`pool-view-hint-${provider}`}>
-            {`${inactiveInSummary} disabled/archived in pool — Show all or manage on Provider Endpoints`}
-          </span>
-        ) : null}
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2" data-testid={`pool-view-${provider}`}>
+        <div className="flex flex-wrap items-center gap-2">
+          <FilterChip
+            active={view === 'enabled'}
+            ariaLabel={`Show active ${provider} pool`}
+            count={summary.enabled_key_count ?? 0}
+            label="Active pool"
+            onClick={() => {
+              setView('enabled');
+              setOffset(0);
+            }}
+          />
+          <FilterChip
+            active={view === 'all'}
+            ariaLabel={`Show all ${provider} endpoints`}
+            count={summary.key_count ?? 0}
+            label="All endpoints"
+            onClick={() => {
+              setView('all');
+              setOffset(0);
+            }}
+          />
+        </div>
+        <span className="text-xs tabular-nums text-zinc-500">
+          {total > 0 ? `${offset + 1}–${Math.min(offset + PAGE_SIZE, total)} of ${total}` : '0 of 0'}
+        </span>
       </div>
+      {view === 'enabled' && inactiveInSummary > 0 ? (
+        <p className="mt-2 text-xs text-zinc-500" data-testid={`pool-view-hint-${provider}`}>
+          Active pool includes available and cooling endpoints. Disabled and archived endpoints appear under All endpoints.
+        </p>
+      ) : null}
 
       {refreshAllResult ? (
         <p className="mt-1 text-xs text-zinc-600" data-testid={`refresh-all-result-${provider}`}>
@@ -383,6 +383,7 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
             {!tableLoading
               ? items.map((row) => {
                   const id = keyID(row.key);
+                  const name = keyName(row.key);
                   const quotaState = deriveQuotaOperationalState(row);
                   const cooldownReason = valueOf<string>(row.key as Record<string, unknown>, 'CooldownReason', 'cooldown_reason', '');
                   const cooldownUntil = valueOf<string | undefined>(row.key as Record<string, unknown>, 'CooldownUntil', 'cooldown_until', undefined);
@@ -390,8 +391,8 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
                   const demoted = Boolean(lastFailedAt);
                   const refreshDisabled = quotaState === 'disabled' || refreshOne.isPending || !id;
                   return (
-                    <tr className="border-b border-zinc-100" key={id || keyName(row.key)}>
-                      <td className="py-2 pr-3 font-medium text-zinc-900">{keyName(row.key)}</td>
+                    <tr className="border-b border-zinc-100" key={id || name}>
+                      <td className="py-2 pr-3 font-medium text-zinc-900">{name}</td>
                       <td className="py-2 pr-3">
                         <Badge tone={statusTone(row.status)}>{row.status}</Badge>
                       </td>
@@ -426,7 +427,7 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
                       <td className="py-2 text-right">
                         <div className="flex flex-wrap justify-end gap-1">
                           <Button
-                            aria-label={`Refresh key ${id}`}
+                            aria-label={`Refresh quota for ${name}`}
                             disabled={refreshDisabled}
                             onClick={() => refreshOne.mutate(id)}
                             title={quotaState === 'disabled' ? 'Quota refresh disabled for this endpoint' : undefined}
@@ -434,35 +435,45 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
                             variant="secondary"
                           >
                             <RefreshCw className={refreshOne.isPending && refreshOne.variables === id ? 'animate-spin' : ''} size={14} />
-                            Refresh
+                            Refresh quota
                           </Button>
-                          <Button
-                            aria-label={`Reset cool and order for key ${id}`}
-                            disabled={keyAction.isPending || !id}
-                            onClick={() => keyAction.mutate({ id, path: '/reset-cooldown' })}
-                            type="button"
-                            variant="secondary"
-                          >
-                            Reset
-                          </Button>
-                          <Button
-                            aria-label={`Promote key ${id}`}
-                            disabled={keyAction.isPending || !id || !demoted}
-                            onClick={() => keyAction.mutate({ id, path: '/reset-selection' })}
-                            type="button"
-                            variant="secondary"
-                          >
-                            Promote
-                          </Button>
-                          <Button
-                            aria-label={`Demote key ${id}`}
-                            disabled={keyAction.isPending || !id}
-                            onClick={() => keyAction.mutate({ id, path: '/demote' })}
-                            type="button"
-                            variant="secondary"
-                          >
-                            Demote
-                          </Button>
+                          <details className="relative text-left">
+                            <summary
+                              aria-label={`More actions for ${name}`}
+                              className="cursor-pointer list-none rounded-md border border-zinc-300 bg-white px-2.5 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-100"
+                            >
+                              More actions
+                            </summary>
+                            <div className="absolute bottom-full right-0 z-20 mb-1 grid min-w-48 gap-1 rounded-md border border-zinc-200 bg-white p-1 shadow-lg">
+                              <button
+                                aria-label={`Reset selection state for ${name}`}
+                                className="rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-50"
+                                disabled={keyAction.isPending || !id}
+                                onClick={() => keyAction.mutate({ id, path: '/reset-cooldown' })}
+                                type="button"
+                              >
+                                Reset selection state
+                              </button>
+                              <button
+                                aria-label={`Promote ${name} in pool`}
+                                className="rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-50"
+                                disabled={keyAction.isPending || !id || !demoted}
+                                onClick={() => keyAction.mutate({ id, path: '/reset-selection' })}
+                                type="button"
+                              >
+                                Promote in pool
+                              </button>
+                              <button
+                                aria-label={`Demote ${name} in pool`}
+                                className="rounded px-2 py-1.5 text-left text-xs hover:bg-zinc-100 disabled:opacity-50"
+                                disabled={keyAction.isPending || !id}
+                                onClick={() => keyAction.mutate({ id, path: '/demote' })}
+                                type="button"
+                              >
+                                Demote in pool
+                              </button>
+                            </div>
+                          </details>
                         </div>
                       </td>
                     </tr>
@@ -473,8 +484,8 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
               <tr>
                 <td className="py-3 text-sm text-zinc-500" colSpan={7}>
                   {view === 'enabled' && inactiveInSummary > 0
-                    ? 'No enabled endpoints — use Show all or check Provider Endpoints'
-                    : 'No keys'}
+                    ? 'No active endpoints — use All endpoints or configure Provider Endpoints'
+                    : 'No endpoints'}
                 </td>
               </tr>
             ) : null}
@@ -491,9 +502,6 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
           Next
           <ChevronRight size={14} />
         </Button>
-        <span className="text-xs text-zinc-500">
-          {total > 0 ? `${offset + 1}–${Math.min(offset + PAGE_SIZE, total)} of ${total}` : '0 of 0'}
-        </span>
       </div>
     </div>
   );
