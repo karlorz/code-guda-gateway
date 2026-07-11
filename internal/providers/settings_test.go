@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"code-guda-gateway/internal/providers"
 	"code-guda-gateway/internal/store"
@@ -126,5 +127,74 @@ func TestSetBaseURL_RejectsInvalidURLs(t *testing.T) {
 	}
 	if got != "https://custom.example/v1" {
 		t.Fatalf("got %q, want normalized URL", got)
+	}
+}
+
+func TestDisplayTimezone_DefaultIsHost(t *testing.T) {
+	t.Parallel()
+	st := openTestDB(t)
+	svc := providers.NewSettingsRepo(st.DB())
+
+	got, err := svc.GetDisplayTimezone()
+	if err != nil {
+		t.Fatalf("GetDisplayTimezone: %v", err)
+	}
+	if got.Source != "host" {
+		t.Fatalf("source = %q, want host", got.Source)
+	}
+	if got.Timezone == "" {
+		t.Fatal("timezone empty")
+	}
+	// Effective zone must load.
+	if _, err := time.LoadLocation(got.Timezone); err != nil {
+		// time.Local.String() can be "Local" on some systems — accept if LoadLocation fails but equal to time.Local.String()
+		if got.Timezone != time.Local.String() {
+			t.Fatalf("LoadLocation(%q): %v", got.Timezone, err)
+		}
+	}
+}
+
+func TestDisplayTimezone_SetGetClear(t *testing.T) {
+	t.Parallel()
+	st := openTestDB(t)
+	svc := providers.NewSettingsRepo(st.DB())
+
+	if err := svc.SetDisplayTimezone("Asia/Seoul"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	got, err := svc.GetDisplayTimezone()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Timezone != "Asia/Seoul" || got.Source != "stored" {
+		t.Fatalf("got %#v", got)
+	}
+
+	if err := svc.SetDisplayTimezone(""); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	got, err = svc.GetDisplayTimezone()
+	if err != nil {
+		t.Fatalf("Get after clear: %v", err)
+	}
+	if got.Source != "host" {
+		t.Fatalf("source after clear = %q", got.Source)
+	}
+}
+
+func TestDisplayTimezone_RejectsInvalid(t *testing.T) {
+	t.Parallel()
+	st := openTestDB(t)
+	svc := providers.NewSettingsRepo(st.DB())
+
+	if err := svc.SetDisplayTimezone("Not/A_Zone"); err == nil {
+		t.Fatal("expected error for invalid zone")
+	}
+	got, err := svc.GetDisplayTimezone()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Source != "host" {
+		t.Fatalf("invalid set mutated storage: %#v", got)
 	}
 }
