@@ -18,6 +18,9 @@ describe('DebugAttemptsPage', () => {
   beforeEach(() => {
     vi.mocked(client.apiFetch).mockReset();
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/admin/api/settings/display-timezone') {
+        return { timezone: 'UTC', source: 'host' };
+      }
       if (path === '/admin/api/settings/proxy-debug-attempts') return { enabled: true };
       if (path === '/admin/api/proxy-attempts?limit=50&offset=0') {
         return {
