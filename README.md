@@ -585,6 +585,15 @@ If rows show **used N** but the pool has no Known remaining, refresh after a
 binary that includes the Tavily fallback, or the upstream response has no
 usable limit. Vite HMR does not recompile Go or rewrite the quota cache.
 
+### Admin display timezone
+
+Admin Settings (`/admin/settings`) includes a **display timezone** used only when
+rendering audit (and other admin log) timestamps in the UI.
+
+- Storage remains UTC RFC3339Nano in SQLite.
+- Default when unset: host process timezone (`time.Local`).
+- API: `GET|PATCH /admin/api/settings/display-timezone`
+  (`timezone` IANA name; `use_host: true` clears stored value).
 
 ### Legacy global Grok quota (`v0.4.x` compatibility)
 
