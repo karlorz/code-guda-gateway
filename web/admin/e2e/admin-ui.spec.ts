@@ -12,7 +12,8 @@ test('admin login and key workflows are reachable when token is provided', async
   const token = process.env.GUDA_ADMIN_E2E_TOKEN;
   test.skip(!token, 'set GUDA_ADMIN_E2E_TOKEN to run authenticated admin smoke');
   await page.goto('/admin');
-  await page.getByLabel(/admin token/i).fill(token!);
+  await page.getByLabel(/^username$/i).fill('admin');
+  await page.getByLabel(/^password$/i).fill(token!);
   await page.getByRole('button', { name: /log in/i }).click();
   await expect(page.getByText(/Overview|Provider health|Gateway keys/i)).toBeVisible();
   await page.getByRole('link', { name: /Gateway Keys/i }).click();

@@ -214,6 +214,10 @@ func TestAdminLogin_POSTInvalidTokenReturns401(t *testing.T) {
 	if rec.Header().Get("Set-Cookie") != "" {
 		t.Fatal("unexpected cookie on failed login")
 	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"code":"invalid_credentials"`) || !strings.Contains(body, "Invalid admin token") {
+		t.Fatalf("expected structured invalid-credentials error, got %s", body)
+	}
 }
 
 func TestAdminDashboard_RequiresSession(t *testing.T) {

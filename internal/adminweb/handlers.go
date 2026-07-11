@@ -332,7 +332,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	res, err := h.deps.Auth.Login(token)
 	if err != nil {
 		if errors.Is(err, adminauth.ErrInvalidToken) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeAPIError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid admin token. Check the password and try again.")
 			return
 		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
