@@ -23,7 +23,16 @@ Public routes (require `Authorization: Bearer <gateway-key>`):
 - `POST /firecrawl/scrape`
 - `GET /healthz` (no auth)
 
-Admin UI: `http://127.0.0.1:8080/admin` (login with the admin token from CLI).
+Admin UI:
+
+| Environment | URL | Notes |
+|---|---|---|
+| **Local frontend work (HMR)** | `http://127.0.0.1:5173/admin/` | `./scripts/dev-up.sh --ui` — Vite + `/admin/api` proxy |
+| Local embedded snapshot | `http://127.0.0.1:8080/admin/` | Last `./scripts/build.sh` embed; **no** hot reload |
+| Production (kr01) | `https://search.karldigi.dev/admin` | Embedded SPA in the Go binary |
+
+Login with the admin token from CLI / `~/.secrets/guda-gateway.env` (`GUDA_ADMIN_TOKEN`).
+
 
 ## Bootstrap configuration (process only)
 
@@ -229,14 +238,24 @@ health-checks `http://127.0.0.1:8080/healthz`. Logs:
 `/tmp/guda-gateway-dev.log`, `/tmp/guda-gateway-vite.log`.
 
 **Admin UI during frontend work:** open **`http://127.0.0.1:5173/admin/`**
-(from `--ui`). Vite HMR serves React sources and proxies `/admin/api/*` to the
-gateway so session cookies (`Path=/admin`) and CSRF stay on the Vite origin.
-`http://127.0.0.1:8080/admin/` is only the last **embedded** SPA snapshot from
-`./scripts/build.sh` — it does not hot-reload.
+(from `--ui`). That is the correct local UI with Vite HMR. Vite proxies
+`/admin/api/*` to the gateway so session cookies (`Path=/admin`) and CSRF stay
+on the Vite origin.
 
-`--rebuild` only recompiles the Go binary from the already-embedded admin SPA.
-After changing React for a release/embed check, run `./scripts/build.sh`, then
-restart the gateway (not required for day-to-day UI work with `--ui`).
+| URL | Use |
+|---|---|
+| `http://127.0.0.1:5173/admin/` | Day-to-day admin UI + React HMR |
+| `http://127.0.0.1:5173/admin/providers` | Provider Monitoring (pool + quota) |
+| `http://127.0.0.1:8080/admin/` | Embedded SPA snapshot only (no HMR) |
+| `http://127.0.0.1:8080/healthz` | Gateway health |
+
+`--rebuild` recompiles the **Go** binary (needed for backend/quota parser
+changes). It does **not** refresh React sources on `:5173` (Vite already does)
+and does **not** refresh the embedded `:8080/admin` SPA (that needs
+`./scripts/build.sh`). After Go quota changes, also click **Refresh all quotas**
+(or `POST …/provider-key-quotas/{provider}/refresh-all`) so SQLite cache rows
+pick up new remaining math.
+
 
 
 There are two local dev path setups. **Do not mix them** - the SQLite DB and
@@ -545,6 +564,20 @@ Quota operational vocabulary on monitoring: `disabled`, `not_configured`,
 `not_refreshed`, `available` / `ok`, or `refresh_failed` / `unavailable`.
 Refresh-all skips disabled quota sidecars and reports refreshed, failed, and
 skipped-disabled counts.
+
+**Pool “Known remaining”** sums `quota.remaining` for **available** endpoints
+only (not cooling/disabled/archived). Provider parsers differ:
+
+| Provider | Remaining source |
+|---|---|
+| Tavily | Derived: prefer `key.limit − key.usage`; if `key.limit` is missing (common), fall back to `account.plan_limit − account.plan_usage` (`details.remaining_basis` = `key` or `account_plan`). No direct remaining field. |
+| Firecrawl | Direct `remainingCredits` (with plan/one-time edge cases) |
+| Grok (Grok2API admin) | Sum of token mode `remaining` |
+
+If rows show **used N** but the pool has no Known remaining, refresh after a
+binary that includes the Tavily fallback, or the upstream response has no
+usable limit. Vite HMR does not recompile Go or rewrite the quota cache.
+
 
 ### Legacy global Grok quota (`v0.4.x` compatibility)
 
