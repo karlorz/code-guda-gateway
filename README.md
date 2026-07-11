@@ -213,28 +213,31 @@ credentials and avoid fragile `.git` ownership or macOS metadata drift.
 ### One-command dev boot
 
 ```bash
-./scripts/dev-up.sh            # start if not already healthy
+./scripts/dev-up.sh            # start API if not already healthy
+./scripts/dev-up.sh --ui       # API + Vite admin HMR (preferred for web/admin work)
+./scripts/dev-up.sh --ui-only  # Vite only (API must already be healthy)
 ./scripts/dev-up.sh --status
-./scripts/dev-up.sh --rebuild  # rebuild binary then start
-./scripts/dev-up.sh --stop
-./scripts/dev-up.sh --fg       # foreground
+./scripts/dev-up.sh --rebuild  # rebuild Go binary then start
+./scripts/dev-up.sh --stop     # stop gateway and Vite started by dev-up
+./scripts/dev-up.sh --fg       # gateway foreground (no Vite)
 ```
 
 Loads `~/.secrets/guda-gateway.env` when present, uses the persistent pair
 `~/.local/share/guda-gateway/{gateway.db,master.key}`, sets
 `GUDA_ADMIN_COOKIE_SECURE=false`, builds `./guda-gateway` if missing, and
-health-checks `http://127.0.0.1:8080/healthz`. Log: `/tmp/guda-gateway-dev.log`.
+health-checks `http://127.0.0.1:8080/healthz`. Logs:
+`/tmp/guda-gateway-dev.log`, `/tmp/guda-gateway-vite.log`.
+
+**Admin UI during frontend work:** open **`http://127.0.0.1:5173/admin/`**
+(from `--ui`). Vite HMR serves React sources and proxies `/admin/api/*` to the
+gateway so session cookies (`Path=/admin`) and CSRF stay on the Vite origin.
+`http://127.0.0.1:8080/admin/` is only the last **embedded** SPA snapshot from
+`./scripts/build.sh` — it does not hot-reload.
 
 `--rebuild` only recompiles the Go binary from the already-embedded admin SPA.
-After changing React under `web/admin/`, run `./scripts/build.sh` (embeds the
-Vite build into `internal/adminweb/assets/dist` then builds both binaries), then
-`./scripts/dev-up.sh` (or hard-refresh the browser if the process was already
-replaced). For live frontend work, prefer Vite:
+After changing React for a release/embed check, run `./scripts/build.sh`, then
+restart the gateway (not required for day-to-day UI work with `--ui`).
 
-```bash
-./scripts/dev-up.sh
-bun run --cwd web/admin dev
-```
 
 There are two local dev path setups. **Do not mix them** - the SQLite DB and
 master key file are a pair; if you seed keys with one master key and run the
@@ -316,13 +319,21 @@ It creates canonical endpoint pairs with quota sidecars:
 Keys stay on stdin / `--quota-key-file` only. Keep `GUDA_ADMIN_TOKEN` and
 `GUDA_API_KEY` in the secrets file for daily use (`token … --save-env`).
 
-The React admin UI lives in `web/admin`. During local frontend work, run the Go
-server and Vite dev server separately:
+The React admin UI lives in `web/admin`. For local frontend work with HMR:
+
+```bash
+./scripts/dev-up.sh --ui
+# → http://127.0.0.1:5173/admin/  (Vite + API proxy)
+# → http://127.0.0.1:8080/healthz (gateway)
+```
+
+Equivalent manual split (same as `--ui`):
 
 ```bash
 ./scripts/dev-up.sh
 bun run --cwd web/admin dev
 ```
+
 
 For release builds, keep production as one Go runtime by embedding the Vite
 output into the binary:

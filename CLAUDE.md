@@ -21,7 +21,8 @@
 
 - README: `{REPO_ROOT}/README.md` (contract, env, dev/prod, endpoint pairs, quota
   sidecars, selection)
-- Dev boot: `{REPO_ROOT}/scripts/dev-up.sh` (API only; UI embed needs `{REPO_ROOT}/scripts/build.sh`)
+- Dev boot: `{REPO_ROOT}/scripts/dev-up.sh` (API); `{REPO_ROOT}/scripts/dev-up.sh --ui` for Vite HMR at `http://127.0.0.1:5173/admin/` (proxies `/admin/api` → gateway). Embedded SPA at `:8080/admin` needs `{REPO_ROOT}/scripts/build.sh` and is not HMR.
+
 - Handoffs: `{REPO_ROOT}/logs/` (latency note: `2026-07-10-tavily-cooldown-latency.md`)
 - Build: `{REPO_ROOT}/scripts/build.sh` (admin SPA embed + both binaries; uses `-buildvcs=false`)
 - Bootstrap template: `{REPO_ROOT}/scripts/templates/bootstrap.env.example`
@@ -55,5 +56,5 @@
   rows. Not removed before **v0.5.0**.
 - Admin pool Order column + Promote/Demote/Reset; CLI `reset-selection` / `demote`.
 - URL validation: no userinfo, query, or fragment in base URLs (inference or quota).
-- After `web/admin` changes: `./scripts/build.sh` then restart; `dev-up --rebuild`
-  alone does not refresh SPA.
+- After `web/admin` changes for **release/embed**: `./scripts/build.sh` then restart gateway. Day-to-day UI work: `./scripts/dev-up.sh --ui` and edit against `:5173/admin` (HMR); `dev-up --rebuild` alone does not refresh the embedded SPA.
+
