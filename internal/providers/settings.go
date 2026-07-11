@@ -4,7 +4,10 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"code-guda-gateway/internal/cooldown"
@@ -71,7 +74,111 @@ const (
 	settingCooldownCredential = "cooldown_credential_seconds"
 	settingMaxRetries         = "max_retries"
 	settingProxyDebugAttempts = "proxy_debug_attempts"
+	settingDisplayTimezone    = "display_timezone"
 )
+
+// DisplayTimezone is the effective admin display zone.
+type DisplayTimezone struct {
+	Timezone string `json:"timezone"`
+	Source   string `json:"source"` // "stored" | "host"
+}
+
+// hostTimezoneName returns a real IANA timezone name for the host default.
+// Never returns the bare string "Local" (which breaks JS Intl.DateTimeFormat).
+func hostTimezoneName() string {
+	if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" && tz != "Local" {
+		if _, err := time.LoadLocation(tz); err == nil {
+			return tz
+		}
+	}
+	if name, ok := timezoneFromLocaltimeLink("/etc/localtime"); ok {
+		return name
+	}
+	if name := time.Local.String(); name != "" && name != "Local" {
+		if _, err := time.LoadLocation(name); err == nil {
+			return name
+		}
+	}
+	return "UTC"
+}
+
+// timezoneFromLocaltimeLink resolves an IANA name from a zoneinfo symlink target
+// (e.g. /var/db/timezone/zoneinfo/Asia/Seoul or .../zoneinfo/America/New_York).
+func timezoneFromLocaltimeLink(localtimePath string) (string, bool) {
+	target, err := filepath.EvalSymlinks(localtimePath)
+	if err != nil {
+		// Fall back to raw readlink for relative targets if EvalSymlinks fails.
+		target, err = os.Readlink(localtimePath)
+		if err != nil {
+			return "", false
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(localtimePath), target)
+		}
+		target = filepath.Clean(target)
+	}
+	// Normalize separators and look for zoneinfo path segment.
+	slash := filepath.ToSlash(target)
+	const marker = "/zoneinfo/"
+	idx := strings.LastIndex(slash, marker)
+	if idx < 0 {
+		return "", false
+	}
+	name := strings.TrimSpace(slash[idx+len(marker):])
+	if name == "" || name == "Local" {
+		return "", false
+	}
+	if _, err := time.LoadLocation(name); err != nil {
+		return "", false
+	}
+	return name, true
+}
+
+// ValidateIANATimezone checks that tz is a non-empty IANA timezone name.
+func ValidateIANATimezone(tz string) error {
+	tz = strings.TrimSpace(tz)
+	if tz == "" {
+		return fmt.Errorf("timezone required")
+	}
+	if _, err := time.LoadLocation(tz); err != nil {
+		return fmt.Errorf("invalid timezone %q: %w", tz, err)
+	}
+	return nil
+}
+
+// GetDisplayTimezone returns the stored display timezone, or the host default.
+func (r *SettingsRepo) GetDisplayTimezone() (DisplayTimezone, error) {
+	val, err := r.getSettingString(settingDisplayTimezone, "")
+	if err != nil {
+		return DisplayTimezone{}, err
+	}
+	if strings.TrimSpace(val) == "" {
+		return DisplayTimezone{Timezone: hostTimezoneName(), Source: "host"}, nil
+	}
+	if err := ValidateIANATimezone(val); err != nil {
+		// Corrupt stored value: fall back to host rather than break admin UI.
+		return DisplayTimezone{Timezone: hostTimezoneName(), Source: "host"}, nil
+	}
+	return DisplayTimezone{Timezone: strings.TrimSpace(val), Source: "stored"}, nil
+}
+
+// SetDisplayTimezone stores an IANA timezone for admin display. Empty string clears
+// the stored value so the host default applies. Invalid IANA names do not mutate DB.
+func (r *SettingsRepo) SetDisplayTimezone(tz string) error {
+	tz = strings.TrimSpace(tz)
+	if tz == "" {
+		// Clear stored value so host default applies.
+		_, err := r.db.Exec(`DELETE FROM settings WHERE key = ?`, settingDisplayTimezone)
+		if err != nil {
+			return fmt.Errorf("clear display_timezone: %w", err)
+		}
+		return nil
+	}
+	if err := ValidateIANATimezone(tz); err != nil {
+		return err
+	}
+	return r.SetCooldownSetting(settingDisplayTimezone, tz)
+}
 
 // GetCooldownSettings loads service-wide cooldown and retry limits from the settings table.
 func (r *SettingsRepo) GetCooldownSettings() (cooldown.Settings, error) {

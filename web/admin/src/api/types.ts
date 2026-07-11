@@ -207,3 +207,5 @@ export type ProxyAttempt = {
 
 export type ProxyDebugAttemptsSetting = { enabled: boolean };
 
+export type DisplayTimezoneSetting = { timezone: string; source: 'stored' | 'host' };
+

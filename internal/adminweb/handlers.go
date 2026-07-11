@@ -316,6 +316,10 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 		h.handleProxyDebugAttemptsGet(w, r)
 	case path == "/admin/api/settings/proxy-debug-attempts" && r.Method == http.MethodPatch:
 		h.handleProxyDebugAttemptsPatch(w, r)
+	case path == "/admin/api/settings/display-timezone" && r.Method == http.MethodGet:
+		h.handleDisplayTimezoneGet(w, r)
+	case path == "/admin/api/settings/display-timezone" && r.Method == http.MethodPatch:
+		h.handleDisplayTimezonePatch(w, r)
 	case path == "/admin/api/audit-events" && r.Method == http.MethodGet:
 		h.handleAuditList(w, r)
 	case path == "/admin/api/usage-daily" && r.Method == http.MethodGet:
@@ -1247,6 +1251,46 @@ func (h *Handler) handleProxyDebugAttemptsPatch(w http.ResponseWriter, r *http.R
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"enabled": body.Enabled})
+}
+
+func (h *Handler) handleDisplayTimezoneGet(w http.ResponseWriter, r *http.Request) {
+	got, err := h.deps.Settings.GetDisplayTimezone()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, got)
+}
+
+func (h *Handler) handleDisplayTimezonePatch(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Timezone *string `json:"timezone"`
+		UseHost  bool    `json:"use_host"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if body.UseHost || (body.Timezone != nil && strings.TrimSpace(*body.Timezone) == "") {
+		if err := h.deps.Settings.SetDisplayTimezone(""); err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	} else if body.Timezone != nil {
+		if err := h.deps.Settings.SetDisplayTimezone(*body.Timezone); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+	} else {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	got, err := h.deps.Settings.GetDisplayTimezone()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, got)
 }
 
 func (h *Handler) providerQuotaItems() ([]providers.QuotaCache, error) {

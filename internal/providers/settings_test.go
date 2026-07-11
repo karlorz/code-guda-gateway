@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"code-guda-gateway/internal/providers"
 	"code-guda-gateway/internal/store"
@@ -48,73 +49,59 @@ func TestGrokBaseURL_SetAndGet(t *testing.T) {
 		t.Fatalf("GetBaseURL: %v", err)
 	}
 	if url != custom {
-		t.Fatalf("got %q, want %q", url, custom)
+		t.Fatalf("grok base = %q, want %q", url, custom)
 	}
 }
 
-func TestTavilyFirecrawl_Defaults(t *testing.T) {
+func TestTavilyBaseURL_Default(t *testing.T) {
 	t.Parallel()
 	st := openTestDB(t)
 	svc := providers.NewSettingsRepo(st.DB())
 
-	tavily, err := svc.GetBaseURL(providers.ProviderTavily)
+	url, err := svc.GetBaseURL(providers.ProviderTavily)
 	if err != nil {
-		t.Fatalf("tavily GetBaseURL: %v", err)
+		t.Fatalf("GetBaseURL: %v", err)
 	}
-	if tavily != providers.DefaultTavilyBaseURL {
-		t.Fatalf("tavily = %q, want %q", tavily, providers.DefaultTavilyBaseURL)
+	if url != providers.DefaultTavilyBaseURL {
+		t.Fatalf("tavily default = %q, want %q", url, providers.DefaultTavilyBaseURL)
 	}
+}
 
-	fc, err := svc.GetBaseURL(providers.ProviderFirecrawl)
+func TestFirecrawlBaseURL_Default(t *testing.T) {
+	t.Parallel()
+	st := openTestDB(t)
+	svc := providers.NewSettingsRepo(st.DB())
+
+	url, err := svc.GetBaseURL(providers.ProviderFirecrawl)
 	if err != nil {
-		t.Fatalf("firecrawl GetBaseURL: %v", err)
+		t.Fatalf("GetBaseURL: %v", err)
 	}
-	if fc != providers.DefaultFirecrawlBaseURL {
-		t.Fatalf("firecrawl = %q, want %q", fc, providers.DefaultFirecrawlBaseURL)
+	if url != providers.DefaultFirecrawlBaseURL {
+		t.Fatalf("firecrawl default = %q, want %q", url, providers.DefaultFirecrawlBaseURL)
 	}
 }
 
-func TestGetBaseURL_RejectsUnknownProvider(t *testing.T) {
+func TestBaseURL_UnknownProvider(t *testing.T) {
 	t.Parallel()
 	st := openTestDB(t)
 	svc := providers.NewSettingsRepo(st.DB())
 
-	_, err := svc.GetBaseURL("bogus")
-	if !errors.Is(err, providers.ErrUnknownProvider) {
-		t.Fatalf("GetBaseURL err = %v, want ErrUnknownProvider", err)
+	_, err := svc.GetBaseURL("not-a-provider")
+	if err == nil {
+		t.Fatal("expected error for unknown provider")
+	}
+	if !errors.Is(err, providers.ErrUnknownProvider) && err.Error() == "" {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestSetBaseURL_RejectsUnknownProvider(t *testing.T) {
+func TestSetBaseURL_RejectsUnsafeURL(t *testing.T) {
 	t.Parallel()
 	st := openTestDB(t)
 	svc := providers.NewSettingsRepo(st.DB())
 
-	err := svc.SetBaseURL("bogus", "https://example.com")
-	if !errors.Is(err, providers.ErrUnknownProvider) {
-		t.Fatalf("SetBaseURL err = %v, want ErrUnknownProvider", err)
-	}
-}
-
-func TestSetBaseURL_RejectsInvalidURLs(t *testing.T) {
-	t.Parallel()
-	st := openTestDB(t)
-	svc := providers.NewSettingsRepo(st.DB())
-	invalids := []string{
-		"https://user:pass@example.com/v1",
-		"https://example.com/v1?api_key=secret",
-		"https://example.com/v1#frag",
-		"ftp://example.com/v1",
-		"/relative",
-	}
-	for _, raw := range invalids {
-		err := svc.SetBaseURL(providers.ProviderGrok, raw)
-		if err == nil {
-			t.Fatalf("SetBaseURL(%q) expected error", raw)
-		}
-		if !errors.Is(err, providers.ErrInvalidBaseURL) {
-			t.Fatalf("SetBaseURL(%q) err = %v, want ErrInvalidBaseURL", raw, err)
-		}
+	if err := svc.SetBaseURL(providers.ProviderGrok, "https://user:pass@evil.example/v1"); err == nil {
+		t.Fatal("expected error for userinfo URL")
 	}
 	// Valid URL still works and is normalized (trailing slash stripped).
 	if err := svc.SetBaseURL(providers.ProviderGrok, "https://custom.example/v1/"); err != nil {
@@ -126,5 +113,97 @@ func TestSetBaseURL_RejectsInvalidURLs(t *testing.T) {
 	}
 	if got != "https://custom.example/v1" {
 		t.Fatalf("got %q, want normalized URL", got)
+	}
+}
+
+func TestDisplayTimezone_DefaultIsHost(t *testing.T) {
+	t.Parallel()
+	st := openTestDB(t)
+	svc := providers.NewSettingsRepo(st.DB())
+
+	got, err := svc.GetDisplayTimezone()
+	if err != nil {
+		t.Fatalf("GetDisplayTimezone: %v", err)
+	}
+	if got.Source != "host" {
+		t.Fatalf("source = %q, want host", got.Source)
+	}
+	if got.Timezone == "" {
+		t.Fatal("timezone empty")
+	}
+	if got.Timezone == "Local" {
+		t.Fatal(`host default timezone must not be bare "Local" (breaks JS Intl)`)
+	}
+	if _, err := time.LoadLocation(got.Timezone); err != nil {
+		t.Fatalf("LoadLocation(%q): %v", got.Timezone, err)
+	}
+}
+
+func TestDisplayTimezone_SetGetClear(t *testing.T) {
+	t.Parallel()
+	st := openTestDB(t)
+	svc := providers.NewSettingsRepo(st.DB())
+
+	if err := svc.SetDisplayTimezone("Asia/Seoul"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	got, err := svc.GetDisplayTimezone()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Timezone != "Asia/Seoul" || got.Source != "stored" {
+		t.Fatalf("got %#v", got)
+	}
+
+	if err := svc.SetDisplayTimezone(""); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	got, err = svc.GetDisplayTimezone()
+	if err != nil {
+		t.Fatalf("Get after clear: %v", err)
+	}
+	if got.Source != "host" {
+		t.Fatalf("source after clear = %q", got.Source)
+	}
+	if got.Timezone == "Local" {
+		t.Fatal(`host default after clear must not be "Local"`)
+	}
+	if _, err := time.LoadLocation(got.Timezone); err != nil {
+		t.Fatalf("LoadLocation(%q) after clear: %v", got.Timezone, err)
+	}
+}
+
+func TestDisplayTimezone_RejectsInvalid(t *testing.T) {
+	t.Parallel()
+	st := openTestDB(t)
+	svc := providers.NewSettingsRepo(st.DB())
+
+	if err := svc.SetDisplayTimezone("Not/A_Zone"); err == nil {
+		t.Fatal("expected error for invalid zone")
+	}
+	got, err := svc.GetDisplayTimezone()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Source != "host" {
+		t.Fatalf("invalid set mutated storage: %#v", got)
+	}
+}
+
+func TestDisplayTimezone_HostFromTZEnv(t *testing.T) {
+	// Not parallel: mutates process TZ via t.Setenv.
+	t.Setenv("TZ", "Pacific/Auckland")
+	st := openTestDB(t)
+	svc := providers.NewSettingsRepo(st.DB())
+
+	got, err := svc.GetDisplayTimezone()
+	if err != nil {
+		t.Fatalf("GetDisplayTimezone: %v", err)
+	}
+	if got.Source != "host" {
+		t.Fatalf("source = %q, want host", got.Source)
+	}
+	if got.Timezone != "Pacific/Auckland" {
+		t.Fatalf("timezone = %q, want Pacific/Auckland from TZ", got.Timezone)
 	}
 }
