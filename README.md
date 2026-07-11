@@ -303,10 +303,18 @@ printf '%s' "<provider-key>" | ./guda-gateway-admin \
   provider-endpoint add --provider <provider> --name <name> --base-url <url>
 ```
 
-Or use `./scripts/seed-provider-keys.sh` after exporting env secrets; it calls
-`provider-endpoint add` with an explicit `--base-url` (from `$GROK_BASE_URL` /
-`$TAVILY_BASE_URL` / `$FIRECRAWL_BASE_URL` or the compiled default) and pipes
-keys on stdin only.
+Or use `./scripts/seed-provider-keys.sh` after exporting env secrets from
+`~/.secrets/guda-gateway.env` (template: `scripts/templates/secrets.env.example`).
+It creates canonical endpoint pairs with quota sidecars:
+
+| Name | Upstream | Quota |
+|---|---|---|
+| `grok-1` | `https://new.karldigi.dev/v1` (or `GROK_1_BASE_URL`) | `separate_credentials` → `https://grok.karldigi.dev` + admin key |
+| `tavily-1..N` | official / `TAVILY_BASE_URL` | `endpoint_credentials` |
+| `firecrawl-1` | official / `FIRECRAWL_BASE_URL` | `endpoint_credentials` |
+
+Keys stay on stdin / `--quota-key-file` only. Keep `GUDA_ADMIN_TOKEN` and
+`GUDA_API_KEY` in the secrets file for daily use (`token … --save-env`).
 
 The React admin UI lives in `web/admin`. During local frontend work, run the Go
 server and Vite dev server separately:
