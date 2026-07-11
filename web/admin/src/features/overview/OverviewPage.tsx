@@ -1,21 +1,36 @@
 import { useQuery } from '@tanstack/react-query';
 import { apiFetch } from '../../api/client';
 import type { AuditEvent, GatewayKey, ListResponse, ProviderHealth } from '../../api/types';
-import { Badge, Panel, valueOf } from '../../components/ui';
+import { Badge, PageHeader, Panel, SummaryGrid, SummaryMetric, valueOf } from '../../components/ui';
 
 export function OverviewPage() {
   const gatewayKeys = useQuery({ queryKey: ['gateway-keys'], queryFn: () => apiFetch<ListResponse<GatewayKey>>('/admin/api/gateway-keys') });
   const health = useQuery({ queryKey: ['provider-health'], queryFn: () => apiFetch<ListResponse<ProviderHealth>>('/admin/api/provider-health') });
   const audit = useQuery({ queryKey: ['audit-events', 'overview'], queryFn: () => apiFetch<ListResponse<AuditEvent>>('/admin/api/audit-events?limit=5') });
-  const missingGateway = (gatewayKeys.data?.items ?? []).length === 0;
-  const missingProvider = (health.data?.items ?? []).some((item) => item.status === 'missing_key');
+
+  const gatewayKeyCount = (gatewayKeys.data?.items ?? []).length;
+  const providerItems = health.data?.items ?? [];
+  const readyProviderCount = providerItems.filter((item) => item.status === 'healthy').length;
+  const activeEndpointCount = providerItems.reduce((sum, item) => sum + item.enabled_key_count, 0);
+  const coolingEndpointCount = providerItems.reduce((sum, item) => sum + item.cooldown_key_count, 0);
+  const missingGateway = gatewayKeyCount === 0;
+  const missingProvider = providerItems.some((item) => item.status === 'missing_key');
+
   return (
     <div>
-      <h1 className="text-2xl font-semibold">Overview</h1>
+      <PageHeader description="Gateway readiness and recent operator activity." title="Overview" />
+      <div className="mt-5">
+        <SummaryGrid className="lg:grid-cols-4">
+          <SummaryMetric label="Gateway keys" testId="overview-gateway-keys" value={gatewayKeyCount} />
+          <SummaryMetric label="Providers ready" testId="overview-providers-ready" value={`${readyProviderCount}/${providerItems.length}`} />
+          <SummaryMetric label="Active endpoints" testId="overview-active-endpoints" value={activeEndpointCount} />
+          <SummaryMetric label="Cooling endpoints" testId="overview-cooling-endpoints" tone={coolingEndpointCount > 0 ? 'warn' : 'good'} value={coolingEndpointCount} />
+        </SummaryGrid>
+      </div>
       <Panel title="Readiness">
         <div className="grid gap-2 md:grid-cols-2">
           <Checklist label="Gateway key" ok={!missingGateway} />
-          <Checklist label="Provider keys" ok={!missingProvider} />
+          <Checklist label="Provider endpoints configured" ok={!missingProvider} />
         </div>
       </Panel>
       <Panel title="Provider health">
