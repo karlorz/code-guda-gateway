@@ -58,6 +58,7 @@ func TestHostTimezoneName_NeverLocal(t *testing.T) {
 }
 
 func TestHostTimezoneName_PrefersTZ(t *testing.T) {
+	// TZ is checked every call (not cached), so Setenv is observable.
 	t.Setenv("TZ", "Europe/Berlin")
 	name := hostTimezoneName()
 	if name != "Europe/Berlin" {

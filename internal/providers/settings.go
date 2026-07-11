@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"code-guda-gateway/internal/cooldown"
@@ -83,21 +84,36 @@ type DisplayTimezone struct {
 	Source   string `json:"source"` // "stored" | "host"
 }
 
+var (
+	hostLocaltimeOnce   sync.Once
+	hostLocaltimeCached string // empty means "resolved to nothing usable"
+	hostLocaltimeOK     bool
+)
+
 // hostTimezoneName returns a real IANA timezone name for the host default.
 // Never returns the bare string "Local" (which breaks JS Intl.DateTimeFormat).
+// TZ env is checked every call (cheap); /etc/localtime is resolved once.
 func hostTimezoneName() string {
 	if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" && tz != "Local" {
 		if _, err := time.LoadLocation(tz); err == nil {
 			return tz
 		}
 	}
-	if name, ok := timezoneFromLocaltimeLink("/etc/localtime"); ok {
-		return name
-	}
-	if name := time.Local.String(); name != "" && name != "Local" {
-		if _, err := time.LoadLocation(name); err == nil {
-			return name
+	hostLocaltimeOnce.Do(func() {
+		if name, ok := timezoneFromLocaltimeLink("/etc/localtime"); ok {
+			hostLocaltimeCached = name
+			hostLocaltimeOK = true
+			return
 		}
+		if name := time.Local.String(); name != "" && name != "Local" {
+			if _, err := time.LoadLocation(name); err == nil {
+				hostLocaltimeCached = name
+				hostLocaltimeOK = true
+			}
+		}
+	})
+	if hostLocaltimeOK {
+		return hostLocaltimeCached
 	}
 	return "UTC"
 }

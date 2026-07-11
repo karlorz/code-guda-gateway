@@ -2,9 +2,10 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bug, ChevronLeft, ChevronRight, ToggleLeft, ToggleRight } from 'lucide-react';
 import { apiFetch } from '../../api/client';
-import type { DisplayTimezoneSetting, PagedItems, ProxyAttempt, ProxyDebugAttemptsSetting } from '../../api/types';
+import type { PagedItems, ProxyAttempt, ProxyDebugAttemptsSetting } from '../../api/types';
 import { Badge, Button, Panel } from '../../components/ui';
 import { formatDisplayTime } from '../../lib/formatDisplayTime';
+import { useDisplayTimezone } from '../../lib/useDisplayTimezone';
 
 const PAGE_SIZE = 50;
 const providers = ['all', 'tavily', 'firecrawl', 'grok'] as const;
@@ -13,10 +14,7 @@ export function DebugAttemptsPage() {
   const qc = useQueryClient();
   const [offset, setOffset] = useState(0);
   const [provider, setProvider] = useState<(typeof providers)[number]>('all');
-  const tz = useQuery({
-    queryKey: ['display-timezone'],
-    queryFn: () => apiFetch<DisplayTimezoneSetting>('/admin/api/settings/display-timezone'),
-  });
+  const { zone } = useDisplayTimezone();
   const setting = useQuery({ queryKey: ['proxy-debug-attempts'], queryFn: () => apiFetch<ProxyDebugAttemptsSetting>('/admin/api/settings/proxy-debug-attempts') });
   const attempts = useQuery({ queryKey: ['proxy-attempts', offset], queryFn: () => apiFetch<PagedItems<ProxyAttempt>>(`/admin/api/proxy-attempts?limit=${PAGE_SIZE}&offset=${offset}`) });
   const toggle = useMutation({
@@ -26,7 +24,6 @@ export function DebugAttemptsPage() {
   const rows = attempts.data?.items ?? [];
   const filtered = useMemo(() => provider === 'all' ? rows : rows.filter((row) => row.provider === provider), [provider, rows]);
   const enabled = setting.data?.enabled ?? false;
-  const zone = tz.data?.timezone || 'UTC';
   return (
     <div>
       <h1 className="text-2xl font-semibold">Debug Attempts</h1>

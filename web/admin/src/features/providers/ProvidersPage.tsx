@@ -4,7 +4,6 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { apiFetch } from '../../api/client';
 import type {
-  DisplayTimezoneSetting,
   ListResponse,
   ProviderHealth,
   ProviderKey,
@@ -18,6 +17,7 @@ import type {
 } from '../../api/types';
 import { Badge, Button, FilterChip, PageHeader, Panel, SummaryGrid, SummaryMetric, valueOf } from '../../components/ui';
 import { formatDisplayTime } from '../../lib/formatDisplayTime';
+import { useDisplayTimezone } from '../../lib/useDisplayTimezone';
 
 const POOL_PROVIDERS = ['grok', 'tavily', 'firecrawl'] as const;
 const PAGE_SIZE = 25;
@@ -30,6 +30,7 @@ export type PoolRowView = 'enabled' | 'all';
 
 export function ProvidersPage() {
   const qc = useQueryClient();
+  const { zone } = useDisplayTimezone();
   const health = useQuery({ queryKey: ['provider-health'], queryFn: () => apiFetch<ListResponse<ProviderHealth>>('/admin/api/provider-health') });
   const quotas = useQuery({ queryKey: ['provider-quotas'], queryFn: () => apiFetch<ListResponse<ProviderQuota>>('/admin/api/provider-quotas') });
   const postAction = useMutation({
@@ -88,7 +89,7 @@ export function ProvidersPage() {
       <Panel title="Provider Pools">
         <div className="grid gap-6">
           {POOL_PROVIDERS.map((provider) => (
-            <ProviderPoolSection key={provider} provider={provider} sampleQuota={quotaByProvider[provider]} />
+            <ProviderPoolSection key={provider} provider={provider} sampleQuota={quotaByProvider[provider]} zone={zone} />
           ))}
         </div>
       </Panel>
@@ -135,11 +136,6 @@ function quotaRemainingLabel(quota: ProviderQuota | ProviderKeyQuota): string | 
     return quota.limit_value != null ? `used ${quota.used} / ${quota.limit_value}` : `used ${quota.used}`;
   }
   return null;
-}
-
-/** Format admin pool timestamps using gateway display timezone (not browser locale). */
-function formatChecked(iso: string, timeZone: string): string {
-  return formatDisplayTime(iso, timeZone);
 }
 
 function providerTitle(provider: string): string {
@@ -206,17 +202,20 @@ function emptySummary(provider: string): ProviderPool['summary'] {
   };
 }
 
-function ProviderPoolSection({ provider, sampleQuota }: { provider: string; sampleQuota?: ProviderQuota }) {
+function ProviderPoolSection({
+  provider,
+  sampleQuota,
+  zone,
+}: {
+  provider: string;
+  sampleQuota?: ProviderQuota;
+  zone: string;
+}) {
   const qc = useQueryClient();
   const [offset, setOffset] = useState(0);
   // Server-side view: default enabled (selection-eligible); All endpoints for full inventory.
   const [view, setView] = useState<PoolRowView>('enabled');
   const [refreshAllResult, setRefreshAllResult] = useState<RefreshAllKeyQuotasResult | null>(null);
-  const tz = useQuery({
-    queryKey: ['display-timezone'],
-    queryFn: () => apiFetch<DisplayTimezoneSetting>('/admin/api/settings/display-timezone'),
-  });
-  const zone = tz.data?.timezone || 'UTC';
   const pool = useQuery({
     queryKey: ['provider-pools', provider, offset, view],
     queryFn: () =>
@@ -397,14 +396,14 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
                         {cooldownReason || '—'}
                         {cooldownUntil ? (
                           <div className="text-[11px] text-zinc-400" title={cooldownUntil}>
-                            until {formatChecked(cooldownUntil, zone)}
+                            until {formatDisplayTime(cooldownUntil, zone)}
                           </div>
                         ) : null}
                       </td>
                       <td className="py-2 pr-3 text-xs">
                         {demoted ? (
                           <span className="text-amber-700" title={lastFailedAt}>
-                            demoted · {formatChecked(lastFailedAt!, zone)}
+                            demoted · {formatDisplayTime(lastFailedAt!, zone)}
                           </span>
                         ) : (
                           <span className="text-zinc-500">front pack</span>
@@ -425,7 +424,7 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
                         </div>
                       </td>
                       <td className="py-2 pr-3 text-xs text-zinc-500" title={row.quota?.checked_at ?? ''}>
-                        {row.quota?.checked_at ? formatChecked(row.quota.checked_at, zone) : '—'}
+                        {row.quota?.checked_at ? formatDisplayTime(row.quota.checked_at, zone) : '—'}
                       </td>
                       <td className="py-2 text-right">
                         <div className="flex flex-wrap justify-end gap-1">

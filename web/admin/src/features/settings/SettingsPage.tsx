@@ -1,49 +1,32 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '../../api/client';
 import type { DisplayTimezoneSetting } from '../../api/types';
 import { Badge, Button, PageHeader, Panel } from '../../components/ui';
+import { displayTimezoneQueryKey, useDisplayTimezone } from '../../lib/useDisplayTimezone';
 
 export function SettingsPage() {
   const qc = useQueryClient();
-  const tzQuery = useQuery({
-    queryKey: ['display-timezone'],
-    queryFn: () => apiFetch<DisplayTimezoneSetting>('/admin/api/settings/display-timezone'),
-  });
+  const tzQuery = useDisplayTimezone();
   const [draft, setDraft] = useState('');
   useEffect(() => {
     if (tzQuery.data?.timezone) setDraft(tzQuery.data.timezone);
   }, [tzQuery.data?.timezone]);
 
-  const save = useMutation({
-    mutationFn: (timezone: string) =>
+  const patch = useMutation({
+    mutationFn: (body: { timezone?: string; use_host?: boolean }) =>
       apiFetch<DisplayTimezoneSetting>('/admin/api/settings/display-timezone', {
         method: 'PATCH',
-        body: JSON.stringify({ timezone }),
+        body: JSON.stringify(body),
       }),
     onSuccess: (data) => {
-      void qc.setQueryData(['display-timezone'], data);
-      setDraft(data.timezone);
-    },
-  });
-  const useHost = useMutation({
-    mutationFn: () =>
-      apiFetch<DisplayTimezoneSetting>('/admin/api/settings/display-timezone', {
-        method: 'PATCH',
-        body: JSON.stringify({ use_host: true }),
-      }),
-    onSuccess: (data) => {
-      void qc.setQueryData(['display-timezone'], data);
-      setDraft(data.timezone);
+      void qc.setQueryData(displayTimezoneQueryKey, data);
     },
   });
 
   const source = tzQuery.data?.source ?? 'host';
-  const errorMsg =
-    (save.error as Error | undefined)?.message ||
-    (useHost.error as Error | undefined)?.message ||
-    '';
+  const errorMsg = (patch.error as Error | undefined)?.message || '';
 
   return (
     <div>
@@ -90,15 +73,15 @@ export function SettingsPage() {
         {errorMsg ? <p className="mt-2 text-sm text-red-600">{errorMsg}</p> : null}
         <div className="mt-3 flex flex-wrap gap-2">
           <Button
-            disabled={save.isPending || !draft.trim()}
-            onClick={() => save.mutate(draft.trim())}
+            disabled={patch.isPending || !draft.trim()}
+            onClick={() => patch.mutate({ timezone: draft.trim() })}
             type="button"
           >
             Save
           </Button>
           <Button
-            disabled={useHost.isPending}
-            onClick={() => useHost.mutate()}
+            disabled={patch.isPending}
+            onClick={() => patch.mutate({ use_host: true })}
             type="button"
             variant="secondary"
           >

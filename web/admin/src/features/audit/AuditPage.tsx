@@ -1,19 +1,16 @@
 import { useQuery } from '@tanstack/react-query';
 import { apiFetch } from '../../api/client';
-import type { AuditEvent, DisplayTimezoneSetting, ListResponse } from '../../api/types';
+import type { AuditEvent, ListResponse } from '../../api/types';
 import { Panel, valueOf } from '../../components/ui';
 import { formatDisplayTime } from '../../lib/formatDisplayTime';
+import { useDisplayTimezone } from '../../lib/useDisplayTimezone';
 
 export function AuditPage() {
-  const tz = useQuery({
-    queryKey: ['display-timezone'],
-    queryFn: () => apiFetch<DisplayTimezoneSetting>('/admin/api/settings/display-timezone'),
-  });
+  const { zone } = useDisplayTimezone();
   const { data } = useQuery({
     queryKey: ['audit-events'],
     queryFn: () => apiFetch<ListResponse<AuditEvent>>('/admin/api/audit-events?limit=100'),
   });
-  const zone = tz.data?.timezone || 'UTC';
   return (
     <div>
       <h1 className="text-2xl font-semibold">Audit</h1>
