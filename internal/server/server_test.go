@@ -51,6 +51,18 @@ func TestHealthDoesNotRequireAuth(t *testing.T) {
 	}
 }
 
+func TestUnknownPathWithoutAuthIsNotFound(t *testing.T) {
+	app, _, _, _, _ := openTestApp(t, config.Config{})
+	for _, path := range []string{"/favicon.ico", "/v1/models", "/robots.txt"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want 404 (not 401 — unknown paths must not require gateway auth)", path, rec.Code)
+		}
+	}
+}
+
 func TestServer_RuntimeRouteRequiresGatewayKey(t *testing.T) {
 	app, _, _, _, _ := openTestApp(t, config.Config{})
 	req := httptest.NewRequest(http.MethodGet, "/grok/v1/models", nil)

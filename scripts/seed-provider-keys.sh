@@ -45,18 +45,18 @@ endpoint_id() {
 }
 
 endpoint_quota_meta() {
-  # Prints: mode<TAB>configured  (configured = true/false)
+  # Prints: mode<TAB>configured<TAB>quota_base_url  (configured = true/false)
   local provider="$1" name="$2"
   if command -v sqlite3 >/dev/null 2>&1; then
     sqlite3 -separator $'\t' "$DB" \
-      "SELECT COALESCE(quota_mode,''), CASE WHEN encrypted_quota_key IS NOT NULL AND encrypted_quota_key!='' THEN 'true' ELSE 'false' END
+      "SELECT COALESCE(quota_mode,''), CASE WHEN encrypted_quota_key IS NOT NULL AND encrypted_quota_key!='' THEN 'true' ELSE 'false' END, COALESCE(quota_base_url,'')
        FROM provider_keys
        WHERE provider='${provider//\'/\'\'}' AND name='${name//\'/\'\'}'
          AND (archived_at IS NULL OR archived_at='')
        ORDER BY id LIMIT 1;"
     return 0
   fi
-  printf '\tfalse'
+  printf '\tfalse\t'
 }
 
 write_secret_file() {
@@ -116,16 +116,18 @@ add_endpoint() {
 
 ensure_separate_quota() {
   local provider="$1" name="$2" flow="$3" quota_url="$4" quota_key="$5"
-  local id mode configured meta
+  local id mode configured meta current_url
 
   id="$(endpoint_id "$provider" "$name")"
-  [ -z "$id" ] && { echo "ensure_separate_quota: no active row $provider/$name" >&2; return 0; }
+  [ -z "$id" ] && return 0
 
   meta="$(endpoint_quota_meta "$provider" "$name")"
   mode="$(printf '%s' "$meta" | cut -f1)"
   configured="$(printf '%s' "$meta" | cut -f2)"
+  current_url="$(printf '%s' "$meta" | cut -f3)"
 
-  if [ "$mode" != "separate_credentials" ] || [ -n "$quota_url" ]; then
+  # Only mutate when mode/URL are not already correct (idempotent re-runs).
+  if [ "$mode" != "separate_credentials" ] || { [ -n "$quota_url" ] && [ "$current_url" != "$quota_url" ]; }; then
     if run_adm provider-endpoint set-quota \
       --id "$id" \
       --mode separate_credentials \
@@ -138,7 +140,7 @@ ensure_separate_quota() {
     fi
   fi
 
-  # Re-read configured after set-quota (may have cleared key when entering separate)
+  # Re-read configured after possible set-quota (entering separate may clear key).
   meta="$(endpoint_quota_meta "$provider" "$name")"
   configured="$(printf '%s' "$meta" | cut -f2)"
 
@@ -150,6 +152,7 @@ ensure_separate_quota() {
     fi
   fi
 }
+
 
 ensure_shared_quota() {
   local provider="$1" name="$2" flow="$3"
@@ -181,9 +184,15 @@ GROK_QKEY="${GROK_1_QUOTA_KEY:-${grok2api_admin_key:-}}"
 add_endpoint grok "$GROK_NAME" "$GROK_BASE" "$GROK_KEY" \
   "$GROK_QMODE" "$GROK_QFLOW" "$GROK_QURL" "$GROK_QKEY"
 
-# Also attach separate quota to common legacy active names (dev DB).
+# If create was skipped (name exists), ensure quota sidecar matches env.
 if [ -n "$GROK_QURL" ]; then
-  for legacy in karldigi grok-1; do
+  ensure_separate_quota grok "$GROK_NAME" "$GROK_QFLOW" "$GROK_QURL" "$GROK_QKEY" || true
+fi
+
+# Optional: only when SEED_LEGACY_NAMES=1, also patch common pre-rename rows.
+if [ "${SEED_LEGACY_NAMES:-0}" = "1" ] && [ -n "$GROK_QURL" ]; then
+  for legacy in karldigi; do
+    [ "$legacy" = "$GROK_NAME" ] && continue
     ensure_separate_quota grok "$legacy" "$GROK_QFLOW" "$GROK_QURL" "$GROK_QKEY" || true
   done
 fi
@@ -196,7 +205,9 @@ add_endpoint firecrawl "$FC_NAME" "$FC_BASE" "$FC_KEY" \
   endpoint_credentials firecrawl_credit_usage "" ""
 if [ -n "$FC_KEY" ]; then
   ensure_shared_quota firecrawl "$FC_NAME" firecrawl_credit_usage || true
-  ensure_shared_quota firecrawl gh01 firecrawl_credit_usage || true
+  if [ "${SEED_LEGACY_NAMES:-0}" = "1" ]; then
+    ensure_shared_quota firecrawl gh01 firecrawl_credit_usage || true
+  fi
 fi
 
 # --- Tavily 1..N -------------------------------------------------------------

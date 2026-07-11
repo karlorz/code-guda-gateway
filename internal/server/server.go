@@ -83,6 +83,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleHealth(w, r)
 		return
 	}
+
+	// Unknown paths must 404 without requiring a gateway key so browser
+	// probes (favicon, robots.txt) and wrong paths don't look like auth failures.
+	if !isRuntimeRoute(r.Method, r.URL.Path) {
+		http.NotFound(w, r)
+		return
+	}
+
 	gwKey, serverErr := s.authorized(r)
 	if serverErr != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -104,6 +112,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.forward(w, r, gwKey, providers.ProviderFirecrawl, strings.TrimPrefix(r.URL.Path, "/firecrawl"))
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+// isRuntimeRoute reports whether path+method is a known proxy facade route.
+// Keep this in sync with the switch in ServeHTTP.
+func isRuntimeRoute(method, path string) bool {
+	switch {
+	case method == http.MethodGet && path == "/grok/v1/models":
+		return true
+	case method == http.MethodPost && path == "/grok/v1/chat/completions":
+		return true
+	case method == http.MethodPost && strings.HasPrefix(path, "/tavily/"):
+		return true
+	case method == http.MethodPost && strings.HasPrefix(path, "/firecrawl/"):
+		return true
+	default:
+		return false
 	}
 }
 
