@@ -26,7 +26,7 @@
 - Build: `{REPO_ROOT}/scripts/build.sh` (admin SPA embed + both binaries; uses `-buildvcs=false`)
 - Bootstrap template: `{REPO_ROOT}/scripts/templates/bootstrap.env.example`
 - Seed endpoints: `{REPO_ROOT}/scripts/seed-provider-keys.sh` (`provider-endpoint add --base-url`, key on stdin)
-- Current stable release: `v0.3.2-stable` (tag on `main`, live on kr01 `search.karldigi.dev`)
+- Current stable release: `v0.3.3-stable` (tag on `main`, live on kr01 `search.karldigi.dev`)
 - Public installer: `curl -fsSL https://raw.githubusercontent.com/karlorz/code-guda-gateway/main/deploy/code-guda-gateway/install.sh | bash`
   (repo must be public for the no-token-on-kr01 deploy path)
 
