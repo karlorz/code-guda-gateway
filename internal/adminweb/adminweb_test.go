@@ -968,6 +968,9 @@ func TestDisplayTimezoneGetAndPatch(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"source":"host"`) {
 		t.Fatalf("expected host source: %s", rec.Body.String())
 	}
+	if strings.Contains(rec.Body.String(), `"timezone":"Local"`) {
+		t.Fatalf("host timezone must not be bare Local: %s", rec.Body.String())
+	}
 
 	rec2 := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/settings/display-timezone",
 		`{"timezone":"Asia/Seoul"}`, csrf, c)
@@ -985,6 +988,19 @@ func TestDisplayTimezoneGetAndPatch(t *testing.T) {
 		t.Fatalf("invalid status=%d body=%s", rec3.Code, rec3.Body.String())
 	}
 
+	// Invalid PATCH must not mutate prior stored value.
+	reqAfterInvalid := httptest.NewRequest(http.MethodGet, "/admin/api/settings/display-timezone", nil)
+	reqAfterInvalid.AddCookie(c)
+	recAfterInvalid := httptest.NewRecorder()
+	app.ServeHTTP(recAfterInvalid, reqAfterInvalid)
+	if recAfterInvalid.Code != http.StatusOK {
+		t.Fatalf("get after invalid status=%d body=%s", recAfterInvalid.Code, recAfterInvalid.Body.String())
+	}
+	if !strings.Contains(recAfterInvalid.Body.String(), `"timezone":"Asia/Seoul"`) ||
+		!strings.Contains(recAfterInvalid.Body.String(), `"source":"stored"`) {
+		t.Fatalf("expected Asia/Seoul still stored after invalid PATCH: %s", recAfterInvalid.Body.String())
+	}
+
 	rec4 := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/settings/display-timezone",
 		`{"use_host":true}`, csrf, c)
 	if rec4.Code != http.StatusOK {
@@ -992,6 +1008,9 @@ func TestDisplayTimezoneGetAndPatch(t *testing.T) {
 	}
 	if !strings.Contains(rec4.Body.String(), `"source":"host"`) {
 		t.Fatalf("use_host body: %s", rec4.Body.String())
+	}
+	if strings.Contains(rec4.Body.String(), `"timezone":"Local"`) {
+		t.Fatalf("use_host timezone must not be bare Local: %s", rec4.Body.String())
 	}
 }
 

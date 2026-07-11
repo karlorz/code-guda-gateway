@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -81,12 +83,55 @@ type DisplayTimezone struct {
 	Source   string `json:"source"` // "stored" | "host"
 }
 
+// hostTimezoneName returns a real IANA timezone name for the host default.
+// Never returns the bare string "Local" (which breaks JS Intl.DateTimeFormat).
 func hostTimezoneName() string {
-	name := time.Local.String()
-	if name == "" {
-		return "UTC"
+	if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" && tz != "Local" {
+		if _, err := time.LoadLocation(tz); err == nil {
+			return tz
+		}
 	}
-	return name
+	if name, ok := timezoneFromLocaltimeLink("/etc/localtime"); ok {
+		return name
+	}
+	if name := time.Local.String(); name != "" && name != "Local" {
+		if _, err := time.LoadLocation(name); err == nil {
+			return name
+		}
+	}
+	return "UTC"
+}
+
+// timezoneFromLocaltimeLink resolves an IANA name from a zoneinfo symlink target
+// (e.g. /var/db/timezone/zoneinfo/Asia/Seoul or .../zoneinfo/America/New_York).
+func timezoneFromLocaltimeLink(localtimePath string) (string, bool) {
+	target, err := filepath.EvalSymlinks(localtimePath)
+	if err != nil {
+		// Fall back to raw readlink for relative targets if EvalSymlinks fails.
+		target, err = os.Readlink(localtimePath)
+		if err != nil {
+			return "", false
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(localtimePath), target)
+		}
+		target = filepath.Clean(target)
+	}
+	// Normalize separators and look for zoneinfo path segment.
+	slash := filepath.ToSlash(target)
+	const marker = "/zoneinfo/"
+	idx := strings.LastIndex(slash, marker)
+	if idx < 0 {
+		return "", false
+	}
+	name := strings.TrimSpace(slash[idx+len(marker):])
+	if name == "" || name == "Local" {
+		return "", false
+	}
+	if _, err := time.LoadLocation(name); err != nil {
+		return "", false
+	}
+	return name, true
 }
 
 // ValidateIANATimezone checks that tz is a non-empty IANA timezone name.
