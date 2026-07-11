@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronLeft, ChevronRight, RefreshCw, TestTube2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -202,6 +202,18 @@ function quotaBadgeTone(state: QuotaOperationalState): 'good' | 'warn' | 'bad' {
   return 'bad';
 }
 
+function emptySummary(provider: string) {
+  return {
+    provider,
+    key_count: 0,
+    enabled_key_count: 0,
+    available_key_count: 0,
+    cooling_key_count: 0,
+    refreshed_key_count: 0,
+    known_remaining: undefined as number | undefined,
+  };
+}
+
 function ProviderPoolSection({ provider, sampleQuota }: { provider: string; sampleQuota?: ProviderQuota }) {
   const qc = useQueryClient();
   const [offset, setOffset] = useState(0);
@@ -214,6 +226,8 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
       apiFetch<ProviderPool>(
         `/admin/api/provider-pools/${provider}?limit=${PAGE_SIZE}&offset=${offset}&view=${view}`,
       ),
+    // Keep title/summary/table chrome mounted across view/offset key changes.
+    placeholderData: keepPreviousData,
   });
 
   const invalidatePool = () => {
@@ -247,20 +261,18 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
     },
   });
 
-  // Only render after data loads so tests waiting on the title also wait for pool fetch.
-  if (!pool.data) {
-    return null;
-  }
-
-  const summary = pool.data.summary;
-  const page = pool.data.page;
+  // Full-pool summary is stable across view toggles (server always returns full-set summary).
+  // keepPreviousData keeps the last successful payload mounted while the new view loads.
+  const summary = pool.data?.summary ?? emptySummary(provider);
+  const page = pool.data?.page;
   const total = page?.total ?? 0;
   const canPrev = offset > 0;
   const canNext = offset + PAGE_SIZE < total;
   const showSampleQuotaError = summary.refreshed_key_count === 0 && sampleQuota && !sampleQuota.available && sampleQuota.message_redacted;
 
-  const items = pool.data.items ?? [];
+  const items = pool.data?.items ?? [];
   const inactiveInSummary = Math.max(0, (summary.key_count ?? 0) - (summary.enabled_key_count ?? 0));
+  const tableLoading = pool.isFetching && !pool.data;
 
   return (
     <div className="border-t border-zinc-200 pt-4">
@@ -290,19 +302,17 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
         </div>
       </div>
 
-      {summary ? (
-        <div data-testid={`pool-summary-${provider}`}>
-          <SummaryGrid className="mt-3 lg:grid-cols-5">
-            <SummaryMetric label="Enabled" testId={`pool-summary-${provider}-enabled`} value={summary.enabled_key_count ?? 0} />
-            <SummaryMetric label="Available" testId={`pool-summary-${provider}-available`} tone="good" value={summary.available_key_count ?? 0} />
-            <SummaryMetric label="Cooling" testId={`pool-summary-${provider}-cooling`} tone="warn" value={summary.cooling_key_count ?? 0} />
-            <SummaryMetric label="Refreshed" testId={`pool-summary-${provider}-refreshed`} value={summary.refreshed_key_count ?? 0} />
-            {summary.known_remaining != null ? (
-              <SummaryMetric label="Known remaining" testId={`pool-summary-${provider}-remaining`} value={summary.known_remaining} />
-            ) : null}
-          </SummaryGrid>
-        </div>
-      ) : null}
+      <div data-testid={`pool-summary-${provider}`}>
+        <SummaryGrid className="mt-3 lg:grid-cols-5">
+          <SummaryMetric label="Enabled" testId={`pool-summary-${provider}-enabled`} value={summary.enabled_key_count ?? 0} />
+          <SummaryMetric label="Available" testId={`pool-summary-${provider}-available`} tone="good" value={summary.available_key_count ?? 0} />
+          <SummaryMetric label="Cooling" testId={`pool-summary-${provider}-cooling`} tone="warn" value={summary.cooling_key_count ?? 0} />
+          <SummaryMetric label="Refreshed" testId={`pool-summary-${provider}-refreshed`} value={summary.refreshed_key_count ?? 0} />
+          {summary.known_remaining != null ? (
+            <SummaryMetric label="Known remaining" testId={`pool-summary-${provider}-remaining`} value={summary.known_remaining} />
+          ) : null}
+        </SummaryGrid>
+      </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-2" data-testid={`pool-view-${provider}`}>
         <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">View</span>
@@ -363,94 +373,103 @@ function ProviderPoolSection({ provider, sampleQuota }: { provider: string; samp
             </tr>
           </thead>
           <tbody>
-            {items.map((row) => {
-              const id = keyID(row.key);
-              const quotaState = deriveQuotaOperationalState(row);
-              const cooldownReason = valueOf<string>(row.key as Record<string, unknown>, 'CooldownReason', 'cooldown_reason', '');
-              const cooldownUntil = valueOf<string | undefined>(row.key as Record<string, unknown>, 'CooldownUntil', 'cooldown_until', undefined);
-              const lastFailedAt = valueOf<string | undefined>(row.key as Record<string, unknown>, 'LastFailedAt', 'last_failed_at', undefined);
-              const demoted = Boolean(lastFailedAt);
-              const refreshDisabled = quotaState === 'disabled' || refreshOne.isPending || !id;
-              return (
-                <tr className="border-b border-zinc-100" key={id || keyName(row.key)}>
-                  <td className="py-2 pr-3 font-medium text-zinc-900">{keyName(row.key)}</td>
-                  <td className="py-2 pr-3">
-                    <Badge tone={statusTone(row.status)}>{row.status}</Badge>
-                  </td>
-                  <td className="py-2 pr-3 text-xs text-zinc-600">
-                    {cooldownReason || '—'}
-                    {cooldownUntil ? <div className="text-[11px] text-zinc-400">until {formatChecked(cooldownUntil)}</div> : null}
-                  </td>
-                  <td className="py-2 pr-3 text-xs">
-                    {demoted ? (
-                      <span className="text-amber-700" title={lastFailedAt}>demoted · {formatChecked(lastFailedAt!)}</span>
-                    ) : (
-                      <span className="text-zinc-500">front pack</span>
-                    )}
-                  </td>
-                  <td className="py-2 pr-3 text-zinc-700">
-                    <div className="flex flex-col gap-0.5">
-                      <Badge tone={quotaBadgeTone(quotaState)}>{quotaState === 'ok' ? 'ok' : quotaState.replace('_', ' ')}</Badge>
-                      <span className="text-xs">{quotaStateLabel(quotaState, row)}</span>
-                      {quotaState === 'not_configured' ? (
-                        <span className="text-[11px] text-zinc-500">
-                          Configure quota credentials on{' '}
-                          <Link className="underline" to="/provider-keys">
-                            Provider Endpoints
-                          </Link>
-                        </span>
-                      ) : null}
-                    </div>
-                  </td>
-                  <td className="py-2 pr-3 text-xs text-zinc-500">
-                    {row.quota?.checked_at ? formatChecked(row.quota.checked_at) : '—'}
-                  </td>
-                  <td className="py-2 text-right">
-                    <div className="flex flex-wrap justify-end gap-1">
-                      <Button
-                        aria-label={`Refresh key ${id}`}
-                        disabled={refreshDisabled}
-                        onClick={() => refreshOne.mutate(id)}
-                        title={quotaState === 'disabled' ? 'Quota refresh disabled for this endpoint' : undefined}
-                        type="button"
-                        variant="secondary"
-                      >
-                        <RefreshCw className={refreshOne.isPending && refreshOne.variables === id ? 'animate-spin' : ''} size={14} />
-                        Refresh
-                      </Button>
-                      <Button
-                        aria-label={`Reset cool and order for key ${id}`}
-                        disabled={keyAction.isPending || !id}
-                        onClick={() => keyAction.mutate({ id, path: '/reset-cooldown' })}
-                        type="button"
-                        variant="secondary"
-                      >
-                        Reset
-                      </Button>
-                      <Button
-                        aria-label={`Promote key ${id}`}
-                        disabled={keyAction.isPending || !id || !demoted}
-                        onClick={() => keyAction.mutate({ id, path: '/reset-selection' })}
-                        type="button"
-                        variant="secondary"
-                      >
-                        Promote
-                      </Button>
-                      <Button
-                        aria-label={`Demote key ${id}`}
-                        disabled={keyAction.isPending || !id}
-                        onClick={() => keyAction.mutate({ id, path: '/demote' })}
-                        type="button"
-                        variant="secondary"
-                      >
-                        Demote
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-            {items.length === 0 ? (
+            {tableLoading ? (
+              <tr>
+                <td className="py-3 text-sm text-zinc-500" colSpan={7}>
+                  Loading…
+                </td>
+              </tr>
+            ) : null}
+            {!tableLoading
+              ? items.map((row) => {
+                  const id = keyID(row.key);
+                  const quotaState = deriveQuotaOperationalState(row);
+                  const cooldownReason = valueOf<string>(row.key as Record<string, unknown>, 'CooldownReason', 'cooldown_reason', '');
+                  const cooldownUntil = valueOf<string | undefined>(row.key as Record<string, unknown>, 'CooldownUntil', 'cooldown_until', undefined);
+                  const lastFailedAt = valueOf<string | undefined>(row.key as Record<string, unknown>, 'LastFailedAt', 'last_failed_at', undefined);
+                  const demoted = Boolean(lastFailedAt);
+                  const refreshDisabled = quotaState === 'disabled' || refreshOne.isPending || !id;
+                  return (
+                    <tr className="border-b border-zinc-100" key={id || keyName(row.key)}>
+                      <td className="py-2 pr-3 font-medium text-zinc-900">{keyName(row.key)}</td>
+                      <td className="py-2 pr-3">
+                        <Badge tone={statusTone(row.status)}>{row.status}</Badge>
+                      </td>
+                      <td className="py-2 pr-3 text-xs text-zinc-600">
+                        {cooldownReason || '—'}
+                        {cooldownUntil ? <div className="text-[11px] text-zinc-400">until {formatChecked(cooldownUntil)}</div> : null}
+                      </td>
+                      <td className="py-2 pr-3 text-xs">
+                        {demoted ? (
+                          <span className="text-amber-700" title={lastFailedAt}>demoted · {formatChecked(lastFailedAt!)}</span>
+                        ) : (
+                          <span className="text-zinc-500">front pack</span>
+                        )}
+                      </td>
+                      <td className="py-2 pr-3 text-zinc-700">
+                        <div className="flex flex-col gap-0.5">
+                          <Badge tone={quotaBadgeTone(quotaState)}>{quotaState === 'ok' ? 'ok' : quotaState.replace('_', ' ')}</Badge>
+                          <span className="text-xs">{quotaStateLabel(quotaState, row)}</span>
+                          {quotaState === 'not_configured' ? (
+                            <span className="text-[11px] text-zinc-500">
+                              Configure quota credentials on{' '}
+                              <Link className="underline" to="/provider-keys">
+                                Provider Endpoints
+                              </Link>
+                            </span>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td className="py-2 pr-3 text-xs text-zinc-500">
+                        {row.quota?.checked_at ? formatChecked(row.quota.checked_at) : '—'}
+                      </td>
+                      <td className="py-2 text-right">
+                        <div className="flex flex-wrap justify-end gap-1">
+                          <Button
+                            aria-label={`Refresh key ${id}`}
+                            disabled={refreshDisabled}
+                            onClick={() => refreshOne.mutate(id)}
+                            title={quotaState === 'disabled' ? 'Quota refresh disabled for this endpoint' : undefined}
+                            type="button"
+                            variant="secondary"
+                          >
+                            <RefreshCw className={refreshOne.isPending && refreshOne.variables === id ? 'animate-spin' : ''} size={14} />
+                            Refresh
+                          </Button>
+                          <Button
+                            aria-label={`Reset cool and order for key ${id}`}
+                            disabled={keyAction.isPending || !id}
+                            onClick={() => keyAction.mutate({ id, path: '/reset-cooldown' })}
+                            type="button"
+                            variant="secondary"
+                          >
+                            Reset
+                          </Button>
+                          <Button
+                            aria-label={`Promote key ${id}`}
+                            disabled={keyAction.isPending || !id || !demoted}
+                            onClick={() => keyAction.mutate({ id, path: '/reset-selection' })}
+                            type="button"
+                            variant="secondary"
+                          >
+                            Promote
+                          </Button>
+                          <Button
+                            aria-label={`Demote key ${id}`}
+                            disabled={keyAction.isPending || !id}
+                            onClick={() => keyAction.mutate({ id, path: '/demote' })}
+                            type="button"
+                            variant="secondary"
+                          >
+                            Demote
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              : null}
+            {!tableLoading && items.length === 0 ? (
               <tr>
                 <td className="py-3 text-sm text-zinc-500" colSpan={7}>
                   {view === 'enabled' && inactiveInSummary > 0
