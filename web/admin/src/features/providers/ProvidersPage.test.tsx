@@ -48,6 +48,9 @@ function emptyPool(provider: string) {
 }
 
 function defaultMock(path: string) {
+  if (path === '/admin/api/settings/display-timezone') {
+    return { timezone: 'Asia/Hong_Kong', source: 'stored' };
+  }
   if (path === '/admin/api/provider-health') {
     return {
       items: [
@@ -216,8 +219,71 @@ describe('Provider Monitoring page', () => {
     expect(screen.getAllByRole('columnheader', { name: /actions/i }).length).toBeGreaterThan(0);
   });
 
+  it('localizes checked_at with gateway display timezone not browser locale', async () => {
+    // 2026-07-12T06:04:09Z → Asia/Hong_Kong (UTC+8) wall 14:04:09
+    vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/admin/api/settings/display-timezone') {
+        return { timezone: 'Asia/Hong_Kong', source: 'stored' };
+      }
+      if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
+      if (path.startsWith('/admin/api/provider-pools/grok?') && path.includes('offset=0')) {
+        return {
+          provider: 'grok',
+          summary: {
+            provider: 'grok',
+            key_count: 1,
+            enabled_key_count: 1,
+            available_key_count: 1,
+            cooling_key_count: 0,
+            refreshed_key_count: 1,
+          },
+          items: [
+            {
+              status: 'available',
+              key: {
+                id: 1,
+                provider: 'grok',
+                name: 'grok-1',
+                enabled: true,
+                quota_mode: 'separate_credentials',
+                quota_key_configured: true,
+              },
+              quota: {
+                provider_key_id: 1,
+                provider: 'grok',
+                available: true,
+                source: 'grok2api_admin_tokens',
+                remaining: 100,
+                limit_value: 200,
+                checked_at: '2026-07-12T06:04:09.000Z',
+              },
+            },
+          ],
+          page: { limit: 25, offset: 0, total: 1 },
+        };
+      }
+      if (path.startsWith('/admin/api/provider-pools/')) {
+        return emptyPool(path.split('/')[4].split('?')[0]);
+      }
+      throw new Error(`unexpected path ${path}`);
+    });
+
+    renderWithClient(<ProvidersPage />);
+    expect(await screen.findByText('grok-1')).toBeInTheDocument();
+    const row = screen.getByText('grok-1').closest('tr')!;
+    await waitFor(() => {
+      expect(within(row).getByText(/14:04:09/)).toBeInTheDocument();
+    });
+    // Must not use Japanese-style locale strings from browser toLocaleString.
+    expect(within(row).queryByText(/上午/)).not.toBeInTheDocument();
+    expect(within(row).queryByText(/2026\/7\/12/)).not.toBeInTheDocument();
+  });
+
   it('shows disabled and not configured quota states', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/admin/api/settings/display-timezone') {
+        return { timezone: 'UTC', source: 'host' };
+      }
       if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
       if (path.startsWith('/admin/api/provider-pools/grok?') && path.includes('offset=0')) {
         return {
@@ -293,6 +359,9 @@ describe('Provider Monitoring page', () => {
 
   it('defaults to Active pool and refetches All endpoints from offset zero', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/admin/api/settings/display-timezone') {
+        return { timezone: 'UTC', source: 'host' };
+      }
       if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
       if (path.startsWith('/admin/api/provider-pools/tavily?')) {
         const viewAll = path.includes('view=all');
@@ -409,6 +478,9 @@ describe('Provider Monitoring page', () => {
       resolveAll = resolve;
     });
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/admin/api/settings/display-timezone') {
+        return { timezone: 'UTC', source: 'host' };
+      }
       if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
       if (path.startsWith('/admin/api/provider-pools/tavily?')) {
         const payload = {
@@ -509,6 +581,9 @@ describe('Provider Monitoring page', () => {
 
   it('disables refresh-one when quota is disabled', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/admin/api/settings/display-timezone') {
+        return { timezone: 'UTC', source: 'host' };
+      }
       if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
       if (path.startsWith('/admin/api/provider-pools/grok?') && path.includes('offset=0')) {
         return {
@@ -557,6 +632,9 @@ describe('Provider Monitoring page', () => {
 
   it('does not show provider-wide quota errors when pool key quotas are refreshed', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/admin/api/settings/display-timezone') {
+        return { timezone: 'UTC', source: 'host' };
+      }
       if (path === '/admin/api/provider-health') return { items: [] };
       if (path === '/admin/api/provider-quotas') {
         return {
@@ -625,6 +703,9 @@ describe('Provider Monitoring page', () => {
 
   it('shows usage not "not refreshed" when quota row exists but remaining is null', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/admin/api/settings/display-timezone') {
+        return { timezone: 'UTC', source: 'host' };
+      }
       if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
       if (path.startsWith('/admin/api/provider-pools/tavily?') && path.includes('offset=0')) {
         return {
@@ -673,6 +754,9 @@ describe('Provider Monitoring page', () => {
 
   it('reads cooldown reason from PascalCase Go JSON', async () => {
     vi.mocked(client.apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/admin/api/settings/display-timezone') {
+        return { timezone: 'UTC', source: 'host' };
+      }
       if (path === '/admin/api/provider-health' || path === '/admin/api/provider-quotas') return { items: [] };
       if (path.startsWith('/admin/api/provider-pools/tavily?') && path.includes('offset=0')) {
         return {
