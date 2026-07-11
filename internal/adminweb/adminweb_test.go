@@ -951,6 +951,50 @@ func TestProxyDebugAttemptsGetAndPatch(t *testing.T) {
 	}
 }
 
+func TestDisplayTimezoneGetAndPatch(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/settings/display-timezone", nil)
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"timezone"`) || !strings.Contains(rec.Body.String(), `"source"`) {
+		t.Fatalf("get body: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"source":"host"`) {
+		t.Fatalf("expected host source: %s", rec.Body.String())
+	}
+
+	rec2 := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/settings/display-timezone",
+		`{"timezone":"Asia/Seoul"}`, csrf, c)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("patch status=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+	if !strings.Contains(rec2.Body.String(), `"timezone":"Asia/Seoul"`) ||
+		!strings.Contains(rec2.Body.String(), `"source":"stored"`) {
+		t.Fatalf("patch body: %s", rec2.Body.String())
+	}
+
+	rec3 := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/settings/display-timezone",
+		`{"timezone":"Not/A_Zone"}`, csrf, c)
+	if rec3.Code != http.StatusBadRequest {
+		t.Fatalf("invalid status=%d body=%s", rec3.Code, rec3.Body.String())
+	}
+
+	rec4 := serveMutatingAdmin(app, http.MethodPatch, "/admin/api/settings/display-timezone",
+		`{"use_host":true}`, csrf, c)
+	if rec4.Code != http.StatusOK {
+		t.Fatalf("use_host status=%d body=%s", rec4.Code, rec4.Body.String())
+	}
+	if !strings.Contains(rec4.Body.String(), `"source":"host"`) {
+		t.Fatalf("use_host body: %s", rec4.Body.String())
+	}
+}
+
 func TestProviderKeyQuotaRefreshAllRequiresProvider(t *testing.T) {
 	app, auth, _, _, _, _ := openAdminApp(t)
 	token := initToken(t, auth)
