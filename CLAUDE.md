@@ -1,4 +1,4 @@
-# CLAUDE.md
+# Agent Instruction
 
 > Project **doc index** only. Placeholders: `{WIKI_PATH}` (`/Users/karlchow/wiki`),
 > `{HOME}`, `{REPO_ROOT}` (this repo). No secret values.
