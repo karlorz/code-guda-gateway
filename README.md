@@ -278,6 +278,34 @@ GHCR uses `GITHUB_TOKEN` with workflow `packages: write`. After secrets exist,
 run Actions → **docker-image** → **Run workflow** with an existing tag, or push
 the next release tag.
 
+### Coolify (pinned tag)
+
+Use `docker-compose.coolify-tag.yml` (same shape as CLIProxyAPI’s Coolify
+compose): pinned multi-arch image, healthcheck on `/healthz`, persistent
+`./data` + `./etc` binds, optional external `aigateway` network.
+
+```bash
+# Once per host if you use the shared mesh network
+docker network create aigateway
+
+# Bump the image: line when promoting a release (see deploy/code-guda-gateway/stable)
+# image: 'karlorz/code-guda-gateway:v0.3.8-stable'
+```
+
+In Coolify, deploy from this compose file (or paste its service definition).
+Keep the volume binds so SQLite and `master.key` survive redeploys. After first
+healthy start, create operational credentials once:
+
+```bash
+docker compose -f docker-compose.coolify-tag.yml exec code-guda-gateway \
+  guda-gateway-admin token init
+docker compose -f docker-compose.coolify-tag.yml exec code-guda-gateway \
+  guda-gateway-admin gateway-key create --name coolify
+```
+
+Do not bake admin tokens or provider keys into the compose file. Production on
+`kr01` remains binary + systemd unless you explicitly cut over.
+
 ## Local development
 
 ### One-command dev boot

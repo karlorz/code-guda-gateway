@@ -18,3 +18,7 @@ internal/adminweb/assets/dist/*
 dist/
 .release-test/
 .worktrees/
+
+# Coolify / local docker binds
+/data/
+/etc/
