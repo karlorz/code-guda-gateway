@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# Container entrypoint: ensure admin token exists for Coolify/first-boot UX.
-# Raw token is written once to a volume file (like grok2api's on-disk config).
-# The DB only stores a hash — the raw token cannot be recovered later.
+# Container entrypoint: Coolify-friendly admin bootstrap (approach C).
+#
+# Prefer GUDA_ADMIN_TOKEN from Coolify magic env:
+#   GUDA_ADMIN_TOKEN=${SERVICE_PASSWORD_64_GUDAADMIN}
+# On first boot (or when syncing), hash that value into SQLite and mirror to
+# the data volume (admin-credentials.env + ADMIN_LOGIN.txt).
+#
+# SQLite stores only a hash. Coolify Environment UI shows the magic password.
 set -euo pipefail
 
 DB_PATH="${DB_PATH:-/var/lib/code-guda-gateway/gateway.db}"
@@ -11,54 +16,63 @@ CRED_ENV="${GUDA_ADMIN_CREDENTIALS_PATH:-$CRED_DIR/admin-credentials.env}"
 CRED_NOTE="${GUDA_ADMIN_NOTE_PATH:-$CRED_DIR/ADMIN_LOGIN.txt}"
 BOOTSTRAP="${GUDA_BOOTSTRAP_ADMIN_TOKEN:-1}"
 
-if [[ "$BOOTSTRAP" == "1" || "$BOOTSTRAP" == "true" ]]; then
-  mkdir -p "$CRED_DIR" "$(dirname "$GUDA_MASTER_KEY_PATH")"
-  # token init fails if already set (exit non-zero) — that is expected after first boot.
-  if raw="$(
-    guda-gateway-admin \
-      --db "$DB_PATH" \
-      --master-key "$GUDA_MASTER_KEY_PATH" \
-      token init \
-      --save-env "$CRED_ENV" 2>/dev/null
-  )"; then
-    raw="$(printf '%s\n' "$raw" | tr -d '\r' | head -n1)"
-    umask 077
-    cat >"$CRED_NOTE" <<EOF
-code-guda-gateway admin login (generated on first boot)
+write_login_note() {
+  local mode="$1"
+  umask 077
+  cat >"$CRED_NOTE" <<EOF
+code-guda-gateway admin login (${mode})
 
-Admin UI:  /admin  (use the public Coolify HTTPS URL)
-Token:     see admin-credentials.env (GUDA_ADMIN_TOKEN)
-File:      $CRED_ENV
+Admin UI:  /admin  (Coolify HTTPS URL)
+Primary:   Coolify → Environment → GUDA_ADMIN_TOKEN
+Mirror:    ${CRED_ENV}
 
-This token is shown only at init/rotate. The database stores a hash only.
-To rotate (invalidates the old token and rewrites the files):
+SQLite stores a hash only. Use Coolify Environment for UI-visible login.
+Volume file is an SSH/storage mirror (grok2api-style).
 
-  guda-gateway-admin token rotate --save-env $CRED_ENV
+If env and DB diverge after a Coolify password regenerate:
+
+  guda-gateway-admin token sync-env --save-env ${CRED_ENV}
 
 EOF
-    chmod 600 "$CRED_ENV" "$CRED_NOTE" 2>/dev/null || true
-    # Log path only — never log the raw token.
-    echo "guda-gateway: first-boot admin token written to $CRED_ENV (see $CRED_NOTE)" >&2
-  elif [[ -f "$CRED_ENV" ]]; then
-    : # already bootstrapped
+  chmod 600 "$CRED_NOTE" 2>/dev/null || true
+}
+
+if [[ "$BOOTSTRAP" == "1" || "$BOOTSTRAP" == "true" ]]; then
+  mkdir -p "$CRED_DIR" "$(dirname "$GUDA_MASTER_KEY_PATH")"
+
+  if [[ -n "${GUDA_ADMIN_TOKEN:-}" ]]; then
+    # Align DB hash to Coolify/env secret (init or replace). Always mirror to volume.
+    if guda-gateway-admin \
+      --db "$DB_PATH" \
+      --master-key "$GUDA_MASTER_KEY_PATH" \
+      token sync-env --save-env "$CRED_ENV" >/dev/null 2>&1; then
+      write_login_note "Coolify/env GUDA_ADMIN_TOKEN"
+      echo "guda-gateway: admin token synced from env; mirrored to $CRED_ENV" >&2
+    else
+      echo "guda-gateway: token sync-env failed (check GUDA_ADMIN_TOKEN length/format)" >&2
+    fi
   else
-    # Already initialized in DB but credentials file missing (e.g. volume wipe of env only).
-    # Operator must rotate to obtain a new raw token.
-    if [[ ! -f "$CRED_NOTE" ]]; then
+    # No Coolify password: generate classic gat_… once if DB empty.
+    if guda-gateway-admin \
+      --db "$DB_PATH" \
+      --master-key "$GUDA_MASTER_KEY_PATH" \
+      token init --save-env "$CRED_ENV" >/dev/null 2>&1; then
+      write_login_note "generated gat_ token (set Coolify SERVICE_PASSWORD for UI)"
+      echo "guda-gateway: admin token generated; written to $CRED_ENV" >&2
+    elif [[ -f "$CRED_ENV" ]]; then
+      :
+    elif [[ ! -f "$CRED_NOTE" ]]; then
       cat >"$CRED_NOTE" <<EOF
 code-guda-gateway admin login
 
-No raw token file found, but the database may already have an admin token hash.
-The raw token cannot be recovered from the database.
-
-Rotate to mint a new token and write admin-credentials.env:
+No GUDA_ADMIN_TOKEN in environment and token may already exist in DB.
+Set Coolify magic env GUDA_ADMIN_TOKEN=\${SERVICE_PASSWORD_64_GUDAADMIN}
+then redeploy, or:
 
   guda-gateway-admin token rotate --save-env $CRED_ENV
-
-Then open /admin and paste GUDA_ADMIN_TOKEN from that file.
 EOF
       chmod 600 "$CRED_NOTE" 2>/dev/null || true
-      echo "guda-gateway: admin token already set; rotate required (see $CRED_NOTE)" >&2
+      echo "guda-gateway: see $CRED_NOTE" >&2
     fi
   fi
 fi

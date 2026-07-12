@@ -89,6 +89,67 @@ func TestTokenVerify_AcceptsRawRejectsBogus(t *testing.T) {
 	}
 }
 
+func TestInitFromRaw_CoolifyStylePassword(t *testing.T) {
+	t.Parallel()
+	svc, _ := openTestService(t)
+	// Coolify SERVICE_PASSWORD_64 style: long alphanumeric, not gat_ prefix.
+	secret := "CoolifyServicePassword64CharsLongABCDEFGH0123456789xyz"
+	if err := svc.InitFromRaw(secret); err != nil {
+		t.Fatalf("InitFromRaw: %v", err)
+	}
+	ok, err := svc.Verify(secret)
+	if err != nil || !ok {
+		t.Fatalf("Verify(coolify): ok=%v err=%v", ok, err)
+	}
+	if err := svc.InitFromRaw(secret); !errors.Is(err, adminauth.ErrTokenAlreadySet) {
+		t.Fatalf("second InitFromRaw: %v", err)
+	}
+}
+
+func TestSetFromRaw_NoopWhenSame(t *testing.T) {
+	t.Parallel()
+	svc, _ := openTestService(t)
+	secret := "SameCoolifyPasswordXX0123456789ab"
+	if err := svc.SetFromRaw(secret); err != nil {
+		t.Fatalf("SetFromRaw init: %v", err)
+	}
+	if err := svc.SetFromRaw(secret); err != nil {
+		t.Fatalf("SetFromRaw same: %v", err)
+	}
+	ok, _ := svc.Verify(secret)
+	if !ok {
+		t.Fatal("secret no longer verifies after noop SetFromRaw")
+	}
+	other := "OtherCoolifyPasswordYY0123456789cd"
+	if err := svc.SetFromRaw(other); err != nil {
+		t.Fatalf("SetFromRaw other: %v", err)
+	}
+	ok, _ = svc.Verify(secret)
+	if ok {
+		t.Fatal("old secret still verifies after SetFromRaw change")
+	}
+	ok, _ = svc.Verify(other)
+	if !ok {
+		t.Fatal("new secret does not verify")
+	}
+}
+
+func TestValidAdminSecret(t *testing.T) {
+	t.Parallel()
+	if !adminauth.ValidAdminSecret("gat_" + strings.Repeat("A", 32)) {
+		t.Fatal("want classic gat_ token valid")
+	}
+	if !adminauth.ValidAdminSecret(strings.Repeat("x", 16)) {
+		t.Fatal("want 16-char coolify password valid")
+	}
+	if adminauth.ValidAdminSecret("short") {
+		t.Fatal("short secret must be invalid")
+	}
+	if adminauth.ValidAdminSecret("has space not allowed!!") {
+		t.Fatal("spaces must be invalid")
+	}
+}
+
 func TestTokenRotate_InvalidatesOld(t *testing.T) {
 	t.Parallel()
 	svc, _ := openTestService(t)

@@ -87,6 +87,7 @@ func (a *app) masterKey() ([]byte, error) {
 type tokenEnvOptions struct {
 	savePath string
 	envKey   string
+	fromEnv  bool
 }
 
 func recordCLIAudit(db *sql.DB, action, targetKind, targetID, detail string) {
@@ -101,7 +102,7 @@ func recordCLIAudit(db *sql.DB, action, targetKind, targetID, detail string) {
 
 func (a *app) cmdToken(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.stderr, "usage: token init|rotate [--save-env PATH] [--env-key NAME] | token verify [--token TOKEN]")
+		fmt.Fprintln(a.stderr, "usage: token init|sync-env|rotate [--from-env] [--save-env PATH] [--env-key NAME] | token verify [--token TOKEN]")
 		return exitUsage
 	}
 	st, err := a.openStore()
@@ -118,16 +119,61 @@ func (a *app) cmdToken(args []string) int {
 			fmt.Fprintf(a.stderr, "%v\n", err)
 			return exitUsage
 		}
-		raw, err := auth.Init()
+		var raw string
+		if envOpts.fromEnv {
+			raw = strings.TrimSpace(os.Getenv(envOpts.envKey))
+			if raw == "" {
+				fmt.Fprintf(a.stderr, "token init --from-env: %s is empty\n", envOpts.envKey)
+				return exitError
+			}
+			if err := auth.InitFromRaw(raw); err != nil {
+				if errors.Is(err, adminauth.ErrTokenAlreadySet) {
+					fmt.Fprintln(a.stderr, "admin token already initialized")
+				} else if errors.Is(err, adminauth.ErrInvalidToken) {
+					fmt.Fprintf(a.stderr, "token init --from-env: invalid %s (need gat_… or 16–128 printable chars)\n", envOpts.envKey)
+				} else {
+					fmt.Fprintf(a.stderr, "token init: %v\n", err)
+				}
+				return exitError
+			}
+		} else {
+			raw, err = auth.Init()
+			if err != nil {
+				if errors.Is(err, adminauth.ErrTokenAlreadySet) {
+					fmt.Fprintln(a.stderr, "admin token already initialized")
+				} else {
+					fmt.Fprintf(a.stderr, "token init: %v\n", err)
+				}
+				return exitError
+			}
+		}
+		recordCLIAudit(st.DB(), "admin_token.init", "admin_token", "", "result=ok")
+		return a.writeAdminToken(raw, envOpts)
+	case "sync-env":
+		// Align DB hash to GUDA_ADMIN_TOKEN (Coolify magic password). Init or replace.
+		envOpts, err := parseTokenEnvOptions(args[1:])
 		if err != nil {
-			if errors.Is(err, adminauth.ErrTokenAlreadySet) {
-				fmt.Fprintln(a.stderr, "admin token already initialized")
+			fmt.Fprintf(a.stderr, "%v\n", err)
+			return exitUsage
+		}
+		raw := strings.TrimSpace(os.Getenv(envOpts.envKey))
+		if raw == "" {
+			fmt.Fprintf(a.stderr, "token sync-env: %s is empty\n", envOpts.envKey)
+			return exitError
+		}
+		if err := auth.SetFromRaw(raw); err != nil {
+			if errors.Is(err, adminauth.ErrInvalidToken) {
+				fmt.Fprintf(a.stderr, "token sync-env: invalid %s (need gat_… or 16–128 printable chars)\n", envOpts.envKey)
 			} else {
-				fmt.Fprintf(a.stderr, "token init: %v\n", err)
+				fmt.Fprintf(a.stderr, "token sync-env: %v\n", err)
 			}
 			return exitError
 		}
-		recordCLIAudit(st.DB(), "admin_token.init", "admin_token", "", "result=ok")
+		// Default save path for Coolify volume mirror when not specified.
+		if envOpts.savePath == "" {
+			envOpts.savePath = "/var/lib/code-guda-gateway/admin-credentials.env"
+		}
+		recordCLIAudit(st.DB(), "admin_token.sync_env", "admin_token", "", "result=ok")
 		return a.writeAdminToken(raw, envOpts)
 	case "rotate":
 		envOpts, err := parseTokenEnvOptions(args[1:])
@@ -135,10 +181,27 @@ func (a *app) cmdToken(args []string) int {
 			fmt.Fprintf(a.stderr, "%v\n", err)
 			return exitUsage
 		}
-		raw, err := auth.Rotate()
-		if err != nil {
-			fmt.Fprintf(a.stderr, "token rotate: %v\n", err)
-			return exitError
+		var raw string
+		if envOpts.fromEnv {
+			raw = strings.TrimSpace(os.Getenv(envOpts.envKey))
+			if raw == "" {
+				fmt.Fprintf(a.stderr, "token rotate --from-env: %s is empty\n", envOpts.envKey)
+				return exitError
+			}
+			if err := auth.SetFromRaw(raw); err != nil {
+				if errors.Is(err, adminauth.ErrInvalidToken) {
+					fmt.Fprintf(a.stderr, "token rotate --from-env: invalid %s\n", envOpts.envKey)
+				} else {
+					fmt.Fprintf(a.stderr, "token rotate: %v\n", err)
+				}
+				return exitError
+			}
+		} else {
+			raw, err = auth.Rotate()
+			if err != nil {
+				fmt.Fprintf(a.stderr, "token rotate: %v\n", err)
+				return exitError
+			}
 		}
 		recordCLIAudit(st.DB(), "admin_token.rotate", "admin_token", "", "result=ok")
 		return a.writeAdminToken(raw, envOpts)
@@ -169,6 +232,8 @@ func parseTokenEnvOptions(flags []string) (tokenEnvOptions, error) {
 	opts := tokenEnvOptions{envKey: "GUDA_ADMIN_TOKEN"}
 	for i := 0; i < len(flags); i++ {
 		switch flags[i] {
+		case "--from-env":
+			opts.fromEnv = true
 		case "--save-env":
 			if i+1 >= len(flags) || strings.TrimSpace(flags[i+1]) == "" {
 				return opts, errors.New("token --save-env requires PATH")
@@ -961,7 +1026,9 @@ Global flags (before subcommand):
   --master-key PATH  Master key file (default /etc/code-guda-gateway/master.key)
 
 Commands:
-  token init|rotate [--save-env PATH] [--env-key NAME] | token verify [--token TOKEN]
+  token init [--from-env] [--save-env PATH] [--env-key NAME]
+  token sync-env [--save-env PATH] [--env-key NAME]   # set hash from GUDA_ADMIN_TOKEN (Coolify)
+  token rotate [--from-env] [--save-env PATH] [--env-key NAME] | token verify [--token TOKEN]
   gateway-key create --name NAME | list | disable|enable|revoke|delete --id ID
   provider-key add --provider grok|tavily|firecrawl --name NAME (key on stdin only; never pass secrets as argv)
   provider-key list | disable|enable|archive|restore|reset-cooldown|reset-selection|demote|delete --id ID

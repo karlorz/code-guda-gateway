@@ -12,21 +12,20 @@
 # Before first use of the shared mesh on a host:
 #   docker network create aigateway
 #
-# Coolify: bump image tag when promoting releases (see deploy/.../stable).
-# Persist the two volume binds so SQLite + master.key survive redeploys.
+# Coolify admin login (approach C — UI + volume):
+# - GUDA_ADMIN_TOKEN=${SERVICE_PASSWORD_64_GUDAADMIN} is a Coolify magic env.
+#   Coolify generates a random password on first deploy, shows it under
+#   Environment Variables, and reinjects it on every redeploy.
+# - Image entrypoint hashes that value into SQLite on first boot and mirrors
+#   it to ./data/admin-credentials.env (SSH/storage), like grok2api config.toml.
+# - Open Coolify → Environment → GUDA_ADMIN_TOKEN (or SERVICE_PASSWORD_64_GUDAADMIN)
+#   and paste into /admin. Do not expect SQLite to reveal the raw secret.
 #
-# First boot (image entrypoint):
-# - auto-migrates SQLite and creates master.key if missing
-# - runs `token init` once and writes (mode 0600):
-#     ./data/admin-credentials.env   # GUDA_ADMIN_TOKEN=gat_...
-#     ./data/ADMIN_LOGIN.txt         # human pointer (no recovery of old tokens)
-# Read the token from the Coolify volume / terminal — it is NOT in container logs
-# as a recoverable secret after rotate, and never stored in SQLite plaintext.
-# Disable bootstrap with GUDA_BOOTSTRAP_ADMIN_TOKEN=0 if desired.
-# Gateway keys / provider keys still need guda-gateway-admin after login.
+# Coolify: bump image tag when promoting releases (see deploy/.../stable).
+# Persist the two volume binds so SQLite + master.key + credential files survive.
 services:
   code-guda-gateway:
-    image: 'karlorz/code-guda-gateway:v0.3.9-stable'
+    image: 'karlorz/code-guda-gateway:v0.3.10-stable'
     environment:
       - 'DEPLOY=${DEPLOY:-}'
       - SERVICE_FQDN_CODEGUDAGATEWAY_8080
@@ -35,6 +34,8 @@ services:
       - 'GUDA_MASTER_KEY_PATH=/etc/code-guda-gateway/master.key'
       # Behind Coolify TLS: keep Secure cookies. Set false only for plain-HTTP debug.
       - 'GUDA_ADMIN_COOKIE_SECURE=${GUDA_ADMIN_COOKIE_SECURE:-true}'
+      # Coolify magic password → Environment UI + container env (first-boot init).
+      - 'GUDA_ADMIN_TOKEN=${SERVICE_PASSWORD_64_GUDAADMIN}'
     # No host ports — Traefik routes to container :8080.
     expose:
       - '8080'
@@ -48,7 +49,7 @@ services:
       start_period: 15s
     restart: unless-stopped
     volumes:
-      # SQLite DB (and related files under this directory)
+      # SQLite DB + admin-credentials.env + ADMIN_LOGIN.txt
       - './data:/var/lib/code-guda-gateway'
       # master.key (created on first start if absent; do not lose this volume)
       - './etc:/etc/code-guda-gateway'

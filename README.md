@@ -296,36 +296,45 @@ healthcheck, persistent `./data` + `./etc` binds.
 
 Keep the volume binds so SQLite and `master.key` survive redeploys.
 
-**Admin login (Coolify / Docker first boot)**
+**Admin login (Coolify / Docker — approach C)**
 
-Unlike grok2api’s `/app/data/config.toml`, this gateway **never stores the raw
-admin token in SQLite** (hash only). On first container start the image
-entrypoint runs `token init` once and writes:
+Unlike grok2api’s `/app/data/config.toml`, SQLite stores only a **hash**. For
+Coolify, the sample compose uses a **magic password** so the secret is visible
+in the Coolify Environment UI (same pattern as DB passwords):
 
-| Path (in container / volume) | Contents |
+```yaml
+environment:
+  - GUDA_ADMIN_TOKEN=${SERVICE_PASSWORD_64_GUDAADMIN}
+```
+
+| Where | What you see |
 |---|---|
-| `/var/lib/code-guda-gateway/admin-credentials.env` | `GUDA_ADMIN_TOKEN=gat_...` (mode `0600`) |
-| `/var/lib/code-guda-gateway/ADMIN_LOGIN.txt` | Short how-to (no second copy of the secret required) |
+| **Coolify → Environment** | `GUDA_ADMIN_TOKEN` / `SERVICE_PASSWORD_64_GUDAADMIN` (primary) |
+| **Volume** `…/data/admin-credentials.env` | Mirror of the same secret (SSH/storage) |
+| **Volume** `…/data/ADMIN_LOGIN.txt` | Short how-to |
+| **SQLite** | Hash only — not recoverable |
 
-On Coolify host volume (example UUID):
+On first boot (and when env changes), the entrypoint runs `token sync-env` so
+the DB hash matches Coolify’s password, then mirrors the file.
 
 ```bash
-# Host path under Coolify service storage
+# Coolify UI: Environment → GUDA_ADMIN_TOKEN  (preferred)
+# Or host:
 sudo cat /data/coolify/services/<uuid>/data/admin-credentials.env
-# or
 docker exec <container> cat /var/lib/code-guda-gateway/admin-credentials.env
 ```
 
-Open `https://<coolify-fqdn>/admin` and paste that token. If the file is
-missing but the DB already has a hash, rotate:
+Open `https://<coolify-fqdn>/admin` and paste that value. Without Coolify magic
+env, the entrypoint still generates a one-time `gat_…` into the volume file.
 
 ```bash
-docker exec <container> guda-gateway-admin token rotate \
+# Force DB to match current container env (after regenerating Coolify password)
+docker exec <container> guda-gateway-admin token sync-env \
   --save-env /var/lib/code-guda-gateway/admin-credentials.env
 ```
 
-Then create gateway keys as needed (`gateway-key create`). Do not bake tokens
-into compose. Production on `kr01` remains binary + systemd unless you cut over.
+Then create gateway keys as needed (`gateway-key create`). Do not bake secrets
+into git. Production on `kr01` remains binary + systemd unless you cut over.
 
 ## Local development
 

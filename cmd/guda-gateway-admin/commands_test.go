@@ -178,6 +178,37 @@ func TestTokenInit_RefusesDoubleInit(t *testing.T) {
 	}
 }
 
+func TestTokenSyncEnv_CoolifyPassword(t *testing.T) {
+	dbPath, masterPath := testEnv(t)
+	secret := "CoolifyServicePassword64CharsLongABCDEFGH0123456789xyz"
+	t.Setenv("GUDA_ADMIN_TOKEN", secret)
+	envPath := filepath.Join(t.TempDir(), "admin-credentials.env")
+	stdout, stderr, code := runCLI(t, dbPath, masterPath, "", "token", "sync-env", "--save-env", envPath)
+	if code != 0 {
+		t.Fatalf("sync-env exit %d stderr=%s", code, stderr)
+	}
+	if strings.TrimSpace(stdout) != secret {
+		t.Fatalf("stdout want secret, got %q", stdout)
+	}
+	body, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("read env: %v", err)
+	}
+	if !strings.Contains(string(body), "GUDA_ADMIN_TOKEN="+secret) {
+		t.Fatalf("env file missing binding: %q", body)
+	}
+	auth := adminauth.NewService(openDB(t, dbPath), 0)
+	ok, err := auth.Verify(secret)
+	if err != nil || !ok {
+		t.Fatalf("verify coolify secret: ok=%v err=%v", ok, err)
+	}
+	// Idempotent when same secret.
+	_, stderr, code = runCLI(t, dbPath, masterPath, "", "token", "sync-env", "--save-env", envPath)
+	if code != 0 {
+		t.Fatalf("second sync-env exit %d stderr=%s", code, stderr)
+	}
+}
+
 func TestTokenVerify_ValidAndInvalid(t *testing.T) {
 	dbPath, masterPath := testEnv(t)
 	stdout, _, _ := runCLI(t, dbPath, masterPath, "", "token", "init")
