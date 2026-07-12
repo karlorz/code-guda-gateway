@@ -27,7 +27,10 @@ RUN apt-get update \
 COPY --from=go-builder /out/guda-gateway /usr/local/bin/guda-gateway
 COPY --from=go-builder /out/guda-gateway-admin /usr/local/bin/guda-gateway-admin
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY scripts/seed-instance.sh /usr/local/bin/seed-instance
+COPY scripts/seed-provider-keys.sh /usr/local/share/code-guda-gateway/seed-provider-keys.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/seed-instance \
+  && chmod 644 /usr/local/share/code-guda-gateway/seed-provider-keys.sh
 ENV ADDR=0.0.0.0:8080 \
     DB_PATH=/var/lib/code-guda-gateway/gateway.db \
     GUDA_MASTER_KEY_PATH=/etc/code-guda-gateway/master.key \

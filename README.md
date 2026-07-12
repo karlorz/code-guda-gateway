@@ -333,8 +333,40 @@ docker exec <container> guda-gateway-admin token sync-env \
   --save-env /var/lib/code-guda-gateway/admin-credentials.env
 ```
 
-Then create gateway keys as needed (`gateway-key create`). Do not bake secrets
-into git. Production on `kr01` remains binary + systemd unless you cut over.
+### Full seed coverage (VM · Coolify · local)
+
+Use the **same** script everywhere (kr01-style coverage, Coolify optional):
+
+```bash
+# After secrets are in the environment (see scripts/templates/secrets.env.example)
+./scripts/seed-instance.sh
+# In container:  seed-instance
+```
+
+| Step | Action |
+|------|--------|
+| 1 | `db migrate` |
+| 2 | Admin token (`sync-env` if `GUDA_ADMIN_TOKEN` set, else `init` once) |
+| 3 | Gateway key create if name missing → `GUDA_API_KEY` in save-env |
+| 4 | Provider endpoints + quota (`seed-provider-keys.sh`) |
+
+Coolify options (after gateway healthy):
+
+```bash
+# One-shot exec (preferred)
+docker exec -e GUDA_SEED_PROFILE=coolify \
+  -e GROK_1_API_KEY=… -e TAVILY_API_KEYS=… -e FIRECRAWL_1_API_KEY=… \
+  <container> seed-instance
+
+# Or compose profile
+docker compose -f docker-compose.coolify-tag.yml -f docker-compose.coolify-seed.yml \
+  --profile seed run --rm seed
+
+# Or every start (optional): set GUDA_SEED_ON_START=1 + provider secrets on gateway
+```
+
+Details: `scripts/templates/seed-flow.md`. Do not bake secrets into git.
+Production on `kr01` remains binary + systemd unless you cut over.
 
 ## Local development
 

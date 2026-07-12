@@ -1,0 +1,42 @@
+# Optional one-shot seed stack for Coolify / Docker.
+# Same coverage as VM (kr01) seed-instance: migrate, admin, gateway-key, providers.
+#
+# Prerequisites:
+#   - Main gateway already deployed (docker-compose.coolify-tag.yml) and healthy
+#   - Shared data + etc volumes (same paths as the gateway service)
+#   - Secrets supplied via Coolify Environment or a local secrets.env (never commit)
+#
+# Coolify: add as a second service in the same resource, or run once via:
+#   docker compose -f docker-compose.coolify-tag.yml -f docker-compose.coolify-seed.yml run --rm seed
+#
+# Required env (examples — set in Coolify UI as locked secrets):
+#   GUDA_ADMIN_TOKEN=${SERVICE_PASSWORD_64_GUDAADMIN}   # or paste gat_…
+#   GROK_1_API_KEY / GROK_1_QUOTA_KEY / TAVILY_API_KEYS / FIRECRAWL_1_API_KEY
+#
+# This container exits 0 after seed; it does not stay running.
+services:
+  seed:
+    image: 'karlorz/code-guda-gateway:v0.3.11-stable'
+    profiles: ['seed']
+    entrypoint: ['/usr/local/bin/seed-instance']
+    environment:
+      - 'DB_PATH=/var/lib/code-guda-gateway/gateway.db'
+      - 'GUDA_MASTER_KEY_PATH=/etc/code-guda-gateway/master.key'
+      - 'GUDA_SEED_PROFILE=coolify'
+      - 'GUDA_SEED_GATEWAY_KEY_NAME=${GUDA_SEED_GATEWAY_KEY_NAME:-coolify}'
+      - 'GUDA_SEED_SAVE_ENV=/var/lib/code-guda-gateway/admin-credentials.env'
+      # Prefer Coolify magic admin password (same as gateway service)
+      - 'GUDA_ADMIN_TOKEN=${SERVICE_PASSWORD_64_GUDAADMIN}'
+      # Provider secrets — set real values in Coolify Environment (locked)
+      - 'GROK_1_API_KEY=${GROK_1_API_KEY:-}'
+      - 'GROK_1_BASE_URL=${GROK_1_BASE_URL:-https://new.karldigi.dev/v1}'
+      - 'GROK_1_QUOTA_KEY=${GROK_1_QUOTA_KEY:-}'
+      - 'GROK_1_QUOTA_BASE_URL=${GROK_1_QUOTA_BASE_URL:-https://grok.karldigi.dev}'
+      - 'TAVILY_API_KEYS=${TAVILY_API_KEYS:-}'
+      - 'TAVILY_BASE_URL=${TAVILY_BASE_URL:-https://api.tavily.com}'
+      - 'FIRECRAWL_1_API_KEY=${FIRECRAWL_1_API_KEY:-}'
+      - 'FIRECRAWL_BASE_URL=${FIRECRAWL_BASE_URL:-https://api.firecrawl.dev/v2}'
+    volumes:
+      - './data:/var/lib/code-guda-gateway'
+      - './etc:/etc/code-guda-gateway'
+    restart: 'no'

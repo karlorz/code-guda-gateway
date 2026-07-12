@@ -25,7 +25,7 @@
 # Persist the two volume binds so SQLite + master.key + credential files survive.
 services:
   code-guda-gateway:
-    image: 'karlorz/code-guda-gateway:v0.3.10-stable'
+    image: 'karlorz/code-guda-gateway:v0.3.11-stable'
     environment:
       - 'DEPLOY=${DEPLOY:-}'
       - SERVICE_FQDN_CODEGUDAGATEWAY_8080

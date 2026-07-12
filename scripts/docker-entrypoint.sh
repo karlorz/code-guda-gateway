@@ -7,6 +7,11 @@
 # the data volume (admin-credentials.env + ADMIN_LOGIN.txt).
 #
 # SQLite stores only a hash. Coolify Environment UI shows the magic password.
+#
+# Optional full seed (same coverage as VM/kr01 seed-instance.sh):
+#   GUDA_SEED_ON_START=1  plus provider secrets in env → after admin bootstrap,
+#   runs seed-instance (gateway key + provider endpoints). Default off so
+#   Coolify stays lean unless you opt in.
 set -euo pipefail
 
 DB_PATH="${DB_PATH:-/var/lib/code-guda-gateway/gateway.db}"
@@ -15,6 +20,7 @@ CRED_DIR="$(dirname "$DB_PATH")"
 CRED_ENV="${GUDA_ADMIN_CREDENTIALS_PATH:-$CRED_DIR/admin-credentials.env}"
 CRED_NOTE="${GUDA_ADMIN_NOTE_PATH:-$CRED_DIR/ADMIN_LOGIN.txt}"
 BOOTSTRAP="${GUDA_BOOTSTRAP_ADMIN_TOKEN:-1}"
+SEED_ON_START="${GUDA_SEED_ON_START:-0}"
 
 write_login_note() {
   local mode="$1"
@@ -74,6 +80,19 @@ EOF
       chmod 600 "$CRED_NOTE" 2>/dev/null || true
       echo "guda-gateway: see $CRED_NOTE" >&2
     fi
+  fi
+fi
+
+if [[ "$SEED_ON_START" == "1" || "$SEED_ON_START" == "true" ]]; then
+  export GUDA_SEED_SAVE_ENV="${GUDA_SEED_SAVE_ENV:-$CRED_ENV}"
+  export GUDA_SEED_PROFILE="${GUDA_SEED_PROFILE:-coolify}"
+  # Admin already handled above; avoid double sync noise.
+  export GUDA_SEED_SKIP_ADMIN="${GUDA_SEED_SKIP_ADMIN:-1}"
+  if command -v seed-instance >/dev/null 2>&1; then
+    echo "guda-gateway: GUDA_SEED_ON_START=1 → seed-instance" >&2
+    seed-instance || echo "guda-gateway: seed-instance failed (gateway still starting)" >&2
+  else
+    echo "guda-gateway: seed-instance not in PATH" >&2
   fi
 fi
 
