@@ -1,0 +1,33 @@
+# VCS / CI
+.git
+.github
+.worktrees
+
+# Local build outputs
+guda-gateway
+guda-gateway-admin
+dist
+.release-test
+coverage.out
+*.test
+logs
+
+# Frontend (rebuilt in image)
+web/admin/node_modules
+web/admin/dist
+web/admin/test-results
+web/admin/playwright-report
+
+# Embed dist is rebuilt in image; keep .keep out of critical path
+internal/adminweb/assets/dist/*
+!internal/adminweb/assets/dist/.keep
+
+# Secrets / local env (never bake)
+.env
+.env.local
+.mcp.json
+.codex
+.claude
+
+# Docs not needed for build
+logs/
