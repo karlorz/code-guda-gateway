@@ -26,10 +26,13 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=go-builder /out/guda-gateway /usr/local/bin/guda-gateway
 COPY --from=go-builder /out/guda-gateway-admin /usr/local/bin/guda-gateway-admin
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENV ADDR=0.0.0.0:8080 \
     DB_PATH=/var/lib/code-guda-gateway/gateway.db \
     GUDA_MASTER_KEY_PATH=/etc/code-guda-gateway/master.key \
-    GUDA_ADMIN_COOKIE_SECURE=false
+    GUDA_ADMIN_COOKIE_SECURE=false \
+    GUDA_BOOTSTRAP_ADMIN_TOKEN=1
 EXPOSE 8080
 RUN mkdir -p /var/lib/code-guda-gateway /etc/code-guda-gateway
-ENTRYPOINT ["/usr/local/bin/guda-gateway"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

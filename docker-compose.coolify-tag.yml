@@ -15,9 +15,15 @@
 # Coolify: bump image tag when promoting releases (see deploy/.../stable).
 # Persist the two volume binds so SQLite + master.key survive redeploys.
 #
-# First boot auto-migrates SQLite and creates master.key if missing.
-# Create admin token / gateway keys via Coolify terminal or:
-#   docker exec <container> guda-gateway-admin token init
+# First boot (image entrypoint):
+# - auto-migrates SQLite and creates master.key if missing
+# - runs `token init` once and writes (mode 0600):
+#     ./data/admin-credentials.env   # GUDA_ADMIN_TOKEN=gat_...
+#     ./data/ADMIN_LOGIN.txt         # human pointer (no recovery of old tokens)
+# Read the token from the Coolify volume / terminal — it is NOT in container logs
+# as a recoverable secret after rotate, and never stored in SQLite plaintext.
+# Disable bootstrap with GUDA_BOOTSTRAP_ADMIN_TOKEN=0 if desired.
+# Gateway keys / provider keys still need guda-gateway-admin after login.
 services:
   code-guda-gateway:
     image: 'karlorz/code-guda-gateway:v0.3.8-stable'

@@ -294,17 +294,38 @@ healthcheck, persistent `./data` + `./etc` binds.
   blocks from the compose when pasting into Coolify.
 - Bump the `image:` tag when promoting (see `deploy/code-guda-gateway/stable`).
 
-Keep the volume binds so SQLite and `master.key` survive redeploys. After first
-healthy start, create operational credentials once (Coolify terminal or
-`docker exec` on the service container):
+Keep the volume binds so SQLite and `master.key` survive redeploys.
+
+**Admin login (Coolify / Docker first boot)**
+
+Unlike grok2api’s `/app/data/config.toml`, this gateway **never stores the raw
+admin token in SQLite** (hash only). On first container start the image
+entrypoint runs `token init` once and writes:
+
+| Path (in container / volume) | Contents |
+|---|---|
+| `/var/lib/code-guda-gateway/admin-credentials.env` | `GUDA_ADMIN_TOKEN=gat_...` (mode `0600`) |
+| `/var/lib/code-guda-gateway/ADMIN_LOGIN.txt` | Short how-to (no second copy of the secret required) |
+
+On Coolify host volume (example UUID):
 
 ```bash
-guda-gateway-admin token init
-guda-gateway-admin gateway-key create --name coolify
+# Host path under Coolify service storage
+sudo cat /data/coolify/services/<uuid>/data/admin-credentials.env
+# or
+docker exec <container> cat /var/lib/code-guda-gateway/admin-credentials.env
 ```
 
-Do not bake admin tokens or provider keys into the compose file. Production on
-`kr01` remains binary + systemd unless you explicitly cut over.
+Open `https://<coolify-fqdn>/admin` and paste that token. If the file is
+missing but the DB already has a hash, rotate:
+
+```bash
+docker exec <container> guda-gateway-admin token rotate \
+  --save-env /var/lib/code-guda-gateway/admin-credentials.env
+```
+
+Then create gateway keys as needed (`gateway-key create`). Do not bake tokens
+into compose. Production on `kr01` remains binary + systemd unless you cut over.
 
 ## Local development
 
