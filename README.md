@@ -230,15 +230,16 @@ public binary installer + systemd + Caddy path above.
 ```bash
 # Docker Hub
 docker pull karlorz/code-guda-gateway:latest
-docker pull karlorz/code-guda-gateway:v0.3.6-stable
+docker pull karlorz/code-guda-gateway:v0.3.11-stable
 
 # GHCR
 docker pull ghcr.io/karlorz/code-guda-gateway:latest
-docker pull ghcr.io/karlorz/code-guda-gateway:v0.3.6-stable
+docker pull ghcr.io/karlorz/code-guda-gateway:v0.3.11-stable
 ```
 
-Image tag equals the full git tag name (e.g. `v0.3.6-stable`), not a stripped
-`v0.3.6`.
+Image tag equals the full git tag name (e.g. `v0.3.11-stable`), not a stripped
+`v0.3.11`. Pin Coolify compose to the same tag as `deploy/code-guda-gateway/stable`
+(or the desired release tag) when promoting.
 
 ### Run (dev / experimental)
 

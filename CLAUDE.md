@@ -19,8 +19,10 @@
 | Project | `{WIKI_PATH}/projects/code-guda-gateway/README.md` |
 | Knowledge | `{WIKI_PATH}/projects/code-guda-gateway/knowledge.md` |
 | Dev ops / env / seeding / local admin URLs | `{WIKI_PATH}/projects/code-guda-gateway/requirements/2026-07-09-dev-ops-env-and-provider-key-seeding.md` |
+| Optional Docker / Coolify channel | `{WIKI_PATH}/projects/code-guda-gateway/requirements/2026-07-13-optional-docker-coolify-channel.md` |
 | Roadmap | `{WIKI_PATH}/projects/code-guda-gateway/requirements/2026-07-07-robust-management-deployment-roadmap.md` |
 | Work items | `{WIKI_PATH}/projects/code-guda-gateway/work/` |
+| GH Docker image + Coolify bootstrap | `{WIKI_PATH}/projects/code-guda-gateway/work/2026-07-13-gh-docker-image-build/` |
 | Latest completed (web admin console) | `{WIKI_PATH}/projects/code-guda-gateway/work/2026-07-11-web-admin-ui-improvement/` |
 | Endpoint pairs | `{WIKI_PATH}/projects/code-guda-gateway/work/2026-07-11-provider-endpoint-pairs/` |
 | Quota sidecars | `{WIKI_PATH}/projects/code-guda-gateway/work/2026-07-11-provider-endpoint-quota-sidecars/` |
@@ -31,12 +33,18 @@
 
 | | Path |
 |--|------|
-| README (contract, env, admin URLs, pairs, quota, selection) | `{REPO_ROOT}/README.md` |
+| README (contract, env, admin URLs, pairs, quota, selection, optional Docker) | `{REPO_ROOT}/README.md` |
 | Dev boot | `{REPO_ROOT}/scripts/dev-up.sh` |
 | Build / SPA embed | `{REPO_ROOT}/scripts/build.sh` |
-| Seed endpoints | `{REPO_ROOT}/scripts/seed-provider-keys.sh` |
+| Full instance seed (VM · Coolify · local) | `{REPO_ROOT}/scripts/seed-instance.sh` |
+| Seed provider endpoints | `{REPO_ROOT}/scripts/seed-provider-keys.sh` |
+| Seed flow matrix | `{REPO_ROOT}/scripts/templates/seed-flow.md` |
 | Bootstrap template | `{REPO_ROOT}/scripts/templates/bootstrap.env.example` |
 | Secrets template | `{REPO_ROOT}/scripts/templates/secrets.env.example` |
+| Coolify pinned image compose | `{REPO_ROOT}/docker-compose.coolify-tag.yml` |
+| Coolify optional one-shot seed | `{REPO_ROOT}/docker-compose.coolify-seed.yml` |
+| Docker entrypoint (admin sync / optional seed-on-start) | `{REPO_ROOT}/scripts/docker-entrypoint.sh` |
+| GH Docker workflow | `{REPO_ROOT}/.github/workflows/docker-image.yml` |
 | Handoffs | `{REPO_ROOT}/logs/` |
 | Admin SPA | `{REPO_ROOT}/web/admin/` |
 | Public installer | `https://raw.githubusercontent.com/karlorz/code-guda-gateway/main/deploy/code-guda-gateway/install.sh` |
