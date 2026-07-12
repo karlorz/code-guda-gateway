@@ -217,6 +217,67 @@ operator-driven fallback. It is not the routine production update path. For
 production, prefer public artifacts because they avoid host-local GitHub
 credentials and avoid fragile `.git` ownership or macOS metadata drift.
 
+## Container images (optional)
+
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published on release tags
+(`v*.*.*`, including current `v0.3.x-stable` tags) and via workflow dispatch.
+
+**This is an optional distribution channel.** Production on `kr01` remains the
+public binary installer + systemd + Caddy path above.
+
+### Pull
+
+```bash
+# Docker Hub
+docker pull karlorz/code-guda-gateway:latest
+docker pull karlorz/code-guda-gateway:v0.3.6-stable
+
+# GHCR
+docker pull ghcr.io/karlorz/code-guda-gateway:latest
+docker pull ghcr.io/karlorz/code-guda-gateway:v0.3.6-stable
+```
+
+Image tag equals the full git tag name (e.g. `v0.3.6-stable`), not a stripped
+`v0.3.6`.
+
+### Run (dev / experimental)
+
+The image defaults `ADDR=0.0.0.0:8080` so published ports work. Host/systemd
+binaries still default to `127.0.0.1:8080`.
+
+```bash
+mkdir -p /tmp/guda-docker/{var,etc}
+docker run --rm \
+  -v /tmp/guda-docker/var:/var/lib/code-guda-gateway \
+  -v /tmp/guda-docker/etc:/etc/code-guda-gateway \
+  --entrypoint guda-gateway-admin \
+  karlorz/code-guda-gateway:latest \
+  db migrate
+
+docker run --rm -p 8080:8080 \
+  -v /tmp/guda-docker/var:/var/lib/code-guda-gateway \
+  -v /tmp/guda-docker/etc:/etc/code-guda-gateway \
+  -e GUDA_ADMIN_COOKIE_SECURE=false \
+  karlorz/code-guda-gateway:latest
+```
+
+Bootstrap env vars are the same as process config: `ADDR`, `DB_PATH`,
+`GUDA_MASTER_KEY_PATH`, `GUDA_ADMIN_COOKIE_SECURE`, optional
+`GUDA_PROXY_DEBUG_ATTEMPTS`. Do not bake secrets into the image.
+
+### Maintainer: first publish prerequisites
+
+Repo secrets (names only; set with `gh secret set`, never commit values):
+
+| Secret | Purpose |
+|--------|---------|
+| `DOCKERHUB_USERNAME` | Docker Hub login |
+| `DOCKERHUB_TOKEN` | Docker Hub access token |
+
+GHCR uses `GITHUB_TOKEN` with workflow `packages: write`. After secrets exist,
+run Actions → **docker-image** → **Run workflow** with an existing tag, or push
+the next release tag.
+
 ## Local development
 
 ### One-command dev boot
