@@ -280,27 +280,25 @@ the next release tag.
 
 ### Coolify (pinned tag)
 
-Use `docker-compose.coolify-tag.yml` (same shape as CLIProxyAPI’s Coolify
-compose): pinned multi-arch image, healthcheck on `/healthz`, persistent
-`./data` + `./etc` binds, optional external `aigateway` network.
+Use `docker-compose.coolify-tag.yml`: pinned multi-arch image, `/healthz`
+healthcheck, persistent `./data` + `./etc` binds.
 
-```bash
-# Once per host if you use the shared mesh network
-docker network create aigateway
+**Coolify host notes (e.g. cloud01):**
 
-# Bump the image: line when promoting a release (see deploy/code-guda-gateway/stable)
-# image: 'karlorz/code-guda-gateway:v0.3.8-stable'
-```
+- Do **not** publish `8080:8080` on the host. Traefik/`coolify-proxy` already
+  binds host `:8080`; host publish fails with `port is already allocated`.
+  Traefik reaches the container on Coolify’s internal network on port 8080.
+- Prefer Coolify’s default per-service network (no required external
+  `aigateway` network).
+- Bump the `image:` tag when promoting (see `deploy/code-guda-gateway/stable`).
 
-In Coolify, deploy from this compose file (or paste its service definition).
 Keep the volume binds so SQLite and `master.key` survive redeploys. After first
-healthy start, create operational credentials once:
+healthy start, create operational credentials once (Coolify terminal or
+`docker exec` on the service container):
 
 ```bash
-docker compose -f docker-compose.coolify-tag.yml exec code-guda-gateway \
-  guda-gateway-admin token init
-docker compose -f docker-compose.coolify-tag.yml exec code-guda-gateway \
-  guda-gateway-admin gateway-key create --name coolify
+guda-gateway-admin token init
+guda-gateway-admin gateway-key create --name coolify
 ```
 
 Do not bake admin tokens or provider keys into the compose file. Production on

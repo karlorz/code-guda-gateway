@@ -1,18 +1,22 @@
 # Coolify-oriented compose with a pinned multi-arch image tag.
 # Mirror of CLIProxyAPI/docker-compose.coolify-tag.yml for this gateway.
 #
-# Before first deploy on a host that uses the shared mesh network:
-#   docker network create aigateway
+# IMPORTANT (Coolify on cloud01 and similar):
+# - Do NOT publish host ports (no "8080:8080"). coolify-proxy/Traefik already
+#   binds host :8080; host publish fails with "port is already allocated".
+# - Leave Coolify's per-service internal network (default). Do not require
+#   external "aigateway" unless you intentionally join a shared mesh.
+# - Coolify injects Traefik labels and attaches the service network.
 #
-# Coolify: set the image tag when promoting releases (keep in sync with
-# deploy/code-guda-gateway/stable or a chosen release, e.g. v0.3.7-stable).
+# Local docker compose only: optionally add ports: ["8080:8080"] if the host
+# is free. Prefer Coolify FQDN / Traefik for production.
+#
+# Coolify: bump image tag when promoting releases (see deploy/.../stable).
 # Persist the two volume binds so SQLite + master.key survive redeploys.
 #
 # First boot auto-migrates SQLite and creates master.key if missing.
-# Create admin token / gateway keys via:
-#   docker compose -f docker-compose.coolify-tag.yml run --rm --entrypoint guda-gateway-admin \
-#     code-guda-gateway token init
-# (use the same volume mounts Coolify provides, or exec into the running container)
+# Create admin token / gateway keys via Coolify terminal or:
+#   docker exec <container> guda-gateway-admin token init
 services:
   code-guda-gateway:
     image: 'karlorz/code-guda-gateway:v0.3.8-stable'
@@ -24,8 +28,9 @@ services:
       - 'GUDA_MASTER_KEY_PATH=/etc/code-guda-gateway/master.key'
       # Behind Coolify TLS: keep Secure cookies. Set false only for plain-HTTP debug.
       - 'GUDA_ADMIN_COOKIE_SECURE=${GUDA_ADMIN_COOKIE_SECURE:-true}'
-    ports:
-      - '8080:8080'
+    # No host ports — Traefik routes to container :8080 on Coolify network.
+    expose:
+      - '8080'
     healthcheck:
       test:
         - CMD-SHELL
@@ -40,9 +45,3 @@ services:
       - './data:/var/lib/code-guda-gateway'
       # master.key (created on first start if absent; do not lose this volume)
       - './etc:/etc/code-guda-gateway'
-    networks:
-      - aigateway
-networks:
-  aigateway:
-    name: aigateway
-    external: true
