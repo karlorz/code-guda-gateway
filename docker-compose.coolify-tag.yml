@@ -4,12 +4,13 @@
 # IMPORTANT (Coolify on cloud01 and similar):
 # - Do NOT publish host ports (no "8080:8080"). coolify-proxy/Traefik already
 #   binds host :8080; host publish fails with "port is already allocated".
-# - Leave Coolify's per-service internal network (default). Do not require
-#   external "aigateway" unless you intentionally join a shared mesh.
-# - Coolify injects Traefik labels and attaches the service network.
+#   Traefik routes to container :8080; use expose only.
+# - Sample keeps external network "aigateway" (shared mesh with cli-proxy-api).
+#   If you deploy with Coolify's default per-service network instead, remove
+#   the service networks: block and the top-level networks: aigateway section.
 #
-# Local docker compose only: optionally add ports: ["8080:8080"] if the host
-# is free. Prefer Coolify FQDN / Traefik for production.
+# Before first use of the shared mesh on a host:
+#   docker network create aigateway
 #
 # Coolify: bump image tag when promoting releases (see deploy/.../stable).
 # Persist the two volume binds so SQLite + master.key survive redeploys.
@@ -28,7 +29,7 @@ services:
       - 'GUDA_MASTER_KEY_PATH=/etc/code-guda-gateway/master.key'
       # Behind Coolify TLS: keep Secure cookies. Set false only for plain-HTTP debug.
       - 'GUDA_ADMIN_COOKIE_SECURE=${GUDA_ADMIN_COOKIE_SECURE:-true}'
-    # No host ports — Traefik routes to container :8080 on Coolify network.
+    # No host ports — Traefik routes to container :8080.
     expose:
       - '8080'
     healthcheck:
@@ -45,3 +46,9 @@ services:
       - './data:/var/lib/code-guda-gateway'
       # master.key (created on first start if absent; do not lose this volume)
       - './etc:/etc/code-guda-gateway'
+    networks:
+      - aigateway
+networks:
+  aigateway:
+    name: aigateway
+    external: true

@@ -287,9 +287,11 @@ healthcheck, persistent `./data` + `./etc` binds.
 
 - Do **not** publish `8080:8080` on the host. Traefik/`coolify-proxy` already
   binds host `:8080`; host publish fails with `port is already allocated`.
-  Traefik reaches the container on Coolify’s internal network on port 8080.
-- Prefer Coolify’s default per-service network (no required external
-  `aigateway` network).
+  Traefik reaches the container on port 8080 (`expose` only).
+- Sample includes external network **`aigateway`** (same mesh as CLIProxyAPI).
+  Create once with `docker network create aigateway` if missing. If you deploy
+  with Coolify’s default per-service network instead, remove the `networks`
+  blocks from the compose when pasting into Coolify.
 - Bump the `image:` tag when promoting (see `deploy/code-guda-gateway/stable`).
 
 Keep the volume binds so SQLite and `master.key` survive redeploys. After first
