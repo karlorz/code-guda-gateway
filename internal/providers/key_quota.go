@@ -334,7 +334,6 @@ func remainingBasis(q *ProviderKeyQuota) string {
 	return v
 }
 
-
 func normalizePoolView(v string) (string, error) {
 	switch strings.TrimSpace(strings.ToLower(v)) {
 	case "", PoolViewEnabled:

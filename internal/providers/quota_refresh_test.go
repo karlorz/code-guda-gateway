@@ -124,7 +124,6 @@ func TestParseTavilyUsageQuota_NoKeyLimitFallsBackToAccountPlan(t *testing.T) {
 	}
 }
 
-
 func TestParseTavilyUsageQuota_UsageOnlyNoLimitNoRemaining(t *testing.T) {
 	body := []byte(`{
 	  "key": {"usage": 10},

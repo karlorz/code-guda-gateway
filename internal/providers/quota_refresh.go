@@ -574,7 +574,6 @@ func normalizeTavilyUsage(provider string, keyID *int64, checked, expires string
 	return q
 }
 
-
 func normalizeFirecrawlCreditUsage(provider string, keyID *int64, checked, expires string, payload firecrawlCreditUsageResponse) QuotaCache {
 	q := quotaCacheShell(provider, "firecrawl_credit_usage", checked, expires, keyID)
 
@@ -677,7 +676,6 @@ func clampUsedNonNegative(used *int64) *int64 {
 	}
 	return used
 }
-
 
 func quotaFailure(provider, source, checked, expires string, keyID *int64, err error) QuotaCache {
 	msg := "quota refresh failed"
