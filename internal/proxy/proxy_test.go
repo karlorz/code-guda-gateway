@@ -139,6 +139,155 @@ func TestProxy_RetriesAcrossKeysOn429(t *testing.T) {
 	}
 }
 
+func TestProxy_FirecrawlInsufficientCreditsRetriesOtherEndpoint(t *testing.T) {
+	var attempts []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		attempts = append(attempts, auth)
+		w.Header().Set("Content-Type", "application/json")
+		if auth == "Bearer exhausted" {
+			w.WriteHeader(http.StatusPaymentRequired)
+			_, _ = w.Write([]byte(`{"success":false,"error":"Insufficient credits to perform this request. For more credits, you can upgrade your plan."}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer upstream.Close()
+
+	px, repo, st := openProxyTarget(t, providers.ProviderFirecrawl, upstream.URL, "exhausted", "funded")
+	req := httptest.NewRequest(http.MethodPost, "/firecrawl/search", strings.NewReader(`{"query":"go"}`))
+	rec := httptest.NewRecorder()
+	result := px.Forward(rec, req, proxy.Target{
+		Path:     "/search",
+		Provider: providers.ProviderFirecrawl,
+		Keys:     repo,
+	})
+
+	if result.Err != nil {
+		t.Fatalf("Forward returned error: %v", result.Err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	wantAttempts := []string{"Bearer exhausted", "Bearer funded"}
+	if len(attempts) != len(wantAttempts) {
+		t.Fatalf("attempts = %#v, want %#v", attempts, wantAttempts)
+	}
+	for i := range wantAttempts {
+		if attempts[i] != wantAttempts[i] {
+			t.Fatalf("attempt %d auth = %q, want %q", i, attempts[i], wantAttempts[i])
+		}
+	}
+
+	var reason, cooldownUntil, lastFailed sql.NullString
+	if err := st.DB().QueryRow(`
+		SELECT cooldown_reason, cooldown_until, last_failed_at
+		FROM provider_keys WHERE name = 'a'`,
+	).Scan(&reason, &cooldownUntil, &lastFailed); err != nil {
+		t.Fatalf("query exhausted endpoint state: %v", err)
+	}
+	if !reason.Valid || reason.String != "credit_exhausted" {
+		t.Fatalf("cooldown_reason = %v, want credit_exhausted", reason)
+	}
+	if !cooldownUntil.Valid || cooldownUntil.String == "" {
+		t.Fatal("expected exhausted endpoint cooldown_until set")
+	}
+	if !lastFailed.Valid || lastFailed.String == "" {
+		t.Fatal("expected exhausted endpoint last_failed_at demotion")
+	}
+}
+
+func TestProxy_FirecrawlInsufficientCreditsAllEndpointsPreservesFinalResponse(t *testing.T) {
+	var attempts int
+	upstreamBody := `{"success":false,"error":"Insufficient credits to perform this request."}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte(upstreamBody))
+	}))
+	defer upstream.Close()
+
+	px, repo, _ := openProxyTarget(t, providers.ProviderFirecrawl, upstream.URL, "exhausted-a", "exhausted-b")
+	settings := cooldown.DefaultSettings()
+	settings.MaxRetries = 2
+	px.SetCooldownSettings(settings)
+	req := httptest.NewRequest(http.MethodPost, "/firecrawl/search", strings.NewReader(`{"query":"go"}`))
+	rec := httptest.NewRecorder()
+	result := px.Forward(rec, req, proxy.Target{
+		Path:     "/search",
+		Provider: providers.ProviderFirecrawl,
+		Keys:     repo,
+	})
+
+	if result.Err != nil {
+		t.Fatalf("Forward returned error: %v", result.Err)
+	}
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("status = %d, want 402", rec.Code)
+	}
+	if rec.Body.String() != upstreamBody {
+		t.Fatalf("body = %q, want %q", rec.Body.String(), upstreamBody)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestProxy_Unrelated402DoesNotRetry(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		body     string
+		path     string
+	}{
+		{
+			name:     "Firecrawl unrelated payment response",
+			provider: providers.ProviderFirecrawl,
+			body:     `{"success":false,"error":"Payment required"}`,
+			path:     "/search",
+		},
+		{
+			name:     "Other provider insufficient credits text",
+			provider: providers.ProviderTavily,
+			body:     `{"success":false,"error":"Insufficient credits to perform this request."}`,
+			path:     "/search",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts int
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts++
+				w.WriteHeader(http.StatusPaymentRequired)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer upstream.Close()
+
+			px, repo, _ := openProxyTarget(t, tc.provider, upstream.URL, "first", "second")
+			req := httptest.NewRequest(http.MethodPost, "/proxy/search", strings.NewReader(`{}`))
+			rec := httptest.NewRecorder()
+			result := px.Forward(rec, req, proxy.Target{
+				Path:     tc.path,
+				Provider: tc.provider,
+				Keys:     repo,
+			})
+
+			if result.Err != nil {
+				t.Fatalf("Forward returned error: %v", result.Err)
+			}
+			if rec.Code != http.StatusPaymentRequired {
+				t.Fatalf("status = %d, want 402", rec.Code)
+			}
+			if attempts != 1 {
+				t.Fatalf("attempts = %d, want 1", attempts)
+			}
+		})
+	}
+}
+
 func TestProxy_HeterogeneousEndpointRetry_RoutesKeyWithMatchingURL(t *testing.T) {
 	var authA []string
 	var authB []string
@@ -575,6 +724,61 @@ func TestProxy_EnabledRecorderLogsTavily432Then200(t *testing.T) {
 		t.Fatalf("second.StatusClass = %q, want 2xx", second.StatusClass)
 	}
 	if !second.Terminal {
+		t.Fatal("second.Terminal = false, want true")
+	}
+}
+
+func TestProxy_EnabledRecorderLogsFirecrawlCreditExhaustionThenSuccess(t *testing.T) {
+	var attempts int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusPaymentRequired)
+			_, _ = w.Write([]byte(`{"success":false,"error":"Insufficient credits to perform this request."}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer upstream.Close()
+
+	rec := &fakeAttemptRecorder{enabled: true}
+	px, repo := openProxyWithRecorder(t, rec, providers.ProviderFirecrawl, upstream.URL, "exhausted", "funded")
+	req := httptest.NewRequest(http.MethodPost, "/firecrawl/search", strings.NewReader(`{"query":"go"}`))
+	req.Header.Set("X-Request-ID", "req-firecrawl-credit-retry")
+	rr := httptest.NewRecorder()
+	result := px.Forward(rr, req, proxy.Target{
+		Path:     "/search",
+		Provider: providers.ProviderFirecrawl,
+		Keys:     repo,
+	})
+
+	if result.Err != nil {
+		t.Fatalf("Forward error: %v", result.Err)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if len(rec.rows) != 2 {
+		t.Fatalf("rows = %#v, want 2", rec.rows)
+	}
+	first := rec.rows[0]
+	if first.UpstreamStatus == nil || *first.UpstreamStatus != http.StatusPaymentRequired {
+		t.Fatalf("first.UpstreamStatus = %v, want 402", first.UpstreamStatus)
+	}
+	if first.Reason == nil || *first.Reason != "credit_exhausted" {
+		t.Fatalf("first.Reason = %v, want credit_exhausted", first.Reason)
+	}
+	if first.CooldownUntil == nil || *first.CooldownUntil == "" {
+		t.Fatal("first.CooldownUntil expected set")
+	}
+	if first.Terminal {
+		t.Fatal("first.Terminal = true, want false")
+	}
+	if rec.rows[1].UpstreamStatus == nil || *rec.rows[1].UpstreamStatus != http.StatusOK {
+		t.Fatalf("second.UpstreamStatus = %v, want 200", rec.rows[1].UpstreamStatus)
+	}
+	if !rec.rows[1].Terminal {
 		t.Fatal("second.Terminal = false, want true")
 	}
 }

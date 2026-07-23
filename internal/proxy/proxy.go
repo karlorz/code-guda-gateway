@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -188,7 +189,12 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 			return Result{StatusCode: resp.StatusCode}
 		}
 
-		coolDur, reason, applyCooldown, retryAcrossKeys := cooldown.PolicyForStatus(resp.StatusCode, p.settings)
+		coolDur, reason, applyCooldown, retryAcrossKeys := policyForResponse(
+			target.Provider,
+			resp.StatusCode,
+			respBody,
+			p.settings,
+		)
 		if isTavilyPlanLimit(target.Provider, resp.StatusCode) {
 			coolDur = p.settings.RateLimit
 			if coolDur <= 0 {
@@ -277,6 +283,56 @@ func (p *Proxy) do(r *http.Request, target Target, endpoint providers.SelectedEn
 
 func isTavilyPlanLimit(provider string, status int) bool {
 	return provider == providers.ProviderTavily && status == tavilyPlanLimitStatus
+}
+
+func policyForResponse(provider string, status int, body []byte, settings cooldown.Settings) (time.Duration, string, bool, bool) {
+	if provider == providers.ProviderFirecrawl &&
+		status == http.StatusPaymentRequired &&
+		isFirecrawlCreditExhausted(body) {
+		duration := settings.RateLimit
+		if duration <= 0 {
+			duration = cooldown.DefaultRateLimitCooldown
+		}
+		return duration, "credit_exhausted", true, true
+	}
+	return cooldown.PolicyForStatus(status, settings)
+}
+
+func isFirecrawlCreditExhausted(body []byte) bool {
+	var payload struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+		Code    string          `json:"code"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+
+	signals := []string{payload.Message, payload.Code}
+	if len(payload.Error) > 0 {
+		var errorText string
+		if err := json.Unmarshal(payload.Error, &errorText); err == nil {
+			signals = append(signals, errorText)
+		} else {
+			var errorObject struct {
+				Message string `json:"message"`
+				Code    string `json:"code"`
+				Error   string `json:"error"`
+			}
+			if err := json.Unmarshal(payload.Error, &errorObject); err == nil {
+				signals = append(signals, errorObject.Message, errorObject.Code, errorObject.Error)
+			}
+		}
+	}
+
+	for _, signal := range signals {
+		normalized := strings.ToLower(strings.TrimSpace(signal))
+		if strings.Contains(normalized, "insufficient credit") ||
+			strings.Contains(normalized, "credit_exhausted") {
+			return true
+		}
+	}
+	return false
 }
 
 func tavilyPlanLimitClientResponse(header http.Header) (int, http.Header, []byte) {
