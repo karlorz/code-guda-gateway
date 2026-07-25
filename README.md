@@ -793,6 +793,14 @@ and pool demotion/cooldown tools as needed.
 Tavily upstream **432** is stored as key health `plan_limit_exceeded` and
 mapped to client **429** `tavily_plan_limit_exceeded` only if all attempts fail.
 
+Tavily Search **400** query-too-long responses are terminal request validation,
+not evidence of a dead endpoint. The gateway preserves the upstream response,
+does not retry it across keys, and does not cool or demote the selected key.
+When Debug Attempts is enabled, recognized responses are recorded with reason
+`query_too_long` and a fixed redacted message; provider-key last-error metadata
+remains fallback evidence. Query-length clamping belongs in the calling client
+(GrokSearch), not in the gateway.
+
 ### Admin pool controls
 
 On **Provider Monitoring** (per-provider pool table) and **Provider Endpoints**:

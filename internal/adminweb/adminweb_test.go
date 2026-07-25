@@ -909,7 +909,9 @@ func TestProviderPoolEndpointReturnsPaginatedRows(t *testing.T) {
 func TestProxyAttemptsEndpointDefaultsAllProviders(t *testing.T) {
 	app, auth, _, _, st, _ := openAdminApp(t)
 	repo := proxy.NewAttemptLogRepo(st.DB(), 1000)
-	_ = repo.Record(proxy.AttemptLog{RequestID: "r1", Provider: "tavily", RouteFamily: "tavily", Path: "/tavily/extract", AttemptIndex: 1, StatusClass: "2xx"})
+	reason := "query_too_long"
+	message := "Query is too long. Max query length is 400 characters. Authorization: Bearer tvly-secretmaterial123"
+	_ = repo.Record(proxy.AttemptLog{RequestID: "r1", Provider: "tavily", RouteFamily: "tavily", Path: "/tavily/search", AttemptIndex: 1, StatusClass: "4xx", Reason: &reason, MessageRedacted: &message, Terminal: true})
 	_ = repo.Record(proxy.AttemptLog{RequestID: "r2", Provider: "grok", RouteFamily: "grok", Path: "/grok/v1/chat/completions", AttemptIndex: 1, StatusClass: "5xx"})
 	token := initToken(t, auth)
 	c := loginSession(t, app, token)
@@ -920,8 +922,16 @@ func TestProxyAttemptsEndpointDefaultsAllProviders(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "tavily") || !strings.Contains(rec.Body.String(), "grok") {
-		t.Fatalf("default should include all providers: %s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, "tavily") || !strings.Contains(body, "grok") {
+		t.Fatalf("default should include all providers: %s", body)
+	}
+	if !strings.Contains(body, `"reason":"query_too_long"`) ||
+		!strings.Contains(body, `"message_redacted":"Query is too long. Max query length is 400 characters.`) {
+		t.Fatalf("response missing safe Tavily diagnostic: %s", body)
+	}
+	if strings.Contains(body, "tvly-secretmaterial123") {
+		t.Fatalf("response leaked secret-looking material: %s", body)
 	}
 }
 

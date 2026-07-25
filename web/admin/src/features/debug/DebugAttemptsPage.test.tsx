@@ -25,7 +25,7 @@ describe('DebugAttemptsPage', () => {
       if (path === '/admin/api/proxy-attempts?limit=50&offset=0') {
         return {
           items: [
-            { id: 1, request_id: 'req-t', provider: 'tavily', route_family: 'tavily', path: '/tavily/extract', attempt_index: 1, status_class: '429', reason: 'plan_limit_exceeded', terminal: false },
+            { id: 1, request_id: 'req-t', provider: 'tavily', route_family: 'tavily', path: '/tavily/search', attempt_index: 1, status_class: '4xx', reason: 'query_too_long', message_redacted: 'Query is too long. Max query length is 400 characters.', terminal: true },
             { id: 2, request_id: 'req-g', provider: 'grok', route_family: 'grok', path: '/grok/v1/chat/completions', attempt_index: 1, status_class: '2xx', terminal: true },
           ],
           page: { limit: 50, offset: 0, total: 2 },
@@ -39,6 +39,8 @@ describe('DebugAttemptsPage', () => {
     renderWithClient(<DebugAttemptsPage />);
     expect(await screen.findByText('req-t')).toBeInTheDocument();
     expect(screen.getByText('req-g')).toBeInTheDocument();
+    expect(screen.getByText('query_too_long')).toBeInTheDocument();
+    expect(screen.getByText('Query is too long. Max query length is 400 characters.')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Tavily' }));
     expect(screen.getByText('req-t')).toBeInTheDocument();
     expect(screen.queryByText('req-g')).not.toBeInTheDocument();

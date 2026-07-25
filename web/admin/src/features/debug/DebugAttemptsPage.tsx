@@ -58,6 +58,7 @@ export function DebugAttemptsPage() {
                   <td className="py-3 pr-4">{row.provider_key_name ?? row.provider_key_id ?? '-'}</td>
                   <td className="py-3 pr-4">{row.upstream_status ?? row.status_class}</td>
                   <td className="py-3 pr-4">{row.reason ?? '-'}</td>
+                  <td className="py-3 pr-4">{row.message_redacted ?? '-'}</td>
                   <td className="py-3 pr-4">{row.terminal ? 'terminal' : 'retrying'}</td>
                 </tr>
               ))}

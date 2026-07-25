@@ -241,6 +241,12 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target Target) R
 			untilStr := untilPtr.UTC().Format(time.RFC3339Nano)
 			row.CooldownUntil = &untilStr
 		}
+		if attemptLogging {
+			if diagnosticReason, diagnosticMessage, ok := tavilyAttemptDiagnostic(target.Provider, status, respBody); ok {
+				row.Reason = &diagnosticReason
+				row.MessageRedacted = &diagnosticMessage
+			}
+		}
 		p.recordAttempt(row, attemptLogging)
 
 		if terminal {

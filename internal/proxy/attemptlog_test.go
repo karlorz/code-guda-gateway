@@ -21,7 +21,7 @@ func openAttemptLogDB(t *testing.T) (*proxy.AttemptLogRepo, *store.Store) {
 
 func TestAttemptLogRepo_RecordListAndRedact(t *testing.T) {
 	repo, _ := openAttemptLogDB(t)
-	msg := "Authorization: Bearer tvly-secret"
+	msg := "Authorization: Bearer tvly-secret " + strings.Repeat("x", 400)
 	if err := repo.Record(proxy.AttemptLog{
 		RequestID: "req-1", Provider: "tavily", RouteFamily: "tavily",
 		Path: "/tavily/extract", AttemptIndex: 1, StatusClass: "429",
@@ -36,8 +36,15 @@ func TestAttemptLogRepo_RecordListAndRedact(t *testing.T) {
 	if len(rows.Items) != 1 || rows.Items[0].RequestID != "req-1" {
 		t.Fatalf("rows = %#v", rows)
 	}
-	if rows.Items[0].MessageRedacted != nil && strings.Contains(*rows.Items[0].MessageRedacted, "tvly-secret") {
-		t.Fatalf("leaked message: %q", *rows.Items[0].MessageRedacted)
+	if rows.Items[0].MessageRedacted == nil {
+		t.Fatal("MessageRedacted = nil, want stored diagnostic")
+	}
+	stored := *rows.Items[0].MessageRedacted
+	if strings.Contains(stored, "tvly-secret") {
+		t.Fatalf("leaked message: %q", stored)
+	}
+	if len(stored) > 259 {
+		t.Fatalf("stored message length = %d, want at most 259 bytes", len(stored))
 	}
 }
 
