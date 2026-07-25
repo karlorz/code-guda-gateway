@@ -27,10 +27,16 @@ describe('EndpointEditorSheet', () => {
     fireEvent.change(within(dialog).getByLabelText(/^provider$/i), { target: { value: 'tavily' } });
     expect(within(dialog).getByLabelText(/quota mode/i)).toHaveValue('endpoint_credentials');
     expect(within(dialog).getByLabelText(/quota flow/i)).toHaveValue('tavily_usage');
+    expect(
+      within(within(dialog).getByLabelText(/quota flow/i)).getAllByRole('option').map((option) => option.getAttribute('value')),
+    ).toEqual(['tavily_usage']);
 
     fireEvent.change(within(dialog).getByLabelText(/^provider$/i), { target: { value: 'firecrawl' } });
     expect(within(dialog).getByLabelText(/quota mode/i)).toHaveValue('endpoint_credentials');
     expect(within(dialog).getByLabelText(/quota flow/i)).toHaveValue('firecrawl_credit_usage');
+    expect(
+      within(within(dialog).getByLabelText(/quota flow/i)).getAllByRole('option').map((option) => option.getAttribute('value')),
+    ).toEqual(['firecrawl_credit_usage']);
 
     // preserve manual mode when provider changes after operator touch
     fireEvent.change(within(dialog).getByLabelText(/quota mode/i), { target: { value: 'disabled' } });
@@ -38,6 +44,22 @@ describe('EndpointEditorSheet', () => {
     expect(within(dialog).getByLabelText(/quota mode/i)).toHaveValue('disabled');
 
     rerender(<EndpointEditorSheet mode="create" onClose={vi.fn()} onCreate={vi.fn()} />);
+  });
+
+  it('offers v3 only for Grok modes that can use separate credentials', () => {
+    render(<EndpointEditorSheet mode="create" onClose={vi.fn()} onCreate={vi.fn()} />);
+    const flowSelect = within(screen.getByRole('dialog')).getByLabelText(/quota flow/i);
+    expect(within(flowSelect).getAllByRole('option').map((option) => option.getAttribute('value'))).toEqual([
+      'grok2api_admin',
+      'grok2api_v3_admin',
+    ]);
+
+    fireEvent.change(within(screen.getByRole('dialog')).getByLabelText(/quota mode/i), {
+      target: { value: 'endpoint_credentials' },
+    });
+    expect(within(flowSelect).getAllByRole('option').map((option) => option.getAttribute('value'))).toEqual([
+      'grok2api_admin',
+    ]);
   });
 
   it('reveals quota URL and key only for separate credentials', () => {

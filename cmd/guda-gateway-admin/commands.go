@@ -1034,7 +1034,7 @@ Commands:
   provider-key list | disable|enable|archive|restore|reset-cooldown|reset-selection|demote|delete --id ID
   provider-endpoint add --provider grok|tavily|firecrawl --name NAME --base-url URL (key on stdin only)
     [--quota-mode disabled|endpoint_credentials|separate_credentials]
-    [--quota-flow grok2api_admin|tavily_usage|firecrawl_credit_usage]
+    [--quota-flow grok2api_admin|grok2api_v3_admin|tavily_usage|firecrawl_credit_usage]
     [--quota-base-url URL] [--quota-key-file PATH]  (PATH required for separate_credentials; never pass raw keys as flags)
   provider-endpoint list | set-base-url --id ID --url URL | rotate-key --id ID (key on stdin)
   provider-endpoint set-quota --id ID --mode MODE --flow FLOW [--base-url URL]

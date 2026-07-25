@@ -1,6 +1,7 @@
 package providers_test
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -873,6 +874,94 @@ func TestAddEndpointWithQuota_EncryptsInferenceAndQuotaKeysSeparately(t *testing
 	blob := d.KeyPrefix + d.Fingerprint + *d.QuotaKeyPrefix + *d.QuotaKeyFingerprint
 	if strings.Contains(blob, infRaw) || strings.Contains(blob, quotaRaw) {
 		t.Fatal("display leaked raw key material")
+	}
+}
+
+func TestGrokV3QuotaCredentials_HideIdentityAndClearOnFlowChange(t *testing.T) {
+	t.Parallel()
+	repo, st, _ := openKeyRepo(t)
+	const (
+		inferenceKey = "g2a-client-inference-key-111111"
+		v3Credential = "u:known-password-fragment"
+		v3Rotated    = "admin:rotated-password-fragment"
+		legacyKey    = "g2a-legacy-admin-key-222222"
+	)
+
+	d, err := repo.AddEndpointWithQuota(providers.ProviderGrok, "grok-v3-secure", "https://grok.example/v1", inferenceKey, providers.EndpointQuotaInput{
+		Mode: providers.QuotaSeparateCredentials, Flow: providers.QuotaFlowGrok2APIV3Admin,
+		BaseURL: "https://grok.example", RawKey: v3Credential,
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if d.QuotaKeyPrefix != nil || d.QuotaKeyFingerprint != nil {
+		t.Fatalf("v3 create exposed credential identity: %+v", d)
+	}
+	var storedPrefix, storedFingerprint sql.NullString
+	if err := st.DB().QueryRow(
+		`SELECT quota_key_prefix, quota_key_fingerprint FROM provider_keys WHERE id = ?`, d.ID,
+	).Scan(&storedPrefix, &storedFingerprint); err != nil {
+		t.Fatalf("query metadata: %v", err)
+	}
+	if storedPrefix.Valid || storedFingerprint.Valid {
+		t.Fatalf("stored v3 identity prefix=%v fingerprint=%v", storedPrefix, storedFingerprint)
+	}
+
+	if err := repo.RotateEndpointQuotaKey(d.ID, v3Rotated); err != nil {
+		t.Fatalf("rotate v3: %v", err)
+	}
+	got, err := repo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get after v3 rotate: %v", err)
+	}
+	if got.QuotaKeyPrefix != nil || got.QuotaKeyFingerprint != nil {
+		t.Fatalf("v3 rotate exposed credential identity: %+v", got)
+	}
+	resolved, err := repo.ResolveEndpointQuota(d.ID)
+	if err != nil {
+		t.Fatalf("resolve v3: %v", err)
+	}
+	if resolved.APIKey != v3Rotated {
+		t.Fatal("rotated v3 credential was not retained")
+	}
+
+	if err := repo.UpdateEndpointQuota(d.ID, providers.EndpointQuotaInput{
+		Mode: providers.QuotaSeparateCredentials, Flow: providers.QuotaFlowGrok2APIAdmin,
+		BaseURL: "https://grok.example",
+	}); err != nil {
+		t.Fatalf("switch v3 to legacy: %v", err)
+	}
+	got, err = repo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get after legacy switch: %v", err)
+	}
+	if got.QuotaKeyConfigured || got.QuotaKeyPrefix != nil || got.QuotaKeyFingerprint != nil {
+		t.Fatalf("flow change retained incompatible v3 credential: %+v", got)
+	}
+
+	if err := repo.RotateEndpointQuotaKey(d.ID, legacyKey); err != nil {
+		t.Fatalf("rotate legacy: %v", err)
+	}
+	got, err = repo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get after legacy rotate: %v", err)
+	}
+	if !got.QuotaKeyConfigured || got.QuotaKeyPrefix == nil || got.QuotaKeyFingerprint == nil {
+		t.Fatalf("legacy identity metadata missing: %+v", got)
+	}
+
+	if err := repo.UpdateEndpointQuota(d.ID, providers.EndpointQuotaInput{
+		Mode: providers.QuotaSeparateCredentials, Flow: providers.QuotaFlowGrok2APIV3Admin,
+		BaseURL: "https://grok.example",
+	}); err != nil {
+		t.Fatalf("switch legacy to v3: %v", err)
+	}
+	got, err = repo.Get(d.ID)
+	if err != nil {
+		t.Fatalf("Get after v3 switch: %v", err)
+	}
+	if got.QuotaKeyConfigured || got.QuotaKeyPrefix != nil || got.QuotaKeyFingerprint != nil {
+		t.Fatalf("flow change retained incompatible legacy credential: %+v", got)
 	}
 }
 

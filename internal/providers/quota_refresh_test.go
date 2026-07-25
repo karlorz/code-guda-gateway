@@ -39,6 +39,21 @@ func openQuotaRefreshStore(t *testing.T) (*KeyRepo, *store.Store, []byte) {
 	return keyRepo, st, mk
 }
 
+func grokV3QuotaItems(count int) []map[string]any {
+	items := make([]map[string]any, count)
+	for i := range items {
+		items[i] = map[string]any{
+			"enabled":    true,
+			"authStatus": "active",
+			"quotaWindows": []map[string]int{{
+				"remaining": 1,
+				"total":     2,
+			}},
+		}
+	}
+	return items
+}
+
 func TestParseTavilyUsageQuota(t *testing.T) {
 	body := []byte(`{
 	  "key": {
@@ -1038,6 +1053,285 @@ func TestQuotaRefreshKey_GrokUsesOwningSeparateQuotaCredentials(t *testing.T) {
 	}
 	if hits["a"][0].auth == hits["b"][0].auth {
 		t.Fatal("both endpoints used the same admin credential")
+	}
+}
+
+func TestQuotaRefreshKey_GrokV3UsesAdminLoginAndAccounts(t *testing.T) {
+	const adminUser = "admin"
+	const adminPass = "s3cret-pass"
+	const infKey = "g2a_client_inference_key_xxxx"
+
+	var loginHits, accountsHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/admin/v1/auth/login":
+			loginHits++
+			var body struct {
+				Username string `json:"username"`
+				Password string `json:"password"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode login: %v", err)
+			}
+			if body.Username != adminUser || body.Password != adminPass {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":{"code":"invalidCredentials"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":{"tokens":{"accessToken":"jwt-access-token-abc"}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/admin/v1/accounts":
+			accountsHits++
+			if got := r.Header.Get("Authorization"); got != "Bearer jwt-access-token-abc" {
+				t.Errorf("auth header %q", got)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			// Only enabled/active accounts contribute. Disabled and
+			// reauthentication-required rows must not inflate capacity.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":{"items":[
+				{"enabled":true,"authStatus":"active","quotaWindows":[{"remaining":7,"total":20}]},
+				{"enabled":true,"authStatus":"active","billing":{"monthlyLimit":100,"remaining":60}},
+				{"enabled":false,"authStatus":"active","quotaWindows":[{"remaining":1000,"total":1000}]},
+				{"enabled":true,"authStatus":"reauthRequired","quotaWindows":[{"remaining":2000,"total":2000}]}
+			],"total":4}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	keyRepo, st, mk := openQuotaRefreshStore(t)
+	ep, err := keyRepo.AddEndpointWithQuota(ProviderGrok, "grok-v3", "https://grok2api.example/v1", infKey, EndpointQuotaInput{
+		Mode: QuotaSeparateCredentials, Flow: QuotaFlowGrok2APIV3Admin,
+		BaseURL: srv.URL, RawKey: adminUser + ":" + adminPass,
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	ref := &QuotaRefresher{
+		HTTPClient:   &http.Client{Timeout: 5 * time.Second},
+		ProviderKeys: keyRepo,
+		KeyQuotas:    NewKeyQuotaRepo(st.DB()),
+		MasterKey:    mk,
+		Now:          func() time.Time { return time.Date(2026, 7, 17, 0, 0, 0, 0, time.UTC) },
+	}
+	q, err := ref.RefreshKey(context.Background(), ep.ID)
+	if err != nil {
+		t.Fatalf("RefreshKey: %v", err)
+	}
+	if !q.Available || q.Source != "grok2api_v3_accounts" {
+		t.Fatalf("quota = %+v", q)
+	}
+	// window remaining 7 + billing remaining 60 = 67; limit 20 + 100 = 120
+	if q.Remaining == nil || *q.Remaining != 67 {
+		t.Fatalf("remaining=%v want 67", q.Remaining)
+	}
+	if q.LimitValue == nil || *q.LimitValue != 120 {
+		t.Fatalf("limit=%v want 120", q.LimitValue)
+	}
+	if loginHits != 1 || accountsHits != 1 {
+		t.Fatalf("loginHits=%d accountsHits=%d", loginHits, accountsHits)
+	}
+	if got := q.Details["account_count"]; got != 2 {
+		t.Fatalf("account_count=%v want 2", got)
+	}
+}
+
+func TestGrokV3QuotaRefresh_PaginatesAndAggregates(t *testing.T) {
+	var accountPages int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/admin/v1/auth/login":
+			_, _ = w.Write([]byte(`{"data":{"tokens":{"accessToken":"jwt-page-token"}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/admin/v1/accounts":
+			accountPages++
+			if got := r.Header.Get("Authorization"); got != "Bearer jwt-page-token" {
+				t.Errorf("auth header %q", got)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			count := 100
+			if r.URL.Query().Get("page") == "2" {
+				count = 1
+			}
+			items := grokV3QuotaItems(count)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"items": items, "total": 101},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	ref := &QuotaRefresher{HTTPClient: &http.Client{Timeout: 5 * time.Second}}
+	q := ref.fetchGrok2APIV3Accounts(
+		context.Background(), srv.URL, "admin:password", nil,
+		"2026-07-17T00:00:00Z", "2026-07-17T00:05:00Z", false,
+	)
+	if !q.Available {
+		t.Fatalf("quota unavailable: %+v", q)
+	}
+	if accountPages != 2 {
+		t.Fatalf("accountPages=%d want 2", accountPages)
+	}
+	if q.Remaining == nil || *q.Remaining != 101 {
+		t.Fatalf("remaining=%v want 101", q.Remaining)
+	}
+	if q.LimitValue == nil || *q.LimitValue != 202 {
+		t.Fatalf("limit=%v want 202", q.LimitValue)
+	}
+}
+
+func TestGrokV3QuotaRefresh_PageFailureRecordsTerminalEvent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/admin/v1/auth/login":
+			_, _ = w.Write([]byte(`{"data":{"tokens":{"accessToken":"jwt-page-token"}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/admin/v1/accounts":
+			if r.URL.Query().Get("page") == "2" {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			items := grokV3QuotaItems(100)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"items": items, "total": 101},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	keyRepo, st, mk := openQuotaRefreshStore(t)
+	ep, err := keyRepo.AddEndpointWithQuota(ProviderGrok, "grok-v3-page-failure", "https://grok.example/v1", "g2a-inference-key", EndpointQuotaInput{
+		Mode: QuotaSeparateCredentials, Flow: QuotaFlowGrok2APIV3Admin,
+		BaseURL: srv.URL, RawKey: "admin:password",
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	ref := &QuotaRefresher{
+		HTTPClient:   &http.Client{Timeout: 5 * time.Second},
+		ProviderKeys: keyRepo,
+		KeyQuotas:    NewKeyQuotaRepo(st.DB()),
+		MasterKey:    mk,
+	}
+	q, err := ref.RefreshKey(context.Background(), ep.ID)
+	if err != nil {
+		t.Fatalf("RefreshKey: %v", err)
+	}
+	if q.Available {
+		t.Fatalf("quota should be unavailable: %+v", q)
+	}
+	got, err := keyRepo.Get(ep.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.LastEventHTTPStatus == nil || *got.LastEventHTTPStatus != http.StatusBadGateway {
+		t.Fatalf("last event status=%v want %d", got.LastEventHTTPStatus, http.StatusBadGateway)
+	}
+	if got.LastEventStatusClass == nil || *got.LastEventStatusClass != "error" {
+		t.Fatalf("last event class=%v want error", got.LastEventStatusClass)
+	}
+}
+
+func TestGrokV3QuotaRefresh_PageLimitRejectsPartialTotals(t *testing.T) {
+	items := grokV3QuotaItems(100)
+	pageBody, err := json.Marshal(map[string]any{
+		"data": map[string]any{"items": items, "total": 5001},
+	})
+	if err != nil {
+		t.Fatalf("marshal page: %v", err)
+	}
+
+	var accountPages int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/admin/v1/auth/login":
+			_, _ = w.Write([]byte(`{"data":{"tokens":{"accessToken":"jwt-page-token"}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/admin/v1/accounts":
+			accountPages++
+			_, _ = w.Write(pageBody)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	ref := &QuotaRefresher{HTTPClient: &http.Client{Timeout: 5 * time.Second}}
+	q := ref.fetchGrok2APIV3Accounts(
+		context.Background(), srv.URL, "admin:password", nil,
+		"2026-07-17T00:00:00Z", "2026-07-17T00:05:00Z", false,
+	)
+	if q.Available {
+		t.Fatalf("partial quota must not be available: %+v", q)
+	}
+	if accountPages != 50 {
+		t.Fatalf("accountPages=%d want 50", accountPages)
+	}
+}
+
+func TestGrokV3QuotaRefresh_RejectsEmptyPageWithDeclaredAccounts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/admin/v1/auth/login":
+			_, _ = w.Write([]byte(`{"data":{"tokens":{"accessToken":"jwt-page-token"}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/admin/v1/accounts":
+			_, _ = w.Write([]byte(`{"data":{"items":[],"total":1}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	ref := &QuotaRefresher{HTTPClient: &http.Client{Timeout: 5 * time.Second}}
+	q := ref.fetchGrok2APIV3Accounts(
+		context.Background(), srv.URL, "admin:password", nil,
+		"2026-07-17T00:00:00Z", "2026-07-17T00:05:00Z", false,
+	)
+	if q.Available {
+		t.Fatalf("inconsistent empty page must not be available: %+v", q)
+	}
+}
+
+func TestGrokV3Login_DoesNotFollowRedirects(t *testing.T) {
+	var targetHits int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	login := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer login.Close()
+
+	ref := &QuotaRefresher{HTTPClient: &http.Client{Timeout: 5 * time.Second}}
+	_, status, err := ref.loginGrok2APIV3(context.Background(), login.URL, "admin", "password")
+	if err == nil || status != http.StatusTemporaryRedirect {
+		t.Fatalf("status=%d err=%v, want redirect failure", status, err)
+	}
+	if targetHits != 0 {
+		t.Fatalf("redirect target received %d credential-bearing requests", targetHits)
+	}
+}
+
+func TestParseGrok2APIV3AdminCred(t *testing.T) {
+	u, p, err := parseGrok2APIV3AdminCred("admin:p@ss:word")
+	if err != nil || u != "admin" || p != "p@ss:word" {
+		t.Fatalf("colon form: u=%q p=%q err=%v", u, p, err)
+	}
+	u, p, err = parseGrok2APIV3AdminCred(`{"username":"ops","password":"x:y"}`)
+	if err != nil || u != "ops" || p != "x:y" {
+		t.Fatalf("json form: u=%q p=%q err=%v", u, p, err)
+	}
+	if _, _, err := parseGrok2APIV3AdminCred("nocolon"); err == nil {
+		t.Fatal("expected error for bare token")
 	}
 }
 

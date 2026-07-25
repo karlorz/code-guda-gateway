@@ -138,7 +138,7 @@ func (r *KeyRepo) AddEndpointWithQuota(provider, name, baseURL, rawKey string, q
 
 	var quotaBase interface{}
 	var encQuota interface{}
-	var qPrefix, qFP string
+	var qPrefix, qFP *string
 	if q.Mode == QuotaSeparateCredentials {
 		quotaBase = q.BaseURL
 		encQ, err := secrets.Encrypt(r.masterKey, []byte(q.RawKey))
@@ -146,14 +146,16 @@ func (r *KeyRepo) AddEndpointWithQuota(provider, name, baseURL, rawKey string, q
 			return DisplayProviderKey{}, err
 		}
 		encQuota = encQ
-		qPrefix = keyPrefix(q.RawKey)
-		qFP = fingerprint(q.RawKey)
+		qPrefix, qFP = quotaKeyIdentity(q.Flow, q.RawKey)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	var qPrefixArg, qFPArg interface{}
-	if q.Mode == QuotaSeparateCredentials {
-		qPrefixArg, qFPArg = qPrefix, qFP
+	if qPrefix != nil {
+		qPrefixArg = *qPrefix
+	}
+	if qFP != nil {
+		qFPArg = *qFP
 	}
 	res, err := r.db.Exec(`
 		INSERT INTO provider_keys (
@@ -186,8 +188,8 @@ func (r *KeyRepo) AddEndpointWithQuota(provider, name, baseURL, rawKey string, q
 		u := q.BaseURL
 		d.QuotaBaseURL = &u
 		d.QuotaKeyConfigured = true
-		d.QuotaKeyPrefix = &qPrefix
-		d.QuotaKeyFingerprint = &qFP
+		d.QuotaKeyPrefix = qPrefix
+		d.QuotaKeyFingerprint = qFP
 	}
 	return d, nil
 }
@@ -197,10 +199,10 @@ func (r *KeyRepo) AddEndpointWithQuota(provider, name, baseURL, rawKey string, q
 // columns in the same SQL update. Inference routing state is preserved.
 func (r *KeyRepo) UpdateEndpointQuota(id int64, input EndpointQuotaInput) error {
 	input.RawKey = ""
-	var provider string
+	var provider, currentFlow string
 	err := r.db.QueryRow(
-		`SELECT provider FROM provider_keys WHERE id = ?`, id,
-	).Scan(&provider)
+		`SELECT provider, quota_flow FROM provider_keys WHERE id = ?`, id,
+	).Scan(&provider, &currentFlow)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: id %d", ErrProviderKeyNotFound, id)
 	}
@@ -237,14 +239,23 @@ func (r *KeyRepo) UpdateEndpointQuota(id int64, input EndpointQuotaInput) error 
 		return nil
 
 	case QuotaSeparateCredentials:
+		clearCredential := currentFlow != string(q.Flow)
+		clearIdentity := clearCredential || q.Flow == QuotaFlowGrok2APIV3Admin
 		res, err := r.db.Exec(`
 			UPDATE provider_keys SET
 				quota_mode = ?,
 				quota_flow = ?,
 				quota_base_url = ?,
+				encrypted_quota_key = CASE WHEN ? THEN NULL ELSE encrypted_quota_key END,
+				quota_key_prefix = CASE WHEN ? THEN NULL ELSE quota_key_prefix END,
+				quota_key_fingerprint = CASE WHEN ? THEN NULL ELSE quota_key_fingerprint END,
 				updated_at = ?
 			WHERE id = ?`,
-			string(q.Mode), string(q.Flow), q.BaseURL, now, id,
+			string(q.Mode), string(q.Flow), q.BaseURL,
+			clearCredential,
+			clearIdentity,
+			clearIdentity,
+			now, id,
 		)
 		if err != nil {
 			return fmt.Errorf("update endpoint quota: %w", err)
@@ -266,8 +277,8 @@ func (r *KeyRepo) RotateEndpointQuotaKey(id int64, rawKey string) error {
 	if rawKey == "" {
 		return fmt.Errorf("rotate quota key: raw key required")
 	}
-	var modeStr string
-	err := r.db.QueryRow(`SELECT quota_mode FROM provider_keys WHERE id = ?`, id).Scan(&modeStr)
+	var modeStr, flowStr string
+	err := r.db.QueryRow(`SELECT quota_mode, quota_flow FROM provider_keys WHERE id = ?`, id).Scan(&modeStr, &flowStr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: id %d", ErrProviderKeyNotFound, id)
 	}
@@ -277,8 +288,14 @@ func (r *KeyRepo) RotateEndpointQuotaKey(id int64, rawKey string) error {
 	if QuotaMode(modeStr) != QuotaSeparateCredentials {
 		return fmt.Errorf("%w: rotate quota key requires separate_credentials mode", ErrInvalidQuotaConfig)
 	}
-	prefix := keyPrefix(rawKey)
-	fp := fingerprint(rawKey)
+	prefix, fp := quotaKeyIdentity(QuotaFlow(flowStr), rawKey)
+	var prefixArg, fpArg interface{}
+	if prefix != nil {
+		prefixArg = *prefix
+	}
+	if fp != nil {
+		fpArg = *fp
+	}
 	enc, err := secrets.Encrypt(r.masterKey, []byte(rawKey))
 	if err != nil {
 		return err
@@ -291,7 +308,7 @@ func (r *KeyRepo) RotateEndpointQuotaKey(id int64, rawKey string) error {
 			quota_key_fingerprint = ?,
 			updated_at = ?
 		WHERE id = ?`,
-		enc, prefix, fp, now, id,
+		enc, prefixArg, fpArg, now, id,
 	)
 	if err != nil {
 		return fmt.Errorf("rotate quota key: %w", err)
@@ -814,6 +831,18 @@ func keyPrefix(raw string) string {
 func fingerprint(raw string) string {
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])[:6]
+}
+
+// quotaKeyIdentity returns display-safe identity metadata for high-entropy API
+// keys. Grok2API v3 uses username:password login material, so exposing a raw
+// prefix or an unkeyed short fingerprint would leak password information.
+func quotaKeyIdentity(flow QuotaFlow, raw string) (prefix, fp *string) {
+	if flow == QuotaFlowGrok2APIV3Admin {
+		return nil, nil
+	}
+	prefixValue := keyPrefix(raw)
+	fingerprintValue := fingerprint(raw)
+	return &prefixValue, &fingerprintValue
 }
 
 type displayKeyScanner interface {

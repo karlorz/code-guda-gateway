@@ -8,10 +8,30 @@ export function defaultQuotaMode(provider: string): QuotaMode {
   return 'disabled';
 }
 
+type QuotaFlowOption = {
+  value: QuotaFlow;
+  label: string;
+};
+
+const quotaFlowOptionsByProvider: Record<string, readonly QuotaFlowOption[]> = {
+  grok: [
+    { value: 'grok2api_admin', label: 'grok2api_admin (legacy)' },
+    { value: 'grok2api_v3_admin', label: 'grok2api_v3_admin' },
+  ],
+  tavily: [{ value: 'tavily_usage', label: 'tavily_usage' }],
+  firecrawl: [{ value: 'firecrawl_credit_usage', label: 'firecrawl_credit_usage' }],
+};
+
+function quotaFlowOptions(provider: string, mode?: QuotaMode): readonly QuotaFlowOption[] {
+  const options = quotaFlowOptionsByProvider[provider] ?? quotaFlowOptionsByProvider.grok;
+  if (mode === 'endpoint_credentials') {
+    return options.filter((option) => option.value !== 'grok2api_v3_admin');
+  }
+  return options;
+}
+
 export function defaultQuotaFlow(provider: string): QuotaFlow {
-  if (provider === 'tavily') return 'tavily_usage';
-  if (provider === 'firecrawl') return 'firecrawl_credit_usage';
-  return 'grok2api_admin';
+  return quotaFlowOptions(provider)[0].value;
 }
 
 export function quotaModeLabel(mode: QuotaMode | string | undefined): string {
@@ -115,6 +135,9 @@ export function EndpointEditorSheet({
   function handleQuotaModeChange(next: QuotaMode) {
     setQuotaModeTouched(true);
     setQuotaMode(next);
+    if (!quotaFlowOptions(provider, next).some((option) => option.value === quotaFlow)) {
+      setQuotaFlow(defaultQuotaFlow(provider));
+    }
     if (next !== 'separate_credentials') {
       setQuotaBaseURL('');
       setQuotaKey('');
@@ -246,9 +269,11 @@ export function EndpointEditorSheet({
                   onChange={(event) => setQuotaFlow(event.target.value as QuotaFlow)}
                   value={quotaFlow}
                 >
-                  <option value="grok2api_admin">grok2api_admin</option>
-                  <option value="tavily_usage">tavily_usage</option>
-                  <option value="firecrawl_credit_usage">firecrawl_credit_usage</option>
+                  {quotaFlowOptions(provider, quotaMode).map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
                 </select>
               </label>
               {quotaMode === 'separate_credentials' ? (

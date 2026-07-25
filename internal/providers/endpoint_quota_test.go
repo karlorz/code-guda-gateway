@@ -84,6 +84,28 @@ func TestValidateQuotaConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("require separate credentials for grok v3 admin flow", func(t *testing.T) {
+		_, err := providers.ValidateQuotaConfig(providers.ProviderGrok, providers.EndpointQuotaInput{
+			Mode: providers.QuotaEndpointCredentials,
+			Flow: providers.QuotaFlowGrok2APIV3Admin,
+		}, false)
+		if !errors.Is(err, providers.ErrInvalidQuotaConfig) {
+			t.Fatalf("endpoint_credentials err = %v, want ErrInvalidQuotaConfig", err)
+		}
+
+		got, err := providers.ValidateQuotaConfig(providers.ProviderGrok, providers.EndpointQuotaInput{
+			Mode:    providers.QuotaSeparateCredentials,
+			Flow:    providers.QuotaFlowGrok2APIV3Admin,
+			BaseURL: "https://grok2api.example",
+		}, false)
+		if err != nil {
+			t.Fatalf("separate v3: %v", err)
+		}
+		if got.Flow != providers.QuotaFlowGrok2APIV3Admin {
+			t.Fatalf("flow = %q", got.Flow)
+		}
+	})
+
 	t.Run("accept separate_credentials with normalized URL and raw key", func(t *testing.T) {
 		got, err := providers.ValidateQuotaConfig(providers.ProviderGrok, providers.EndpointQuotaInput{
 			Mode:    providers.QuotaSeparateCredentials,

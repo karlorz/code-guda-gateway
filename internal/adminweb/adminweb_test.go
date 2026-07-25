@@ -2018,6 +2018,17 @@ func TestProviderEndpointList_ExposesOnlySafeQuotaMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddEndpointWithQuota: %v", err)
 	}
+	v3Credential := "u:known-password-fragment"
+	v3, err := keyRepo.AddEndpointWithQuota(providers.ProviderGrok, "list-safe-v3", "https://grok-v3.example/v1", "g2a-list-safe-v3-inference", providers.EndpointQuotaInput{
+		Mode: providers.QuotaSeparateCredentials, Flow: providers.QuotaFlowGrok2APIV3Admin,
+		BaseURL: "https://grok-v3.example", RawKey: v3Credential,
+	})
+	if err != nil {
+		t.Fatalf("AddEndpointWithQuota v3: %v", err)
+	}
+	if v3.QuotaKeyPrefix != nil || v3.QuotaKeyFingerprint != nil {
+		t.Fatalf("v3 display exposed password identity: %+v", v3)
+	}
 	var encKey, encQuota []byte
 	if err := st.DB().QueryRow(`SELECT encrypted_key, encrypted_quota_key FROM provider_keys WHERE id = ?`, d.ID).Scan(&encKey, &encQuota); err != nil {
 		t.Fatalf("query enc: %v", err)
@@ -2035,6 +2046,11 @@ func TestProviderEndpointList_ExposesOnlySafeQuotaMetadata(t *testing.T) {
 	for _, secret := range []string{infKey, quotaKey, string(encKey), string(encQuota)} {
 		if secret != "" && strings.Contains(body, secret) {
 			t.Fatal("list leaked raw secret or ciphertext")
+		}
+	}
+	for _, passwordMaterial := range []string{v3Credential, "known-password-fragment", "u:know"} {
+		if strings.Contains(body, passwordMaterial) {
+			t.Fatalf("list exposed v3 password material %q", passwordMaterial)
 		}
 	}
 	for _, forbidden := range []string{"encrypted_key", "encrypted_quota_key", "EncryptedKey", "EncryptedQuotaKey"} {

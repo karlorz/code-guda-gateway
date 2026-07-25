@@ -63,6 +63,53 @@ type grok2APITokensResponse struct {
 	} `json:"tokens"`
 }
 
+// grok2APIV3 login / accounts response shapes (subset used for quota).
+type grok2APIV3LoginResponse struct {
+	Data struct {
+		Tokens struct {
+			AccessToken string `json:"accessToken"`
+		} `json:"tokens"`
+	} `json:"data"`
+}
+
+type grok2APIV3QuotaWindow struct {
+	Remaining int `json:"remaining"`
+	Total     int `json:"total"`
+}
+
+type grok2APIV3Billing struct {
+	MonthlyLimit float64 `json:"monthlyLimit"`
+	Remaining    float64 `json:"remaining"`
+}
+
+type grok2APIV3Quota struct {
+	LimitKnown bool    `json:"limitKnown"`
+	Remaining  float64 `json:"remaining"`
+	Limit      float64 `json:"limit"`
+}
+
+type grok2APIV3Account struct {
+	Enabled      bool                    `json:"enabled"`
+	AuthStatus   string                  `json:"authStatus"`
+	QuotaWindows []grok2APIV3QuotaWindow `json:"quotaWindows"`
+	Billing      *grok2APIV3Billing      `json:"billing"`
+	Quota        *grok2APIV3Quota        `json:"quota"`
+}
+
+type grok2APIV3AccountsResponse struct {
+	Data struct {
+		Items []grok2APIV3Account `json:"items"`
+		Total int                 `json:"total"`
+	} `json:"data"`
+}
+
+type grok2APIV3QuotaTotals struct {
+	Remaining    int64
+	Limit        int64
+	AccountCount int
+	WindowCount  int
+}
+
 // QuotaRefresher fetches upstream quota/usage and normalizes into QuotaCache.
 type QuotaRefresher struct {
 	HTTPClient   *http.Client
@@ -168,6 +215,8 @@ func (r *QuotaRefresher) refreshKeyFromSidecar(ctx context.Context, display Disp
 	switch resolved.Flow {
 	case QuotaFlowGrok2APIAdmin:
 		qc = r.refreshGrok2APIEndpoint(ctx, resolved, checked, expires)
+	case QuotaFlowGrok2APIV3Admin:
+		qc = r.refreshGrok2APIV3Endpoint(ctx, resolved, checked, expires)
 	case QuotaFlowTavilyUsage:
 		qc = r.refreshTavilyEndpoint(ctx, resolved, checked, expires)
 	case QuotaFlowFirecrawlCreditUsage:
@@ -261,6 +310,13 @@ func (r *QuotaRefresher) refreshFirecrawlEndpoint(ctx context.Context, resolved 
 func (r *QuotaRefresher) refreshGrok2APIEndpoint(ctx context.Context, resolved ResolvedEndpointQuota, checked, expires string) QuotaCache {
 	keyID := resolved.EndpointID
 	return r.fetchGrok2APIAdminTokens(ctx, resolved.BaseURL, resolved.APIKey, &keyID, checked, expires, true)
+}
+
+// refreshGrok2APIV3Endpoint logs into Grok2API v3 admin and aggregates account
+// quotaWindows (and known billing/quota fields) for the owning endpoint.
+func (r *QuotaRefresher) refreshGrok2APIV3Endpoint(ctx context.Context, resolved ResolvedEndpointQuota, checked, expires string) QuotaCache {
+	keyID := resolved.EndpointID
+	return r.fetchGrok2APIV3Accounts(ctx, resolved.BaseURL, resolved.APIKey, &keyID, checked, expires, true)
 }
 
 func operationalProviderKeyQuota(display DisplayProviderKey, source, message, checked, expires string) ProviderKeyQuota {
@@ -365,6 +421,174 @@ func (r *QuotaRefresher) fetchGrok2APIAdminTokens(ctx context.Context, base, adm
 	return normalizeGrok2APITokens(ProviderGrok, keyID, checked, expires, payload)
 }
 
+// fetchGrok2APIV3Accounts POSTs admin login then pages GET /api/admin/v1/accounts.
+// The quota key must be "username:password" (password may contain ':') or JSON
+// {"username":"...","password":"..."}. Client API keys (g2a_*) cannot call admin.
+func (r *QuotaRefresher) fetchGrok2APIV3Accounts(ctx context.Context, base, adminCred string, keyID *int64, checked, expires string, recordEvent bool) QuotaCache {
+	adminBase := strings.TrimRight(base, "/")
+	username, password, err := parseGrok2APIV3AdminCred(adminCred)
+	if err != nil {
+		if recordEvent && keyID != nil {
+			r.recordQuotaEvent(*keyID, 0, err)
+		}
+		return quotaFailure(ProviderGrok, "grok2api_v3_admin", checked, expires, keyID, err)
+	}
+
+	accessToken, status, err := r.loginGrok2APIV3(ctx, adminBase, username, password)
+	if err != nil {
+		if recordEvent && keyID != nil {
+			r.recordQuotaEvent(*keyID, status, err)
+		}
+		return quotaHTTPFailure(ProviderGrok, "grok2api_v3_admin", checked, expires, keyID, status, err)
+	}
+
+	var totals grok2APIV3QuotaTotals
+	const (
+		pageSize = 100
+		maxPages = 50
+	)
+	fetchedCount := 0
+	declaredTotal := 0
+	for page := 1; page <= maxPages; page++ {
+		accountsURL := fmt.Sprintf("%s/api/admin/v1/accounts?page=%d&pageSize=%d", adminBase, page, pageSize)
+		var body []byte
+		body, status, err = r.requestHTTP(ctx, http.MethodGet, accountsURL, accessToken)
+		if err != nil {
+			if recordEvent && keyID != nil {
+				r.recordQuotaEvent(*keyID, status, err)
+			}
+			return quotaHTTPFailure(ProviderGrok, "grok2api_v3_accounts", checked, expires, keyID, status, err)
+		}
+		var payload grok2APIV3AccountsResponse
+		if err := json.Unmarshal(body, &payload); err != nil {
+			if recordEvent && keyID != nil {
+				r.recordQuotaEvent(*keyID, status, err)
+			}
+			return quotaMalformed(ProviderGrok, "grok2api_v3_accounts", checked, expires, keyID)
+		}
+		items := payload.Data.Items
+		declaredTotal = payload.Data.Total
+		if len(items) == 0 {
+			break
+		}
+		pageTotals := normalizeGrok2APIV3Accounts(items)
+		totals.Remaining += pageTotals.Remaining
+		totals.Limit += pageTotals.Limit
+		totals.AccountCount += pageTotals.AccountCount
+		totals.WindowCount += pageTotals.WindowCount
+		fetchedCount += len(items)
+		if declaredTotal > 0 && fetchedCount >= declaredTotal {
+			break
+		}
+		if len(items) < pageSize {
+			break
+		}
+	}
+	if declaredTotal > fetchedCount {
+		err := fmt.Errorf("grok2api v3 accounts response exceeded %d-page safety limit", maxPages)
+		if recordEvent && keyID != nil {
+			r.recordQuotaEvent(*keyID, status, err)
+		}
+		return quotaFailure(ProviderGrok, "grok2api_v3_accounts", checked, expires, keyID, err)
+	}
+	if recordEvent && keyID != nil {
+		r.recordQuotaEvent(*keyID, status, nil)
+	}
+
+	used := totals.Limit - totals.Remaining
+	q := quotaCacheShell(ProviderGrok, "grok2api_v3_accounts", checked, expires, keyID)
+	q.Remaining = &totals.Remaining
+	q.LimitValue = &totals.Limit
+	q.Used = clampUsedNonNegative(&used)
+	q.Details = map[string]any{
+		"account_count":   totals.AccountCount,
+		"window_count":    totals.WindowCount,
+		"remaining_basis": "quota_windows",
+	}
+	return q
+}
+
+// normalizeGrok2APIV3Accounts aggregates capacity for accounts that Grok2API
+// can authenticate and route. Temporarily cooling active accounts remain part
+// of plan capacity; disabled and reauthentication-required accounts do not.
+func normalizeGrok2APIV3Accounts(items []grok2APIV3Account) grok2APIV3QuotaTotals {
+	var totals grok2APIV3QuotaTotals
+	for _, item := range items {
+		if !item.Enabled || item.AuthStatus != "active" {
+			continue
+		}
+		totals.AccountCount++
+		// Prefer explicit quotaWindows (web/console). Fall back to unified
+		// quota when limitKnown, then billing monthly credits.
+		if len(item.QuotaWindows) > 0 {
+			for _, window := range item.QuotaWindows {
+				totals.Remaining += int64(window.Remaining)
+				totals.Limit += int64(window.Total)
+				totals.WindowCount++
+			}
+			continue
+		}
+		if item.Quota != nil && item.Quota.LimitKnown {
+			totals.Remaining += int64(item.Quota.Remaining)
+			totals.Limit += int64(item.Quota.Limit)
+			continue
+		}
+		if item.Billing != nil && item.Billing.MonthlyLimit > 0 {
+			totals.Remaining += int64(item.Billing.Remaining)
+			totals.Limit += int64(item.Billing.MonthlyLimit)
+		}
+	}
+	return totals
+}
+
+func parseGrok2APIV3AdminCred(raw string) (username, password string, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", fmt.Errorf("%w: empty grok2api v3 admin credential", ErrInvalidQuotaConfig)
+	}
+	if strings.HasPrefix(raw, "{") {
+		var obj struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+			return "", "", fmt.Errorf("%w: grok2api v3 admin credential JSON invalid", ErrInvalidQuotaConfig)
+		}
+		obj.Username = strings.TrimSpace(obj.Username)
+		if obj.Username == "" || obj.Password == "" {
+			return "", "", fmt.Errorf("%w: grok2api v3 admin credential JSON requires username and password", ErrInvalidQuotaConfig)
+		}
+		return obj.Username, obj.Password, nil
+	}
+	user, pass, ok := strings.Cut(raw, ":")
+	user = strings.TrimSpace(user)
+	if !ok || user == "" || pass == "" {
+		return "", "", fmt.Errorf("%w: grok2api v3 admin credential must be username:password or JSON", ErrInvalidQuotaConfig)
+	}
+	return user, pass, nil
+}
+
+func (r *QuotaRefresher) loginGrok2APIV3(ctx context.Context, adminBase, username, password string) (accessToken string, status int, err error) {
+	loginURL := adminBase + "/api/admin/v1/auth/login"
+	body, _ := json.Marshal(map[string]string{
+		"username": username,
+		"password": password,
+	})
+	respBody, status, err := r.postJSONNoRedirect(ctx, loginURL, "", body)
+	if err != nil {
+		return "", status, err
+	}
+	var payload grok2APIV3LoginResponse
+	if err := json.Unmarshal(respBody, &payload); err != nil {
+		return "", status, fmt.Errorf("grok2api v3 login response malformed")
+	}
+	tok := strings.TrimSpace(payload.Data.Tokens.AccessToken)
+	if tok == "" {
+		return "", status, fmt.Errorf("grok2api v3 login missing accessToken")
+	}
+	return tok, status, nil
+}
+
 func grokAdminRequiredQuota(checked, expires string) QuotaCache {
 	msg := "grok2api admin key required for quota refresh"
 	return QuotaCache{
@@ -466,6 +690,18 @@ func (r *QuotaRefresher) getJSON(ctx context.Context, url, bearer string) ([]byt
 }
 
 func (r *QuotaRefresher) postJSON(ctx context.Context, url, bearer string, body []byte) ([]byte, int, error) {
+	return r.postJSONWithClient(ctx, r.client(), url, bearer, body)
+}
+
+func (r *QuotaRefresher) postJSONNoRedirect(ctx context.Context, url, bearer string, body []byte) ([]byte, int, error) {
+	client := *r.client()
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return r.postJSONWithClient(ctx, &client, url, bearer, body)
+}
+
+func (r *QuotaRefresher) postJSONWithClient(ctx context.Context, client *http.Client, url, bearer string, body []byte) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, 0, err
@@ -475,7 +711,7 @@ func (r *QuotaRefresher) postJSON(ctx context.Context, url, bearer string, body 
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := r.client().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}

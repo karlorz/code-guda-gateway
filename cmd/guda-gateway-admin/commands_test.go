@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -867,6 +868,112 @@ func TestSeedProviderKeysScript_PassesURLAndKeepsSecretsOffArgv(t *testing.T) {
 		if strings.Contains(line, "provider-endpoint") && strings.Contains(line, "TAVILY_API_KEYS") {
 			t.Fatalf("raw env key appears on provider-endpoint argv line: %s", line)
 		}
+	}
+}
+
+func TestSeedProviderKeysScript_ReconcilesGrokV3FlowAndPrefersFirecrawlCSV(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve module root: %v", err)
+	}
+	tempDir := t.TempDir()
+	adminPath := filepath.Join(tempDir, "guda-gateway-admin")
+	build := exec.Command("go", "build", "-o", adminPath, "./cmd/guda-gateway-admin")
+	build.Dir = root
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build admin: %v\n%s", err, out)
+	}
+
+	dbPath := filepath.Join(tempDir, "gateway.db")
+	masterPath := filepath.Join(tempDir, "master.key")
+	migrate := exec.Command(adminPath, "--db", dbPath, "--master-key", masterPath, "db", "migrate")
+	if out, err := migrate.CombinedOutput(); err != nil {
+		t.Fatalf("migrate: %v\n%s", err, out)
+	}
+
+	const (
+		inferenceKey = "g2a-seed-inference-key"
+		legacyKey    = "legacy-admin-bearer-key"
+		v3Credential = "admin:new-v3-password"
+	)
+	legacyQuotaFile := filepath.Join(tempDir, "legacy-quota.key")
+	if err := os.WriteFile(legacyQuotaFile, []byte(legacyKey), 0o600); err != nil {
+		t.Fatalf("write quota file: %v", err)
+	}
+	add := exec.Command(
+		adminPath, "--db", dbPath, "--master-key", masterPath,
+		"provider-endpoint", "add",
+		"--provider", "grok",
+		"--name", "grok-2",
+		"--base-url", "https://grok2api.example/v1",
+		"--quota-mode", "separate_credentials",
+		"--quota-flow", "grok2api_admin",
+		"--quota-base-url", "https://grok2api.example",
+		"--quota-key-file", legacyQuotaFile,
+	)
+	add.Stdin = strings.NewReader(inferenceKey)
+	if out, err := add.CombinedOutput(); err != nil {
+		t.Fatalf("add legacy grok-2: %v\n%s", err, out)
+	}
+
+	seed := exec.Command("bash", filepath.Join(root, "scripts", "seed-provider-keys.sh"), adminPath)
+	seed.Dir = root
+	seed.Env = append(os.Environ(),
+		"DB_PATH="+dbPath,
+		"GUDA_MASTER_KEY_PATH="+masterPath,
+		"GROK_2_BASE_URL=https://grok2api.example/v1",
+		"GROK_2_API_KEY="+inferenceKey,
+		"GROK_2_QUOTA_BASE_URL=https://grok2api.example",
+		"GROK_2_QUOTA_FLOW=grok2api_v3_admin",
+		"GROK_2_QUOTA_KEY="+v3Credential,
+		"FIRECRAWL_API_KEYS=fc-csv-a,fc-csv-b,fc-csv-c",
+		"FIRECRAWL_1_API_KEY=fc-explicit-a",
+		"FIRECRAWL_2_API_KEY=fc-explicit-b",
+	)
+	if out, err := seed.CombinedOutput(); err != nil {
+		t.Fatalf("seed: %v\n%s", err, out)
+	}
+
+	db := openDB(t, dbPath)
+	var flow string
+	if err := db.QueryRow(`SELECT quota_flow FROM provider_keys WHERE provider = 'grok' AND name = 'grok-2'`).Scan(&flow); err != nil {
+		t.Fatalf("query grok-2 flow: %v", err)
+	}
+	if flow != "grok2api_v3_admin" {
+		t.Fatalf("grok-2 flow=%q want grok2api_v3_admin", flow)
+	}
+	master, err := loadMaster(t, masterPath)
+	if err != nil {
+		t.Fatalf("load master: %v", err)
+	}
+	repo := providers.NewKeyRepo(db, master)
+	rows, err := repo.List(providers.ProviderGrok)
+	if err != nil {
+		t.Fatalf("list grok: %v", err)
+	}
+	var grok2ID int64
+	for _, row := range rows {
+		if row.Name == "grok-2" {
+			grok2ID = row.ID
+			if row.QuotaKeyPrefix != nil || row.QuotaKeyFingerprint != nil {
+				t.Fatalf("v3 seed exposed password metadata: %+v", row)
+			}
+		}
+	}
+	resolved, err := repo.ResolveEndpointQuota(grok2ID)
+	if err != nil {
+		t.Fatalf("resolve repaired grok-2: %v", err)
+	}
+	if resolved.APIKey != v3Credential {
+		t.Fatal("seed did not rotate the v3 credential after flow repair")
+	}
+
+	var firecrawlCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM provider_keys WHERE provider = 'firecrawl'`).Scan(&firecrawlCount); err != nil {
+		t.Fatalf("count firecrawl: %v", err)
+	}
+	if firecrawlCount != 3 {
+		t.Fatalf("firecrawl rows=%d want 3 from preferred CSV form", firecrawlCount)
 	}
 }
 

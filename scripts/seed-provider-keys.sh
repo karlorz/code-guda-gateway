@@ -10,8 +10,13 @@
 # Topology (canonical names — identifiers only, not pool roles):
 #   grok-1       inference → GROK_1_BASE_URL (default https://new.karldigi.dev/v1)
 #                quota     → separate_credentials @ https://grok.karldigi.dev
-#   tavily-1..N  inference → TAVILY_BASE_URL (official); quota endpoint_credentials
-#   firecrawl-1  inference → FIRECRAWL_BASE_URL (official); quota endpoint_credentials
+#                            flow grok2api_admin (legacy /admin/api/tokens)
+#   grok-2       inference → GROK_2_BASE_URL (default https://grok2api.karldigi.dev/v1)
+#                quota     → separate_credentials @ https://grok2api.karldigi.dev
+#                            flow grok2api_v3_admin (login + /api/admin/v1/accounts)
+#                            quota key = username:password (admin JWT login)
+#   tavily-1..N     inference → TAVILY_BASE_URL (official); quota endpoint_credentials
+#   firecrawl-1..N  inference → FIRECRAWL_BASE_URL (official); quota endpoint_credentials
 #
 # Idempotent per (provider, name): skips when name already exists.
 # Existing rows can still get quota via set-quota + rotate-quota-key after seed.
@@ -23,6 +28,8 @@ MK="${GUDA_MASTER_KEY_PATH:?GUDA_MASTER_KEY_PATH must be set}"
 
 DEFAULT_GROK_BASE_URL="https://new.karldigi.dev/v1"
 DEFAULT_GROK_QUOTA_BASE_URL="https://grok.karldigi.dev"
+DEFAULT_GROK_2_BASE_URL="https://grok2api.karldigi.dev/v1"
+DEFAULT_GROK_2_QUOTA_BASE_URL="https://grok2api.karldigi.dev"
 DEFAULT_TAVILY_BASE_URL="https://api.tavily.com"
 DEFAULT_FIRECRAWL_BASE_URL="https://api.firecrawl.dev/v2"
 
@@ -45,18 +52,22 @@ endpoint_id() {
 }
 
 endpoint_quota_meta() {
-  # Prints: mode<TAB>configured<TAB>quota_base_url  (configured = true/false)
+  # Prints: mode<TAB>flow<TAB>configured<TAB>quota_base_url<TAB>identity_present
+  # (configured / identity_present = true/false)
   local provider="$1" name="$2"
   if command -v sqlite3 >/dev/null 2>&1; then
     sqlite3 -separator $'\t' "$DB" \
-      "SELECT COALESCE(quota_mode,''), CASE WHEN encrypted_quota_key IS NOT NULL AND encrypted_quota_key!='' THEN 'true' ELSE 'false' END, COALESCE(quota_base_url,'')
+      "SELECT COALESCE(quota_mode,''), COALESCE(quota_flow,''),
+              CASE WHEN encrypted_quota_key IS NOT NULL AND encrypted_quota_key!='' THEN 'true' ELSE 'false' END,
+              COALESCE(quota_base_url,''),
+              CASE WHEN COALESCE(quota_key_prefix,'')!='' OR COALESCE(quota_key_fingerprint,'')!='' THEN 'true' ELSE 'false' END
        FROM provider_keys
        WHERE provider='${provider//\'/\'\'}' AND name='${name//\'/\'\'}'
          AND (archived_at IS NULL OR archived_at='')
        ORDER BY id LIMIT 1;"
     return 0
   fi
-  printf '\tfalse\t'
+  printf '\t\tfalse\t\tfalse'
 }
 
 write_secret_file() {
@@ -116,18 +127,24 @@ add_endpoint() {
 
 ensure_separate_quota() {
   local provider="$1" name="$2" flow="$3" quota_url="$4" quota_key="$5"
-  local id mode configured meta current_url
+  local id mode current_flow configured meta current_url identity_present flow_changed
 
   id="$(endpoint_id "$provider" "$name")"
   [ -z "$id" ] && return 0
 
   meta="$(endpoint_quota_meta "$provider" "$name")"
   mode="$(printf '%s' "$meta" | cut -f1)"
-  configured="$(printf '%s' "$meta" | cut -f2)"
-  current_url="$(printf '%s' "$meta" | cut -f3)"
+  current_flow="$(printf '%s' "$meta" | cut -f2)"
+  current_url="$(printf '%s' "$meta" | cut -f4)"
+  identity_present="$(printf '%s' "$meta" | cut -f5)"
+  flow_changed=false
+  [ "$current_flow" != "$flow" ] && flow_changed=true
 
-  # Only mutate when mode/URL are not already correct (idempotent re-runs).
-  if [ "$mode" != "separate_credentials" ] || { [ -n "$quota_url" ] && [ "$current_url" != "$quota_url" ]; }; then
+  # Reconcile mode, flow, URL, and v3 password-metadata redaction.
+  if [ "$mode" != "separate_credentials" ] ||
+    [ "$flow_changed" = "true" ] ||
+    { [ -n "$quota_url" ] && [ "$current_url" != "$quota_url" ]; } ||
+    { [ "$flow" = "grok2api_v3_admin" ] && [ "$identity_present" = "true" ]; }; then
     if run_adm provider-endpoint set-quota \
       --id "$id" \
       --mode separate_credentials \
@@ -142,9 +159,11 @@ ensure_separate_quota() {
 
   # Re-read configured after possible set-quota (entering separate may clear key).
   meta="$(endpoint_quota_meta "$provider" "$name")"
-  configured="$(printf '%s' "$meta" | cut -f2)"
+  configured="$(printf '%s' "$meta" | cut -f3)"
 
-  if [ -n "$quota_key" ] && [ "$configured" != "true" ]; then
+  # A flow change can change credential shape (legacy bearer → v3 login), so
+  # rotate from the supplied operator secret even when a key was configured.
+  if [ -n "$quota_key" ] && { [ "$configured" != "true" ] || [ "$flow_changed" = "true" ]; }; then
     if printf '%s' "$quota_key" | run_adm provider-endpoint rotate-quota-key --id "$id" >/dev/null; then
       echo "rotate-quota-key $provider/$name id=$id ok" >&2
     else
@@ -156,13 +175,14 @@ ensure_separate_quota() {
 
 ensure_shared_quota() {
   local provider="$1" name="$2" flow="$3"
-  local id mode meta
+  local id mode current_flow meta
 
   id="$(endpoint_id "$provider" "$name")"
   [ -z "$id" ] && return 0
   meta="$(endpoint_quota_meta "$provider" "$name")"
   mode="$(printf '%s' "$meta" | cut -f1)"
-  if [ "$mode" != "endpoint_credentials" ]; then
+  current_flow="$(printf '%s' "$meta" | cut -f2)"
+  if [ "$mode" != "endpoint_credentials" ] || [ "$current_flow" != "$flow" ]; then
     if run_adm provider-endpoint set-quota \
       --id "$id" \
       --mode endpoint_credentials \
@@ -197,44 +217,69 @@ if [ "${SEED_LEGACY_NAMES:-0}" = "1" ] && [ -n "$GROK_QURL" ]; then
   done
 fi
 
-# --- Firecrawl-1 -------------------------------------------------------------
-FC_NAME="${FIRECRAWL_1_NAME:-firecrawl-1}"
+# --- Grok-2 (Grok2API v3: same host inference + admin quota JWT) -------------
+GROK2_NAME="${GROK_2_NAME:-grok-2}"
+GROK2_BASE="${GROK_2_BASE_URL:-$DEFAULT_GROK_2_BASE_URL}"
+GROK2_KEY="${GROK_2_API_KEY:-}"
+GROK2_QMODE="${GROK_2_QUOTA_MODE:-separate_credentials}"
+GROK2_QFLOW="${GROK_2_QUOTA_FLOW:-grok2api_v3_admin}"
+GROK2_QURL="${GROK_2_QUOTA_BASE_URL:-$DEFAULT_GROK_2_QUOTA_BASE_URL}"
+GROK2_QKEY="${GROK_2_QUOTA_KEY:-}"
+
+if [ -n "$GROK2_KEY" ]; then
+  add_endpoint grok "$GROK2_NAME" "$GROK2_BASE" "$GROK2_KEY" \
+    "$GROK2_QMODE" "$GROK2_QFLOW" "$GROK2_QURL" "$GROK2_QKEY"
+fi
+
+# Shared-credential providers (Tavily / Firecrawl) use the inference endpoint
+# pair itself for quota refresh.
+seed_shared_endpoint() {
+  local provider="$1" base="$2" flow="$3" name="$4" key="$5"
+  [ -z "$key" ] && return 0
+  add_endpoint "$provider" "$name" "$base" "$key" \
+    endpoint_credentials "$flow" "" ""
+}
+
+seed_shared_csv() {
+  local provider="$1" base="$2" flow="$3" prefix="$4" keys="$5"
+  local i=1 k
+  while IFS= read -r k; do
+    k="${k//\"/}"; k="${k// /}"
+    [ -z "$k" ] && continue
+    seed_shared_endpoint "$provider" "$base" "$flow" "$prefix-$i" "$k"
+    i=$((i + 1))
+  done < <(printf '%s\n' "$keys" | tr ',' '\n')
+}
+
+# --- Firecrawl 1..N ----------------------------------------------------------
 FC_BASE="${FIRECRAWL_BASE_URL:-$DEFAULT_FIRECRAWL_BASE_URL}"
-FC_KEY="${FIRECRAWL_1_API_KEY:-${FIRECRAWL_API_KEY:-}}"
-add_endpoint firecrawl "$FC_NAME" "$FC_BASE" "$FC_KEY" \
-  endpoint_credentials firecrawl_credit_usage "" ""
-if [ -n "$FC_KEY" ]; then
-  ensure_shared_quota firecrawl "$FC_NAME" firecrawl_credit_usage || true
-  if [ "${SEED_LEGACY_NAMES:-0}" = "1" ]; then
-    ensure_shared_quota firecrawl gh01 firecrawl_credit_usage || true
-  fi
+
+if [ -n "${FIRECRAWL_API_KEYS:-}" ]; then
+  seed_shared_csv firecrawl "$FC_BASE" firecrawl_credit_usage firecrawl "$FIRECRAWL_API_KEYS"
+elif [ -n "${FIRECRAWL_1_API_KEY:-}" ] || [ -n "${FIRECRAWL_2_API_KEY:-}" ] || [ -n "${FIRECRAWL_3_API_KEY:-}" ]; then
+  seed_shared_endpoint firecrawl "$FC_BASE" firecrawl_credit_usage "${FIRECRAWL_1_NAME:-firecrawl-1}" "${FIRECRAWL_1_API_KEY:-}"
+  seed_shared_endpoint firecrawl "$FC_BASE" firecrawl_credit_usage "${FIRECRAWL_2_NAME:-firecrawl-2}" "${FIRECRAWL_2_API_KEY:-}"
+  seed_shared_endpoint firecrawl "$FC_BASE" firecrawl_credit_usage "${FIRECRAWL_3_NAME:-firecrawl-3}" "${FIRECRAWL_3_API_KEY:-}"
+elif [ -n "${FIRECRAWL_API_KEY:-}" ]; then
+  seed_shared_endpoint firecrawl "$FC_BASE" firecrawl_credit_usage "${FIRECRAWL_1_NAME:-firecrawl-1}" "$FIRECRAWL_API_KEY"
+fi
+
+if [ "${SEED_LEGACY_NAMES:-0}" = "1" ] &&
+  { [ -n "${FIRECRAWL_API_KEYS:-}" ] || [ -n "${FIRECRAWL_1_API_KEY:-${FIRECRAWL_API_KEY:-}}" ]; }; then
+  ensure_shared_quota firecrawl gh01 firecrawl_credit_usage || true
 fi
 
 # --- Tavily 1..N -------------------------------------------------------------
 TAVILY_BASE="${TAVILY_BASE_URL:-$DEFAULT_TAVILY_BASE_URL}"
 
-seed_tavily_named() {
-  local name="$1" key="$2"
-  [ -z "$key" ] && return 0
-  add_endpoint tavily "$name" "$TAVILY_BASE" "$key" \
-    endpoint_credentials tavily_usage "" ""
-  ensure_shared_quota tavily "$name" tavily_usage || true
-}
-
 if [ -n "${TAVILY_1_API_KEY:-}" ] || [ -n "${TAVILY_2_API_KEY:-}" ] || [ -n "${TAVILY_3_API_KEY:-}" ]; then
-  seed_tavily_named tavily-1 "${TAVILY_1_API_KEY:-}"
-  seed_tavily_named tavily-2 "${TAVILY_2_API_KEY:-}"
-  seed_tavily_named tavily-3 "${TAVILY_3_API_KEY:-}"
+  seed_shared_endpoint tavily "$TAVILY_BASE" tavily_usage tavily-1 "${TAVILY_1_API_KEY:-}"
+  seed_shared_endpoint tavily "$TAVILY_BASE" tavily_usage tavily-2 "${TAVILY_2_API_KEY:-}"
+  seed_shared_endpoint tavily "$TAVILY_BASE" tavily_usage tavily-3 "${TAVILY_3_API_KEY:-}"
 elif [ -n "${TAVILY_API_KEYS:-}" ]; then
-  i=1
-  while IFS= read -r k; do
-    k="${k//\"/}"; k="${k// /}"
-    [ -z "$k" ] && continue
-    seed_tavily_named "tavily-$i" "$k"
-    i=$((i + 1))
-  done < <(printf '%s\n' "$TAVILY_API_KEYS" | tr ',' '\n')
+  seed_shared_csv tavily "$TAVILY_BASE" tavily_usage tavily "$TAVILY_API_KEYS"
 elif [ -n "${TAVILY_API_KEY:-}" ]; then
-  seed_tavily_named tavily-1 "$TAVILY_API_KEY"
+  seed_shared_endpoint tavily "$TAVILY_BASE" tavily_usage tavily-1 "$TAVILY_API_KEY"
 fi
 
 echo "--- provider-endpoint list ---"

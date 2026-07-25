@@ -483,7 +483,8 @@ It creates canonical endpoint pairs with quota sidecars:
 
 | Name | Upstream | Quota |
 |---|---|---|
-| `grok-1` | `https://new.karldigi.dev/v1` (or `GROK_1_BASE_URL`) | `separate_credentials` → `https://grok.karldigi.dev` + admin key |
+| `grok-1` | `https://new.karldigi.dev/v1` (or `GROK_1_BASE_URL`) | `separate_credentials` → `https://grok.karldigi.dev` + legacy admin key (`grok2api_admin`) |
+| `grok-2` | `https://grok2api.karldigi.dev/v1` (or `GROK_2_BASE_URL`) | `separate_credentials` → origin + admin `username:password` (`grok2api_v3_admin`) |
 | `tavily-1..N` | official / `TAVILY_BASE_URL` | `endpoint_credentials` |
 | `firecrawl-1` | official / `FIRECRAWL_BASE_URL` | `endpoint_credentials` |
 
@@ -643,11 +644,12 @@ Inference failures never erase quota configuration or cache history.
 | `endpoint_credentials` | row inference `base_url` + key | Tavily/Firecrawl create default |
 | `separate_credentials` | `quota_base_url` + encrypted quota key | Grok via New API inference + owning Grok2API admin |
 
-| Flow | Provider |
-|---|---|
-| `grok2api_admin` | grok |
-| `tavily_usage` | tavily |
-| `firecrawl_credit_usage` | firecrawl |
+| Flow | Provider | Notes |
+|---|---|---|
+| `grok2api_admin` | grok | Legacy Grok2API: Bearer admin key → `GET /admin/api/tokens` |
+| `grok2api_v3_admin` | grok | Grok2API v3: admin `username:password` login → `GET /api/admin/v1/accounts` (sums `quotaWindows`) |
+| `tavily_usage` | tavily | |
+| `firecrawl_credit_usage` | firecrawl | |
 
 Creation defaults (migration `0009` backfill matches these):
 
@@ -726,7 +728,8 @@ missing) is counted **once** per provider, not once per key. Provider parsers:
 |---|---|
 | Tavily | Derived: prefer `key.limit − key.usage` (`remaining_basis=key`, additive); if `key.limit` is missing, use `account.plan_limit − account.plan_usage` with matching plan used/limit (`remaining_basis=account_plan`, de-duplicated in Known remaining). No direct remaining field. |
 | Firecrawl | Direct `remainingCredits` (with plan/one-time edge cases) |
-| Grok (Grok2API admin) | Sum of token mode `remaining` |
+| Grok (`grok2api_admin`) | Sum of legacy token mode `remaining` |
+| Grok (`grok2api_v3_admin`) | Sum enabled, authentication-active account `quotaWindows` remaining (+ billing when windows absent). Temporarily cooling active accounts remain part of plan capacity; disabled / reauthentication-required accounts are excluded. |
 
 **Pool list API:** `GET /admin/api/provider-pools/{provider}?view=enabled|all`
 (default `enabled` = selection-eligible rows only; `page.total` is filtered;
@@ -763,6 +766,9 @@ Adds per-row `quota_mode`, `quota_flow`, `quota_base_url`, `encrypted_quota_key`
 `quota_key_prefix`, and `quota_key_fingerprint`. Backfill sets provider defaults
 above; no row receives the legacy global Grok2API admin URL or key. Inference
 columns, row IDs, cooldowns, and demotion state are unchanged.
+Grok2API v3 `username:password` quota credentials intentionally keep
+`quota_key_prefix` and `quota_key_fingerprint` null so display metadata cannot
+expose password fragments or provide an offline password verifier.
 
 ## Provider endpoint selection and cooldown
 

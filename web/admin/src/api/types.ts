@@ -24,7 +24,7 @@ export type GatewayKey = {
 export type GatewayKeyCreateResponse = { key: GatewayKey; raw_key: string };
 
 export type QuotaMode = 'disabled' | 'endpoint_credentials' | 'separate_credentials';
-export type QuotaFlow = 'grok2api_admin' | 'tavily_usage' | 'firecrawl_credit_usage';
+export type QuotaFlow = 'grok2api_admin' | 'grok2api_v3_admin' | 'tavily_usage' | 'firecrawl_credit_usage';
 
 export type EndpointQuotaInput = {
   mode: QuotaMode;

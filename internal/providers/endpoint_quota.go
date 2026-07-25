@@ -22,10 +22,20 @@ const (
 type QuotaFlow string
 
 const (
-	QuotaFlowGrok2APIAdmin        QuotaFlow = "grok2api_admin"
+	// QuotaFlowGrok2APIAdmin is the legacy Python/FastAPI Grok2API admin shape
+	// (Bearer admin key → GET /admin/api/tokens).
+	QuotaFlowGrok2APIAdmin QuotaFlow = "grok2api_admin"
+	// QuotaFlowGrok2APIV3Admin is the Go v3 admin shape (username:password login
+	// → JWT → GET /api/admin/v1/accounts with quotaWindows aggregation).
+	QuotaFlowGrok2APIV3Admin      QuotaFlow = "grok2api_v3_admin"
 	QuotaFlowTavilyUsage          QuotaFlow = "tavily_usage"
 	QuotaFlowFirecrawlCreditUsage QuotaFlow = "firecrawl_credit_usage"
 )
+
+type quotaFlowPolicy struct {
+	Default QuotaFlow
+	Allowed []QuotaFlow
+}
 
 // EndpointQuotaInput is the operator-supplied quota configuration for create
 // or update. RawKey is accepted only for separate credentials and is never
@@ -96,6 +106,13 @@ func ValidateQuotaConfig(provider string, input EndpointQuotaInput, requireRawKe
 	if err := validateFlowForProvider(provider, flow); err != nil {
 		return EndpointQuotaInput{}, err
 	}
+	if flow == QuotaFlowGrok2APIV3Admin && mode == QuotaEndpointCredentials {
+		return EndpointQuotaInput{}, fmt.Errorf(
+			"%w: %s requires separate_credentials mode",
+			ErrInvalidQuotaConfig,
+			flow,
+		)
+	}
 
 	switch mode {
 	case QuotaDisabled, QuotaEndpointCredentials:
@@ -138,28 +155,47 @@ func validateMode(mode QuotaMode) error {
 }
 
 func validateFlowForProvider(provider string, flow QuotaFlow) error {
-	want, err := defaultFlow(provider)
+	policy, err := quotaFlowPolicyForProvider(provider)
 	if err != nil {
 		return err
 	}
-	if flow != want {
-		return fmt.Errorf("%w: flow %q is not valid for provider %q", ErrInvalidQuotaConfig, flow, provider)
+	for _, allowed := range policy.Allowed {
+		if flow == allowed {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("%w: flow %q is not valid for provider %q", ErrInvalidQuotaConfig, flow, provider)
 }
 
 func defaultFlow(provider string) (QuotaFlow, error) {
-	if err := validateProvider(provider); err != nil {
+	policy, err := quotaFlowPolicyForProvider(provider)
+	if err != nil {
 		return "", err
+	}
+	return policy.Default, nil
+}
+
+func quotaFlowPolicyForProvider(provider string) (quotaFlowPolicy, error) {
+	if err := validateProvider(provider); err != nil {
+		return quotaFlowPolicy{}, err
 	}
 	switch provider {
 	case ProviderGrok:
-		return QuotaFlowGrok2APIAdmin, nil
+		return quotaFlowPolicy{
+			Default: QuotaFlowGrok2APIAdmin,
+			Allowed: []QuotaFlow{QuotaFlowGrok2APIAdmin, QuotaFlowGrok2APIV3Admin},
+		}, nil
 	case ProviderTavily:
-		return QuotaFlowTavilyUsage, nil
+		return quotaFlowPolicy{
+			Default: QuotaFlowTavilyUsage,
+			Allowed: []QuotaFlow{QuotaFlowTavilyUsage},
+		}, nil
 	case ProviderFirecrawl:
-		return QuotaFlowFirecrawlCreditUsage, nil
+		return quotaFlowPolicy{
+			Default: QuotaFlowFirecrawlCreditUsage,
+			Allowed: []QuotaFlow{QuotaFlowFirecrawlCreditUsage},
+		}, nil
 	default:
-		return "", ErrUnknownProvider
+		return quotaFlowPolicy{}, ErrUnknownProvider
 	}
 }
