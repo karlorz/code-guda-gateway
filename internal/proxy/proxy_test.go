@@ -728,6 +728,112 @@ func TestProxy_EnabledRecorderLogsTavily432Then200(t *testing.T) {
 	}
 }
 
+func TestProxy_TerminalTavily400PreservesResponseAndLogsSafeDiagnostic(t *testing.T) {
+	const upstreamBody = `{"detail":{"error":"Query is too long. Max query length is 400 characters."}}`
+	var attempts int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Upstream-Trace", "trace-400")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(upstreamBody))
+	}))
+	defer upstream.Close()
+
+	recorder := &fakeAttemptRecorder{enabled: true}
+	px, repo := openProxyWithRecorder(t, recorder, providers.ProviderTavily, upstream.URL, "first", "second")
+	req := httptest.NewRequest(http.MethodPost, "/tavily/search", strings.NewReader(`{"query":"generated-test-input"}`))
+	req.Header.Set("X-Request-ID", "req-tavily-query-too-long")
+	rr := httptest.NewRecorder()
+	result := px.Forward(rr, req, proxy.Target{
+		Path:     "/search",
+		Provider: providers.ProviderTavily,
+		Keys:     repo,
+	})
+
+	if result.Err != nil {
+		t.Fatalf("Forward error: %v", result.Err)
+	}
+	if attempts != 1 {
+		t.Fatalf("upstream attempts = %d, want 1", attempts)
+	}
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+	if rr.Body.String() != upstreamBody {
+		t.Fatalf("body = %q, want original upstream body", rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	if got := rr.Header().Get("X-Upstream-Trace"); got != "trace-400" {
+		t.Fatalf("X-Upstream-Trace = %q, want trace-400", got)
+	}
+	if len(recorder.rows) != 1 {
+		t.Fatalf("attempt rows = %#v, want 1", recorder.rows)
+	}
+
+	row := recorder.rows[0]
+	if row.RequestID != "req-tavily-query-too-long" || row.AttemptIndex != 1 {
+		t.Fatalf("attempt identity = request_id=%q index=%d", row.RequestID, row.AttemptIndex)
+	}
+	if row.UpstreamStatus == nil || *row.UpstreamStatus != http.StatusBadRequest {
+		t.Fatalf("UpstreamStatus = %v, want 400", row.UpstreamStatus)
+	}
+	if row.StatusClass != "4xx" || !row.Terminal {
+		t.Fatalf("attempt status = class=%q terminal=%v", row.StatusClass, row.Terminal)
+	}
+	if row.Reason == nil || *row.Reason != "query_too_long" {
+		t.Fatalf("Reason = %v, want query_too_long", row.Reason)
+	}
+	if row.CooldownUntil != nil {
+		t.Fatalf("CooldownUntil = %v, want nil", row.CooldownUntil)
+	}
+	if row.MessageRedacted == nil || *row.MessageRedacted != "Query is too long. Max query length is 400 characters." {
+		t.Fatalf("MessageRedacted = %v, want canonical query-length diagnostic", row.MessageRedacted)
+	}
+
+	keys, err := repo.List(providers.ProviderTavily)
+	if err != nil {
+		t.Fatalf("List keys: %v", err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("keys = %#v, want 2", keys)
+	}
+	if keys[0].CooldownUntil != nil || keys[0].CooldownReason != nil || keys[0].LastFailedAt != nil {
+		t.Fatalf("first key was cooled or demoted: %+v", keys[0])
+	}
+	if !keys[0].Enabled {
+		t.Fatal("first key disabled after request-validation 400")
+	}
+}
+
+func TestProxy_TerminalTavilyUnknown400LogsStatusOnly(t *testing.T) {
+	const upstreamBody = `{"detail":{"error":"Invalid max query length setting"}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(upstreamBody))
+	}))
+	defer upstream.Close()
+
+	recorder := &fakeAttemptRecorder{enabled: true}
+	px, repo := openProxyWithRecorder(t, recorder, providers.ProviderTavily, upstream.URL, "first")
+	req := httptest.NewRequest(http.MethodPost, "/tavily/search", strings.NewReader(`{"query":"generated-test-input"}`))
+	rr := httptest.NewRecorder()
+	result := px.Forward(rr, req, proxy.Target{Path: "/search", Provider: providers.ProviderTavily, Keys: repo})
+
+	if result.Err != nil || rr.Code != http.StatusBadRequest {
+		t.Fatalf("result = %+v status = %d", result, rr.Code)
+	}
+	if len(recorder.rows) != 1 {
+		t.Fatalf("attempt rows = %#v, want 1", recorder.rows)
+	}
+	row := recorder.rows[0]
+	if row.Reason != nil || row.MessageRedacted != nil {
+		t.Fatalf("unknown 400 diagnostic = reason=%v message=%v, want status-only", row.Reason, row.MessageRedacted)
+	}
+}
+
 func TestProxy_EnabledRecorderLogsFirecrawlCreditExhaustionThenSuccess(t *testing.T) {
 	var attempts int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
