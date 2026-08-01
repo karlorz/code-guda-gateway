@@ -7,16 +7,14 @@
 #   export DB_PATH=... GUDA_MASTER_KEY_PATH=...
 #   ./scripts/seed-provider-keys.sh [guda-gateway-admin-path]
 #
-# Topology (canonical names — identifiers only, not pool roles):
+# Canonical topology:
 #   grok-1       inference → GROK_1_BASE_URL (default https://new.karldigi.dev/v1)
-#                quota     → separate_credentials @ https://grok.karldigi.dev
-#                            flow grok2api_admin (legacy /admin/api/tokens)
-#   grok-2       inference → GROK_2_BASE_URL (default https://grok2api.karldigi.dev/v1)
-#                quota     → separate_credentials @ https://grok2api.karldigi.dev
-#                            flow grok2api_v3_admin (login + /api/admin/v1/accounts)
-#                            quota key = username:password (admin JWT login)
+#                quota     → disabled; New API owns channel health and quota
 #   tavily-1..N     inference → TAVILY_BASE_URL (official); quota endpoint_credentials
 #   firecrawl-1..N  inference → FIRECRAWL_BASE_URL (official); quota endpoint_credentials
+#
+# Direct Grok/Grok2API deployments remain supported through the generic
+# provider-endpoint CLI/UI, but are not part of the canonical seed.
 #
 # Idempotent per (provider, name): skips when name already exists.
 # Existing rows can still get quota via set-quota + rotate-quota-key after seed.
@@ -27,9 +25,6 @@ DB="${DB_PATH:?DB_PATH must be set}"
 MK="${GUDA_MASTER_KEY_PATH:?GUDA_MASTER_KEY_PATH must be set}"
 
 DEFAULT_GROK_BASE_URL="https://new.karldigi.dev/v1"
-DEFAULT_GROK_QUOTA_BASE_URL="https://grok.karldigi.dev"
-DEFAULT_GROK_2_BASE_URL="https://grok2api.karldigi.dev/v1"
-DEFAULT_GROK_2_QUOTA_BASE_URL="https://grok2api.karldigi.dev"
 DEFAULT_TAVILY_BASE_URL="https://api.tavily.com"
 DEFAULT_FIRECRAWL_BASE_URL="https://api.firecrawl.dev/v2"
 
@@ -52,38 +47,25 @@ endpoint_id() {
 }
 
 endpoint_quota_meta() {
-  # Prints: mode<TAB>flow<TAB>configured<TAB>quota_base_url<TAB>identity_present
-  # (configured / identity_present = true/false)
+  # Prints: mode<TAB>flow
   local provider="$1" name="$2"
   if command -v sqlite3 >/dev/null 2>&1; then
     sqlite3 -separator $'\t' "$DB" \
-      "SELECT COALESCE(quota_mode,''), COALESCE(quota_flow,''),
-              CASE WHEN encrypted_quota_key IS NOT NULL AND encrypted_quota_key!='' THEN 'true' ELSE 'false' END,
-              COALESCE(quota_base_url,''),
-              CASE WHEN COALESCE(quota_key_prefix,'')!='' OR COALESCE(quota_key_fingerprint,'')!='' THEN 'true' ELSE 'false' END
+      "SELECT COALESCE(quota_mode,''), COALESCE(quota_flow,'')
        FROM provider_keys
        WHERE provider='${provider//\'/\'\'}' AND name='${name//\'/\'\'}'
          AND (archived_at IS NULL OR archived_at='')
        ORDER BY id LIMIT 1;"
     return 0
   fi
-  printf '\t\tfalse\t\tfalse'
-}
-
-write_secret_file() {
-  local content="$1" f
-  f="$(mktemp)"
-  umask 077
-  printf '%s' "$content" >"$f"
-  chmod 600 "$f"
-  printf '%s' "$f"
+  printf '\t'
 }
 
 add_endpoint() {
-  # add_endpoint provider name base_url raw_key [quota_mode] [quota_flow] [quota_base_url] [quota_key]
+  # add_endpoint provider name base_url raw_key [quota_mode] [quota_flow]
   local provider="$1" name="$2" base_url="$3" key="$4"
-  local quota_mode="${5:-}" quota_flow="${6:-}" quota_base_url="${7:-}" quota_key="${8:-}"
-  local out rc=0 args qfile=""
+  local quota_mode="${5:-}" quota_flow="${6:-}"
+  local out rc=0 args
 
   [ -z "$key" ] && { echo "skip $provider/$name: empty inference key" >&2; return 0; }
 
@@ -94,27 +76,12 @@ add_endpoint() {
   if [ -n "$quota_flow" ]; then
     args+=(--quota-flow "$quota_flow")
   fi
-  if [ -n "$quota_base_url" ]; then
-    args+=(--quota-base-url "$quota_base_url")
-  fi
-  if [ -n "$quota_key" ]; then
-    if [ "$quota_mode" != "separate_credentials" ]; then
-      echo "error $provider/$name: quota key only valid with separate_credentials" >&2
-      return 1
-    fi
-    qfile="$(write_secret_file "$quota_key")"
-    args+=(--quota-key-file "$qfile")
-  fi
-
   out=$(printf '%s' "$key" | run_adm "${args[@]}" 2>&1) || rc=$?
-  [ -n "$qfile" ] && rm -f "$qfile"
 
   if [ "$rc" -ne 0 ]; then
     if printf '%s' "$out" | grep -q 'name already exists'; then
       echo "skip $provider/$name: already exists" >&2
-      if [ "$quota_mode" = "separate_credentials" ] && [ -n "$quota_base_url" ]; then
-        ensure_separate_quota "$provider" "$name" "$quota_flow" "$quota_base_url" "$quota_key"
-      elif [ "$quota_mode" = "endpoint_credentials" ] && [ -n "$quota_flow" ]; then
+      if [ "$quota_mode" = "endpoint_credentials" ] && [ -n "$quota_flow" ]; then
         ensure_shared_quota "$provider" "$name" "$quota_flow"
       fi
       return 0
@@ -124,54 +91,6 @@ add_endpoint() {
   fi
   printf '%s\n' "$out"
 }
-
-ensure_separate_quota() {
-  local provider="$1" name="$2" flow="$3" quota_url="$4" quota_key="$5"
-  local id mode current_flow configured meta current_url identity_present flow_changed
-
-  id="$(endpoint_id "$provider" "$name")"
-  [ -z "$id" ] && return 0
-
-  meta="$(endpoint_quota_meta "$provider" "$name")"
-  mode="$(printf '%s' "$meta" | cut -f1)"
-  current_flow="$(printf '%s' "$meta" | cut -f2)"
-  current_url="$(printf '%s' "$meta" | cut -f4)"
-  identity_present="$(printf '%s' "$meta" | cut -f5)"
-  flow_changed=false
-  [ "$current_flow" != "$flow" ] && flow_changed=true
-
-  # Reconcile mode, flow, URL, and v3 password-metadata redaction.
-  if [ "$mode" != "separate_credentials" ] ||
-    [ "$flow_changed" = "true" ] ||
-    { [ -n "$quota_url" ] && [ "$current_url" != "$quota_url" ]; } ||
-    { [ "$flow" = "grok2api_v3_admin" ] && [ "$identity_present" = "true" ]; }; then
-    if run_adm provider-endpoint set-quota \
-      --id "$id" \
-      --mode separate_credentials \
-      --flow "${flow:-grok2api_admin}" \
-      --base-url "$quota_url" >/dev/null; then
-      echo "set-quota $provider/$name id=$id separate @ $quota_url" >&2
-    else
-      echo "set-quota $provider/$name id=$id failed" >&2
-      return 0
-    fi
-  fi
-
-  # Re-read configured after possible set-quota (entering separate may clear key).
-  meta="$(endpoint_quota_meta "$provider" "$name")"
-  configured="$(printf '%s' "$meta" | cut -f3)"
-
-  # A flow change can change credential shape (legacy bearer → v3 login), so
-  # rotate from the supplied operator secret even when a key was configured.
-  if [ -n "$quota_key" ] && { [ "$configured" != "true" ] || [ "$flow_changed" = "true" ]; }; then
-    if printf '%s' "$quota_key" | run_adm provider-endpoint rotate-quota-key --id "$id" >/dev/null; then
-      echo "rotate-quota-key $provider/$name id=$id ok" >&2
-    else
-      echo "rotate-quota-key $provider/$name id=$id failed" >&2
-    fi
-  fi
-}
-
 
 ensure_shared_quota() {
   local provider="$1" name="$2" flow="$3"
@@ -196,48 +115,15 @@ ensure_shared_quota() {
 GROK_NAME="${GROK_1_NAME:-grok-1}"
 GROK_BASE="${GROK_1_BASE_URL:-${GROK_BASE_URL:-$DEFAULT_GROK_BASE_URL}}"
 GROK_KEY="${GROK_1_API_KEY:-${GROK_API_KEY:-}}"
-GROK_QMODE="${GROK_1_QUOTA_MODE:-separate_credentials}"
-GROK_QFLOW="${GROK_1_QUOTA_FLOW:-grok2api_admin}"
-GROK_QURL="${GROK_1_QUOTA_BASE_URL:-${grok2api_admin_base_url:-$DEFAULT_GROK_QUOTA_BASE_URL}}"
-GROK_QKEY="${GROK_1_QUOTA_KEY:-${grok2api_admin_key:-}}"
 
-add_endpoint grok "$GROK_NAME" "$GROK_BASE" "$GROK_KEY" \
-  "$GROK_QMODE" "$GROK_QFLOW" "$GROK_QURL" "$GROK_QKEY"
-
-# If create was skipped (name exists), ensure quota sidecar matches env.
-if [ -n "$GROK_QURL" ]; then
-  ensure_separate_quota grok "$GROK_NAME" "$GROK_QFLOW" "$GROK_QURL" "$GROK_QKEY" || true
-fi
-
-# Optional: only when SEED_LEGACY_NAMES=1, also patch common pre-rename rows.
-if [ "${SEED_LEGACY_NAMES:-0}" = "1" ] && [ -n "$GROK_QURL" ]; then
-  for legacy in karldigi; do
-    [ "$legacy" = "$GROK_NAME" ] && continue
-    ensure_separate_quota grok "$legacy" "$GROK_QFLOW" "$GROK_QURL" "$GROK_QKEY" || true
-  done
-fi
-
-# --- Grok-2 (Grok2API v3: same host inference + admin quota JWT) -------------
-GROK2_NAME="${GROK_2_NAME:-grok-2}"
-GROK2_BASE="${GROK_2_BASE_URL:-$DEFAULT_GROK_2_BASE_URL}"
-GROK2_KEY="${GROK_2_API_KEY:-}"
-GROK2_QMODE="${GROK_2_QUOTA_MODE:-separate_credentials}"
-GROK2_QFLOW="${GROK_2_QUOTA_FLOW:-grok2api_v3_admin}"
-GROK2_QURL="${GROK_2_QUOTA_BASE_URL:-$DEFAULT_GROK_2_QUOTA_BASE_URL}"
-GROK2_QKEY="${GROK_2_QUOTA_KEY:-}"
-
-if [ -n "$GROK2_KEY" ]; then
-  add_endpoint grok "$GROK2_NAME" "$GROK2_BASE" "$GROK2_KEY" \
-    "$GROK2_QMODE" "$GROK2_QFLOW" "$GROK2_QURL" "$GROK2_QKEY"
-fi
+add_endpoint grok "$GROK_NAME" "$GROK_BASE" "$GROK_KEY" disabled
 
 # Shared-credential providers (Tavily / Firecrawl) use the inference endpoint
 # pair itself for quota refresh.
 seed_shared_endpoint() {
   local provider="$1" base="$2" flow="$3" name="$4" key="$5"
   [ -z "$key" ] && return 0
-  add_endpoint "$provider" "$name" "$base" "$key" \
-    endpoint_credentials "$flow" "" ""
+  add_endpoint "$provider" "$name" "$base" "$key" endpoint_credentials "$flow"
 }
 
 seed_shared_csv() {

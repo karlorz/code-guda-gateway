@@ -15,7 +15,8 @@
 # Usage (Coolify / Docker — optional, after first healthy deploy):
 #   docker exec -e DB_PATH=... -e GUDA_MASTER_KEY_PATH=... \
 #     -e GUDA_ADMIN_TOKEN=... \
-#     -e GROK_1_API_KEY=... -e TAVILY_API_KEYS=... -e FIRECRAWL_1_API_KEY=... \
+#     -e GROK_1_API_KEY=... \
+#     -e TAVILY_API_KEYS=... -e FIRECRAWL_1_API_KEY=... \
 #     <container> seed-instance
 #   # or: mount secrets and run the one-shot seed service (docker-compose.coolify-seed.yml)
 #
@@ -145,15 +146,11 @@ if [ "${GUDA_SEED_SKIP_PROVIDERS:-0}" != "1" ]; then
     log "providers: seed-provider-keys.sh not found at $SEED_PROVIDERS"
     exit 1
   fi
-  # Need at least one provider secret to do useful work; otherwise soft-skip.
-  if [ -z "${GROK_1_API_KEY:-${GROK_API_KEY:-}}" ] \
-    && [ -z "${TAVILY_API_KEYS:-${TAVILY_1_API_KEY:-${TAVILY_API_KEY:-}}}" ] \
-    && [ -z "${FIRECRAWL_1_API_KEY:-${FIRECRAWL_API_KEY:-}}" ]; then
-    log "providers: no GROK/TAVILY/FIRECRAWL keys in env — skip (export secrets then re-run)"
-  else
-    log "providers: seed-provider-keys.sh"
-    bash "$SEED_PROVIDERS" "$ADM"
-  fi
+  # seed-provider-keys.sh is the canonical detector for provider-specific env
+  # forms. Always delegate so new providers/aliases do not require a second
+  # detection matrix here; with no keys it performs an idempotent no-op/list.
+  log "providers: seed-provider-keys.sh"
+  bash "$SEED_PROVIDERS" "$ADM"
 else
   log "providers: skipped"
 fi
