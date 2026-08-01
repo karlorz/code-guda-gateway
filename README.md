@@ -466,6 +466,34 @@ go run ./cmd/guda-gateway-admin --db "$DB_PATH" --master-key "$GUDA_MASTER_KEY_P
 go run ./cmd/guda-gateway
 ```
 
+### Strict New API ownership for Grok
+
+The canonical seed gives Guda Gateway one Grok upstream: New API. New API owns
+model-to-channel mapping, backend health/failover, underlying Grok credentials,
+and provider quota. Guda Gateway owns the stable `/grok/v1/*` facade, inbound
+authentication, aggregate accounting, and redacted attempt observability.
+
+Build the admin binary once, source the untracked dev secrets, and seed the
+single New API endpoint:
+
+```bash
+go build -o guda-gateway-admin ./cmd/guda-gateway-admin
+set -a
+. ~/.secrets/guda-gateway.env
+set +a
+./scripts/seed-instance.sh ./guda-gateway-admin
+```
+
+Normal seeding consumes `GROK_1_API_KEY` and optionally `GROK_1_BASE_URL`
+(default `https://new.karldigi.dev/v1`). It does not consume `GROK_2_*` or
+Grok quota-sidecar variables. Seed reruns preserve any manually configured
+direct Grok rows; they do not enable, disable, archive, or delete them.
+
+Direct Grok/Grok2API rows remain available for diagnostics and migrations via
+the generic `provider-endpoint add` command. If needed, a v3 admin quota sidecar
+can still be configured explicitly with `--quota-flow grok2api_v3_admin` and a
+quota key file. Such rows are outside the canonical production topology.
+
 ### Master key rotation
 
 If the master key file is replaced or rotated, all provider keys encrypted
@@ -483,8 +511,7 @@ It creates canonical endpoint pairs with quota sidecars:
 
 | Name | Upstream | Quota |
 |---|---|---|
-| `grok-1` | `https://new.karldigi.dev/v1` (or `GROK_1_BASE_URL`) | `separate_credentials` → `https://grok.karldigi.dev` + legacy admin key (`grok2api_admin`) |
-| `grok-2` | `https://grok2api.karldigi.dev/v1` (or `GROK_2_BASE_URL`) | `separate_credentials` → origin + admin `username:password` (`grok2api_v3_admin`) |
+| `grok-1` | `https://new.karldigi.dev/v1` (or `GROK_1_BASE_URL`) | Disabled; New API owns backend quota/channel health |
 | `tavily-1..N` | official / `TAVILY_BASE_URL` | `endpoint_credentials` |
 | `firecrawl-1` | official / `FIRECRAWL_BASE_URL` | `endpoint_credentials` |
 
@@ -642,7 +669,7 @@ Inference failures never erase quota configuration or cache history.
 |---|---|---|
 | `disabled` | none | No quota refresh (Grok create default) |
 | `endpoint_credentials` | row inference `base_url` + key | Tavily/Firecrawl create default |
-| `separate_credentials` | `quota_base_url` + encrypted quota key | Grok via New API inference + owning Grok2API admin |
+| `separate_credentials` | `quota_base_url` + encrypted quota key | Manually managed direct endpoints with a distinct admin credential |
 
 | Flow | Provider | Notes |
 |---|---|---|
@@ -659,10 +686,10 @@ Creation defaults (migration `0009` backfill matches these):
 | Tavily | `endpoint_credentials` | `tavily_usage` |
 | Firecrawl | `endpoint_credentials` | `firecrawl_credit_usage` |
 
-Grok often routes **inference** through a New API URL/token while **quota** must
-hit the matching Grok2API admin URL and admin key for that deployment. Use
-`separate_credentials` so each Grok endpoint row keeps its own quota URL/key and
-two rows cannot cross-use credentials.
+The canonical New API Grok row keeps quota disabled because New API owns its
+underlying provider quotas and channel health. `separate_credentials` remains a
+compatibility option for manually managed direct Grok/Grok2API rows; each such
+row keeps its own quota URL/key so two direct rows cannot cross-use credentials.
 
 Tavily and Firecrawl normally reuse the same URL and key used for inference
 (`endpoint_credentials`).

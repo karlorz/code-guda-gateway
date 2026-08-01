@@ -93,6 +93,59 @@ func TestForwardMapsPathAndReplacesAuthorization(t *testing.T) {
 	}
 }
 
+func TestProxy_GrokChatPreservesRequestAndCompletedSSEFields(t *testing.T) {
+	const requestBody = `{"model":"grok-chat-fast","stream":true,"messages":[{"role":"user","content":"Find the official Go website"}]}`
+	const responseBody = "data: {\"id\":\"chatcmpl-canary\",\"model\":\"grok-chat-fast\",\"choices\":[{\"delta\":{\"content\":\"https://go.dev\",\"annotations\":[{\"type\":\"url_citation\",\"url\":\"https://go.dev\"}]}}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-canary\",\"model\":\"grok-chat-fast\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":5,\"total_tokens\":17}}\n\n" +
+		"data: [DONE]\n\n"
+
+	var gotBody, gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Upstream-Trace", "grok-v3-canary")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(responseBody))
+	}))
+	defer upstream.Close()
+
+	px, repo, _ := openProxyTarget(t, providers.ProviderGrok, upstream.URL, "g2a-upstream-key")
+	req := httptest.NewRequest(http.MethodPost, "/grok/v1/chat/completions", strings.NewReader(requestBody))
+	req.Header.Set("Authorization", "Bearer inbound-gateway-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	result := px.Forward(rec, req, proxy.Target{
+		Path:     "/chat/completions",
+		Provider: providers.ProviderGrok,
+		Keys:     repo,
+	})
+
+	if result.Err != nil {
+		t.Fatalf("Forward returned error: %v", result.Err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if gotAuth != "Bearer g2a-upstream-key" {
+		t.Fatalf("upstream auth = %q", gotAuth)
+	}
+	if gotBody != requestBody {
+		t.Fatalf("upstream body = %q, want exact request body", gotBody)
+	}
+	if rec.Body.String() != responseBody {
+		t.Fatalf("response body changed:\n got: %q\nwant: %q", rec.Body.String(), responseBody)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", got)
+	}
+	if got := rec.Header().Get("X-Upstream-Trace"); got != "grok-v3-canary" {
+		t.Fatalf("X-Upstream-Trace = %q, want grok-v3-canary", got)
+	}
+}
+
 func TestProxy_RetriesAcrossKeysOn429(t *testing.T) {
 	var attempts []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

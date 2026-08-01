@@ -871,7 +871,84 @@ func TestSeedProviderKeysScript_PassesURLAndKeepsSecretsOffArgv(t *testing.T) {
 	}
 }
 
-func TestSeedProviderKeysScript_ReconcilesGrokV3FlowAndPrefersFirecrawlCSV(t *testing.T) {
+func TestSeedInstance_StrictNewAPIOwnershipIgnoresDirectGrokEnv(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve module root: %v", err)
+	}
+	tempDir := t.TempDir()
+	adminPath := filepath.Join(tempDir, "guda-gateway-admin")
+	build := exec.Command("go", "build", "-o", adminPath, "./cmd/guda-gateway-admin")
+	build.Dir = root
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build admin: %v\n%s", err, out)
+	}
+
+	dbPath := filepath.Join(tempDir, "gateway.db")
+	masterPath := filepath.Join(tempDir, "master.key")
+	const (
+		newAPIBase = "https://new-api.example/v1"
+		newAPIKey  = "new-api-inference-secret"
+		directKey  = "g2a-direct-secret"
+	)
+	seed := exec.Command("bash", filepath.Join(root, "scripts", "seed-instance.sh"), adminPath)
+	seed.Dir = root
+	seed.Env = append(os.Environ(),
+		"DB_PATH="+dbPath,
+		"GUDA_MASTER_KEY_PATH="+masterPath,
+		"GUDA_SEED_SKIP_ADMIN=1",
+		"GUDA_SEED_SKIP_GATEWAY_KEY=1",
+		"GROK_1_BASE_URL="+newAPIBase,
+		"GROK_1_API_KEY="+newAPIKey,
+		"GROK_API_KEY=",
+		"GROK_1_QUOTA_MODE=separate_credentials",
+		"GROK_1_QUOTA_KEY=ignored-legacy-quota-secret",
+		"GROK_2_BASE_URL=https://grok2api.example/v1",
+		"GROK_2_API_KEY="+directKey,
+		"GROK_2_QUOTA_KEY=ignored-direct-quota-secret",
+		"TAVILY_API_KEYS=",
+		"TAVILY_1_API_KEY=",
+		"TAVILY_API_KEY=",
+		"FIRECRAWL_API_KEYS=",
+		"FIRECRAWL_1_API_KEY=",
+		"FIRECRAWL_API_KEY=",
+	)
+	out, err := seed.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seed-instance: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), newAPIKey) || strings.Contains(string(out), directKey) {
+		t.Fatalf("seed-instance output leaked inference key: %s", out)
+	}
+
+	db := openDB(t, dbPath)
+	var name, baseURL, quotaMode string
+	if err := db.QueryRow(`
+		SELECT name, base_url, quota_mode
+		FROM provider_keys
+		WHERE provider = 'grok'`,
+	).Scan(&name, &baseURL, &quotaMode); err != nil {
+		t.Fatalf("query canonical Grok endpoint: %v\nseed output:\n%s", err, out)
+	}
+	if name != "grok-1" {
+		t.Fatalf("name=%q want grok-1", name)
+	}
+	if baseURL != newAPIBase {
+		t.Fatalf("base_url=%q want %q", baseURL, newAPIBase)
+	}
+	if quotaMode != string(providers.QuotaDisabled) {
+		t.Fatalf("quota_mode=%q want disabled", quotaMode)
+	}
+	var grokCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM provider_keys WHERE provider = 'grok'`).Scan(&grokCount); err != nil {
+		t.Fatalf("count Grok endpoints: %v", err)
+	}
+	if grokCount != 1 {
+		t.Fatalf("Grok rows=%d want only canonical grok-1", grokCount)
+	}
+}
+
+func TestSeedProviderKeysScript_PreservesManualGrokRowAndPrefersFirecrawlCSV(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve module root: %v", err)
@@ -894,7 +971,6 @@ func TestSeedProviderKeysScript_ReconcilesGrokV3FlowAndPrefersFirecrawlCSV(t *te
 	const (
 		inferenceKey = "g2a-seed-inference-key"
 		legacyKey    = "legacy-admin-bearer-key"
-		v3Credential = "admin:new-v3-password"
 	)
 	legacyQuotaFile := filepath.Join(tempDir, "legacy-quota.key")
 	if err := os.WriteFile(legacyQuotaFile, []byte(legacyKey), 0o600); err != nil {
@@ -925,7 +1001,7 @@ func TestSeedProviderKeysScript_ReconcilesGrokV3FlowAndPrefersFirecrawlCSV(t *te
 		"GROK_2_API_KEY="+inferenceKey,
 		"GROK_2_QUOTA_BASE_URL=https://grok2api.example",
 		"GROK_2_QUOTA_FLOW=grok2api_v3_admin",
-		"GROK_2_QUOTA_KEY="+v3Credential,
+		"GROK_2_QUOTA_KEY=admin:ignored-v3-password",
 		"FIRECRAWL_API_KEYS=fc-csv-a,fc-csv-b,fc-csv-c",
 		"FIRECRAWL_1_API_KEY=fc-explicit-a",
 		"FIRECRAWL_2_API_KEY=fc-explicit-b",
@@ -939,8 +1015,8 @@ func TestSeedProviderKeysScript_ReconcilesGrokV3FlowAndPrefersFirecrawlCSV(t *te
 	if err := db.QueryRow(`SELECT quota_flow FROM provider_keys WHERE provider = 'grok' AND name = 'grok-2'`).Scan(&flow); err != nil {
 		t.Fatalf("query grok-2 flow: %v", err)
 	}
-	if flow != "grok2api_v3_admin" {
-		t.Fatalf("grok-2 flow=%q want grok2api_v3_admin", flow)
+	if flow != "grok2api_admin" {
+		t.Fatalf("manual grok-2 flow=%q want unchanged grok2api_admin", flow)
 	}
 	master, err := loadMaster(t, masterPath)
 	if err != nil {
@@ -955,17 +1031,14 @@ func TestSeedProviderKeysScript_ReconcilesGrokV3FlowAndPrefersFirecrawlCSV(t *te
 	for _, row := range rows {
 		if row.Name == "grok-2" {
 			grok2ID = row.ID
-			if row.QuotaKeyPrefix != nil || row.QuotaKeyFingerprint != nil {
-				t.Fatalf("v3 seed exposed password metadata: %+v", row)
-			}
 		}
 	}
 	resolved, err := repo.ResolveEndpointQuota(grok2ID)
 	if err != nil {
 		t.Fatalf("resolve repaired grok-2: %v", err)
 	}
-	if resolved.APIKey != v3Credential {
-		t.Fatal("seed did not rotate the v3 credential after flow repair")
+	if resolved.APIKey != legacyKey {
+		t.Fatal("canonical seed mutated the manual Grok quota credential")
 	}
 
 	var firecrawlCount int

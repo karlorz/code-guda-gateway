@@ -14,6 +14,11 @@ runs on kr01, a laptop, or a container.
 
 Script: `scripts/seed-instance.sh` (in image as `seed-instance`).
 
+Grok uses strict New API ownership: `GROK_1_API_KEY` seeds the sole canonical
+Grok endpoint at `GROK_1_BASE_URL` (default `https://new.karldigi.dev/v1`).
+New API owns its backend channels, credentials, health/failover, and quota.
+Direct Grok/Grok2API rows are manual diagnostic configuration, not seed input.
+
 ## A) VM / kr01 (canonical)
 
 ```bash
@@ -56,7 +61,6 @@ then either:
 docker exec \
   -e GUDA_SEED_PROFILE=coolify \
   -e GROK_1_API_KEY=... \
-  -e GROK_1_QUOTA_KEY=... \
   -e TAVILY_API_KEYS=... \
   -e FIRECRAWL_1_API_KEY=... \
   code-guda-gateway-<uuid> seed-instance
