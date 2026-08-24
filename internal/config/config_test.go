@@ -186,4 +186,3 @@ func TestLoad_InternalToken(t *testing.T) {
 		t.Fatalf("InternalToken set = %q, want secret-token-123", cfg.InternalToken)
 	}
 }
-

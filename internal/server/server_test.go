@@ -237,7 +237,7 @@ func TestInternalKeysVerify(t *testing.T) {
 
 	t.Run("Malformed JSON / missing token field -> 400", func(t *testing.T) {
 		app, _, _, _, _ := openTestApp(t, config.Config{InternalToken: secretToken})
-		
+
 		// Bad JSON
 		req1 := httptest.NewRequest(http.MethodPost, "/internal/keys/verify", strings.NewReader(`{invalid-json`))
 		req1.Header.Set("Content-Type", "application/json")
@@ -259,7 +259,6 @@ func TestInternalKeysVerify(t *testing.T) {
 		}
 	})
 }
-
 
 func TestHealthDoesNotRequireAuth(t *testing.T) {
 	app, _, _, _, _ := openTestApp(t, config.Config{})
