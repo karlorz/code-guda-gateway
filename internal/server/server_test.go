@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -37,6 +38,226 @@ func openTestApp(t *testing.T, cfg config.Config) (http.Handler, *gatewaykeys.Se
 	}
 	keyRepo := providers.NewKeyRepo(st.DB(), mk)
 	return New(cfg, gk, st.DB(), mk), gk, keyRepo, st, raw
+}
+
+func TestInternalKeysVerify(t *testing.T) {
+	const secretToken = "internal-secret-xyz"
+
+	t.Run("POST verify without X-Internal-Token -> 403", func(t *testing.T) {
+		app, _, _, _, raw := openTestApp(t, config.Config{InternalToken: secretToken})
+		body := `{"token":"` + raw + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/keys/verify", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+
+		app.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), raw) {
+			t.Fatal("response body leaked raw gateway key")
+		}
+	})
+
+	t.Run("POST verify with wrong X-Internal-Token -> 403", func(t *testing.T) {
+		app, _, _, _, raw := openTestApp(t, config.Config{InternalToken: secretToken})
+		body := `{"token":"` + raw + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/keys/verify", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Internal-Token", "wrong-secret")
+		rec := httptest.NewRecorder()
+
+		app.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), raw) {
+			t.Fatal("response body leaked raw gateway key")
+		}
+	})
+
+	t.Run("POST verify with correct internal token + unknown gsk_ token -> 401", func(t *testing.T) {
+		app, _, _, _, _ := openTestApp(t, config.Config{InternalToken: secretToken})
+		unknownKey := "gsk_01234567890123456789012345678901"
+		body := `{"token":"` + unknownKey + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/keys/verify", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Internal-Token", secretToken)
+		rec := httptest.NewRecorder()
+
+		app.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), unknownKey) {
+			t.Fatal("response body leaked raw token")
+		}
+	})
+
+	t.Run("POST verify with correct internal token + disabled/revoked key -> 401", func(t *testing.T) {
+		app, gk, _, _, raw := openTestApp(t, config.Config{InternalToken: secretToken})
+		list, err := gk.List()
+		if err != nil || len(list) == 0 {
+			t.Fatalf("list gateway keys: %v", err)
+		}
+		if err := gk.Disable(list[0].ID); err != nil {
+			t.Fatalf("disable gateway key: %v", err)
+		}
+
+		body := `{"token":"` + raw + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/keys/verify", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Internal-Token", secretToken)
+		rec := httptest.NewRecorder()
+
+		app.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+	})
+
+	t.Run("POST verify with correct internal token + enabled key -> 200", func(t *testing.T) {
+		app, gk, _, _, raw := openTestApp(t, config.Config{InternalToken: secretToken})
+		// Create a key with a name and another without a name to test client_id fallback
+		rawUnnamed, dispUnnamed, err := gk.Create("")
+		if err != nil {
+			t.Fatalf("create unnamed key: %v", err)
+		}
+
+		// 1. Test named key
+		body := `{"token":"` + raw + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/keys/verify", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Internal-Token", secretToken)
+		rec := httptest.NewRecorder()
+
+		app.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal json: %v", err)
+		}
+
+		if resp["name"] != "test-gateway-key" {
+			t.Fatalf("name = %v, want test-gateway-key", resp["name"])
+		}
+		if resp["client_id"] != "test-gateway-key" {
+			t.Fatalf("client_id = %v, want test-gateway-key", resp["client_id"])
+		}
+		if resp["prefix"] == nil || resp["prefix"] == "" {
+			t.Fatalf("prefix missing or empty: %v", resp["prefix"])
+		}
+		if resp["fingerprint"] == nil || resp["fingerprint"] == "" {
+			t.Fatalf("fingerprint missing or empty: %v", resp["fingerprint"])
+		}
+		scopes, ok := resp["scopes"].([]interface{})
+		if !ok || len(scopes) != 1 || scopes[0] != "mcp" {
+			t.Fatalf("scopes = %v, want [\"mcp\"]", resp["scopes"])
+		}
+		if _, exists := resp["key_hash"]; exists {
+			t.Fatal("response must never include key_hash")
+		}
+		if _, exists := resp["key"]; exists || strings.Contains(rec.Body.String(), raw) {
+			t.Fatal("response must never include raw key")
+		}
+
+		// 2. Test unnamed key client_id fallback to prefix
+		bodyUnnamed := `{"token":"` + rawUnnamed + `"}`
+		req2 := httptest.NewRequest(http.MethodPost, "/internal/keys/verify", strings.NewReader(bodyUnnamed))
+		req2.Header.Set("Content-Type", "application/json")
+		req2.Header.Set("X-Internal-Token", secretToken)
+		rec2 := httptest.NewRecorder()
+
+		app.ServeHTTP(rec2, req2)
+		if rec2.Code != http.StatusOK {
+			t.Fatalf("unnamed key status = %d, want 200", rec2.Code)
+		}
+		var resp2 map[string]interface{}
+		if err := json.Unmarshal(rec2.Body.Bytes(), &resp2); err != nil {
+			t.Fatalf("unmarshal json: %v", err)
+		}
+		if resp2["client_id"] != dispUnnamed.Prefix {
+			t.Fatalf("unnamed client_id = %v, want %v", resp2["client_id"], dispUnnamed.Prefix)
+		}
+	})
+
+	t.Run("GET /internal/keys/verify -> 405", func(t *testing.T) {
+		app, _, _, _, _ := openTestApp(t, config.Config{InternalToken: secretToken})
+		req := httptest.NewRequest(http.MethodGet, "/internal/keys/verify", nil)
+		req.Header.Set("X-Internal-Token", secretToken)
+		rec := httptest.NewRecorder()
+
+		app.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", rec.Code)
+		}
+	})
+
+	t.Run("GET /internal/keys/verify without internal token -> 405 or 403", func(t *testing.T) {
+		app, _, _, _, _ := openTestApp(t, config.Config{InternalToken: secretToken})
+		req := httptest.NewRequest(http.MethodGet, "/internal/keys/verify", nil)
+		rec := httptest.NewRecorder()
+
+		app.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusMethodNotAllowed && rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 405 or 403 (not 401, not 200)", rec.Code)
+		}
+	})
+
+	t.Run("Empty GUDA_INTERNAL_TOKEN in config + any POST verify -> 403; healthz 200", func(t *testing.T) {
+		app, _, _, _, raw := openTestApp(t, config.Config{InternalToken: ""})
+		body := `{"token":"` + raw + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/keys/verify", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Internal-Token", "some-token")
+		rec := httptest.NewRecorder()
+
+		app.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", rec.Code)
+		}
+
+		hreq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		hrec := httptest.NewRecorder()
+		app.ServeHTTP(hrec, hreq)
+		if hrec.Code != http.StatusOK {
+			t.Fatalf("healthz status = %d, want 200", hrec.Code)
+		}
+	})
+
+	t.Run("Malformed JSON / missing token field -> 400", func(t *testing.T) {
+		app, _, _, _, _ := openTestApp(t, config.Config{InternalToken: secretToken})
+
+		// Bad JSON
+		req1 := httptest.NewRequest(http.MethodPost, "/internal/keys/verify", strings.NewReader(`{invalid-json`))
+		req1.Header.Set("Content-Type", "application/json")
+		req1.Header.Set("X-Internal-Token", secretToken)
+		rec1 := httptest.NewRecorder()
+		app.ServeHTTP(rec1, req1)
+		if rec1.Code != http.StatusBadRequest {
+			t.Fatalf("bad json status = %d, want 400", rec1.Code)
+		}
+
+		// Missing token field
+		req2 := httptest.NewRequest(http.MethodPost, "/internal/keys/verify", strings.NewReader(`{"other":"field"}`))
+		req2.Header.Set("Content-Type", "application/json")
+		req2.Header.Set("X-Internal-Token", secretToken)
+		rec2 := httptest.NewRecorder()
+		app.ServeHTTP(rec2, req2)
+		if rec2.Code != http.StatusBadRequest {
+			t.Fatalf("missing token status = %d, want 400", rec2.Code)
+		}
+	})
 }
 
 func TestHealthDoesNotRequireAuth(t *testing.T) {

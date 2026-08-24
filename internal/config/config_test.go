@@ -26,6 +26,9 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.ProxyDebugAttempts != nil {
 		t.Fatal("ProxyDebugAttempts default = non-nil, want nil")
 	}
+	if cfg.InternalToken != "" {
+		t.Fatalf("InternalToken default = %q, want empty", cfg.InternalToken)
+	}
 }
 
 func TestLoad_NoGatewayKeysRequired(t *testing.T) {
@@ -152,5 +155,34 @@ func TestLoad_ProxyDebugAttempts(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("LoadFromLookup invalid: expected error")
+	}
+}
+
+func TestLoad_InternalToken(t *testing.T) {
+	t.Parallel()
+
+	// unset -> empty
+	cfg, err := LoadFromLookup(func(string) (string, bool) {
+		return "", false
+	})
+	if err != nil {
+		t.Fatalf("LoadFromLookup unset: %v", err)
+	}
+	if cfg.InternalToken != "" {
+		t.Fatalf("InternalToken unset = %q, want empty", cfg.InternalToken)
+	}
+
+	// set with trimming
+	cfg, err = LoadFromLookup(func(key string) (string, bool) {
+		if key == "GUDA_INTERNAL_TOKEN" {
+			return "  secret-token-123  ", true
+		}
+		return "", false
+	})
+	if err != nil {
+		t.Fatalf("LoadFromLookup set: %v", err)
+	}
+	if cfg.InternalToken != "secret-token-123" {
+		t.Fatalf("InternalToken set = %q, want secret-token-123", cfg.InternalToken)
 	}
 }

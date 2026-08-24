@@ -21,6 +21,7 @@ type Config struct {
 	MasterKeyPath      string
 	AdminCookieSecure  bool
 	ProxyDebugAttempts *bool
+	InternalToken      string
 }
 
 func Load() (Config, error) {
@@ -50,6 +51,7 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 		MasterKeyPath:      lookupDefault(lookup, "GUDA_MASTER_KEY_PATH", defaultMasterKeyPath),
 		AdminCookieSecure:  adminCookieSecure,
 		ProxyDebugAttempts: proxyDebugAttempts,
+		InternalToken:      lookupDefault(lookup, "GUDA_INTERNAL_TOKEN", ""),
 	}
 	return cfg, nil
 }
