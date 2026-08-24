@@ -23,6 +23,10 @@ Public routes (require `Authorization: Bearer <gateway-key>`):
 - `POST /firecrawl/scrape`
 - `GET /healthz` (no auth)
 
+Internal loopback route:
+
+- `POST /internal/keys/verify` (**not** a public client route; requires header `X-Internal-Token: <secret>`; loopback callers validate MCP bearer keys against gateway SQLite store; public edge/Caddy must 404 `/internal*`)
+
 Admin UI:
 
 | Environment | URL | Notes |
@@ -54,6 +58,7 @@ Variables:
 | `DB_PATH` | `/var/lib/code-guda-gateway/gateway.db` | SQLite database path. |
 | `GUDA_MASTER_KEY_PATH` | `/etc/code-guda-gateway/master.key` | File used to load or create the encryption master key. |
 | `GUDA_ADMIN_COOKIE_SECURE` | `true` | Set to `false` for local plain-HTTP browser testing. |
+| `GUDA_INTERNAL_TOKEN` | unset | Optional shared secret for `POST /internal/keys/verify` loopback authentication. |
 | `GUDA_PROXY_DEBUG_ATTEMPTS` | unset | Optional local/dev bootstrap for the admin `proxy_debug_attempts` setting. Leave unset in production unless explicitly debugging retry behavior. |
 
 See `scripts/templates/bootstrap.env.example` for a secret-free template.

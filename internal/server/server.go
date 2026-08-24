@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -20,11 +21,12 @@ import (
 )
 
 type Server struct {
-	proxy        *proxy.Proxy
-	gatewayKeys  *gatewaykeys.Service
-	providerKeys *providers.KeyRepo
-	usage        *usage.UsageRepo
-	admin        http.Handler
+	proxy         *proxy.Proxy
+	gatewayKeys   *gatewaykeys.Service
+	providerKeys  *providers.KeyRepo
+	usage         *usage.UsageRepo
+	admin         http.Handler
+	internalToken string
 }
 
 // New builds the HTTP handler. Runtime routes require a valid DB-backed gateway key via gatewayKeys.
@@ -66,11 +68,12 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 		},
 	})
 	return &Server{
-		proxy:        px,
-		gatewayKeys:  gatewayKeys,
-		providerKeys: keyRepo,
-		usage:        usage.NewUsageRepo(db),
-		admin:        adminH,
+		proxy:         px,
+		gatewayKeys:   gatewayKeys,
+		providerKeys:  keyRepo,
+		usage:         usage.NewUsageRepo(db),
+		admin:         adminH,
+		internalToken: cfg.InternalToken,
 	}
 }
 
@@ -81,6 +84,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/healthz" {
 		s.handleHealth(w, r)
+		return
+	}
+	if r.URL.Path == "/internal/keys/verify" {
+		s.handleInternalKeysVerify(w, r)
 		return
 	}
 
@@ -113,6 +120,78 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+type internalVerifyRequest struct {
+	Token string `json:"token"`
+}
+
+type internalVerifyResponse struct {
+	Name        string   `json:"name"`
+	Prefix      string   `json:"prefix"`
+	Fingerprint string   `json:"fingerprint"`
+	ClientID    string   `json:"client_id"`
+	Scopes      []string `json:"scopes"`
+}
+
+func (s *Server) handleInternalKeysVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.internalToken == "" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	providedToken := r.Header.Get("X-Internal-Token")
+	if subtle.ConstantTimeCompare([]byte(providedToken), []byte(s.internalToken)) != 1 {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	var req internalVerifyRequest
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&req); err != nil || strings.TrimSpace(req.Token) == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	if s.gatewayKeys == nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	key, err := s.gatewayKeys.Verify(req.Token)
+	if err != nil {
+		if errors.Is(err, gatewaykeys.ErrNotAuthorized) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if key == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	clientID := key.Name
+	if strings.TrimSpace(clientID) == "" {
+		clientID = key.Prefix
+	}
+
+	resp := internalVerifyResponse{
+		Name:        key.Name,
+		Prefix:      key.Prefix,
+		Fingerprint: key.Fingerprint,
+		ClientID:    clientID,
+		Scopes:      []string{"mcp"},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // isRuntimeRoute reports whether path+method is a known proxy facade route.

@@ -59,6 +59,11 @@ assert_contains "$BOOTSTRAP" "GUDA_MASTER_KEY_PATH=/etc/code-guda-gateway/master
 assert_contains "$BOOTSTRAP" "GUDA_ADMIN_COOKIE_SECURE=true"
 
 assert_contains "$CADDY" "search.karldigi.dev {"
+assert_contains "$CADDY" "handle /internal*"
+assert_contains "$CADDY" "respond 404"
+assert_contains "$CADDY" "handle /mcp*"
+assert_contains "$CADDY" "reverse_proxy 127.0.0.1:8800"
+assert_contains "$CADDY" "flush_interval -1"
 assert_contains "$CADDY" "reverse_proxy 127.0.0.1:8080"
 
 assert_contains "$UPDATE" "ARTIFACT_BASE="
