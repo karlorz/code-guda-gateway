@@ -22,6 +22,8 @@ type Config struct {
 	AdminCookieSecure  bool
 	ProxyDebugAttempts *bool
 	InternalToken      string
+	OAuthPasswordHash  string
+	OAuthIssuer        string
 }
 
 func Load() (Config, error) {
@@ -52,6 +54,8 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 		AdminCookieSecure:  adminCookieSecure,
 		ProxyDebugAttempts: proxyDebugAttempts,
 		InternalToken:      lookupDefault(lookup, "GUDA_INTERNAL_TOKEN", ""),
+		OAuthPasswordHash:  lookupDefault(lookup, "GUDA_OAUTH_OPERATOR_PASSWORD_HASH", ""),
+		OAuthIssuer:        lookupDefault(lookup, "GUDA_OAUTH_ISSUER", ""),
 	}
 	return cfg, nil
 }

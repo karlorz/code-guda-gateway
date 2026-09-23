@@ -183,6 +183,45 @@ func TestLoad_InternalToken(t *testing.T) {
 		t.Fatalf("LoadFromLookup set: %v", err)
 	}
 	if cfg.InternalToken != "secret-token-123" {
-		t.Fatalf("InternalToken set = %q, want secret-token-123", cfg.InternalToken)
+		t.Fatalf("InternalToken set = %q, want %q", cfg.InternalToken, "secret-token-123")
+	}
+}
+
+func TestLoad_OAuthSettings(t *testing.T) {
+	t.Parallel()
+
+	// unset -> empty
+	cfg, err := LoadFromLookup(func(string) (string, bool) {
+		return "", false
+	})
+	if err != nil {
+		t.Fatalf("LoadFromLookup unset: %v", err)
+	}
+	if cfg.OAuthPasswordHash != "" {
+		t.Fatalf("OAuthPasswordHash unset = %q, want empty", cfg.OAuthPasswordHash)
+	}
+	if cfg.OAuthIssuer != "" {
+		t.Fatalf("OAuthIssuer unset = %q, want empty", cfg.OAuthIssuer)
+	}
+
+	// set with trimming
+	cfg, err = LoadFromLookup(func(key string) (string, bool) {
+		switch key {
+		case "GUDA_OAUTH_OPERATOR_PASSWORD_HASH":
+			return "  scrypt$16384$8$1$abc$urlsafe$xyz  ", true
+		case "GUDA_OAUTH_ISSUER":
+			return "  http://127.0.0.1:8080  ", true
+		default:
+			return "", false
+		}
+	})
+	if err != nil {
+		t.Fatalf("LoadFromLookup: %v", err)
+	}
+	if cfg.OAuthPasswordHash != "scrypt$16384$8$1$abc$urlsafe$xyz" {
+		t.Fatalf("OAuthPasswordHash = %q", cfg.OAuthPasswordHash)
+	}
+	if cfg.OAuthIssuer != "http://127.0.0.1:8080" {
+		t.Fatalf("OAuthIssuer = %q", cfg.OAuthIssuer)
 	}
 }
