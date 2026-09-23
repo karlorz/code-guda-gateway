@@ -28,7 +28,7 @@ func (s *Store) Close() error {
 // Open opens dbPath, applies pragmas, and runs pending migrations.
 // The parent directory must already exist.
 func Open(dbPath string) (*Store, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("sql open: %w", err)
 	}
@@ -44,6 +44,11 @@ func Open(dbPath string) (*Store, error) {
 	}
 
 	return &Store{db: db}, nil
+}
+
+func sqliteDSN(dbPath string) string {
+	// file: DSN so every pooled connection inherits the busy timeout.
+	return "file:" + dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 }
 
 func setPragmas(db *sql.DB) error {
