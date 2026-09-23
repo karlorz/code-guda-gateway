@@ -37,6 +37,8 @@ func Open(dbPath string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// One connection so a refresh transaction is not failed by a pooled SQLITE_BUSY.
+	db.SetMaxOpenConns(1)
 
 	if err := migrate(db); err != nil {
 		_ = db.Close()
