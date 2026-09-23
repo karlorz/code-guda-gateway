@@ -84,6 +84,15 @@ func TestOpen_Migration0008BackfillsProviderEndpointURLs(t *testing.T) {
 	}
 	_, err = db.Exec(`
 		CREATE TABLE schema_migrations (id TEXT NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL);
+		CREATE TABLE gateway_keys (
+			id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			key_prefix TEXT NOT NULL,
+			fingerprint TEXT NOT NULL,
+			key_hash TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			created_at TEXT NOT NULL
+		);
 		CREATE TABLE provider_settings (provider TEXT NOT NULL PRIMARY KEY, base_url TEXT NOT NULL, updated_at TEXT NOT NULL);
 		CREATE TABLE provider_keys (
 			id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -169,6 +178,15 @@ func TestOpen_Migration0009BackfillsEndpointQuotaDefaults(t *testing.T) {
 	// migration 0009 cannot accidentally rewrite selection/cooldown state.
 	_, err = db.Exec(`
 		CREATE TABLE schema_migrations (id TEXT NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL);
+		CREATE TABLE gateway_keys (
+			id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			key_prefix TEXT NOT NULL,
+			fingerprint TEXT NOT NULL,
+			key_hash TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			created_at TEXT NOT NULL
+		);
 		CREATE TABLE provider_keys (
 			id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
 			provider TEXT NOT NULL,

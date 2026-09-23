@@ -51,18 +51,42 @@ type DisplayKey struct {
 	CreatedAt   string
 	LastUsedAt  *string
 	RevokedAt   *string
+	OAuthOwned  bool
 }
 
 // Create generates a new enabled key. raw is returned once; only hash is stored.
 func (s *Service) Create(name string) (raw string, display DisplayKey, err error) {
+	return CreateTx(s.db, name)
+}
+
+type queryExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// CreateOAuthTx generates an enabled key marked oauth_owned so a later
+// re-enable cannot turn a connector key into a manual proxy key.
+func CreateOAuthTx(execer queryExecer, name string) (raw string, display DisplayKey, err error) {
+	return insertKey(execer, name, true)
+}
+
+// CreateTx generates a new enabled manual key using the provided tx or db execer.
+func CreateTx(execer queryExecer, name string) (raw string, display DisplayKey, err error) {
+	return insertKey(execer, name, false)
+}
+
+func insertKey(execer queryExecer, name string, oauthOwned bool) (raw string, display DisplayKey, err error) {
 	raw, hash, prefix, fp, err := generateKeyMaterial()
 	if err != nil {
 		return "", DisplayKey{}, err
 	}
+	owned := 0
+	if oauthOwned {
+		owned = 1
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := s.db.Exec(
-		`INSERT INTO gateway_keys (name, key_prefix, fingerprint, key_hash, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)`,
-		name, prefix, fp, hash, now,
+	res, err := execer.Exec(
+		`INSERT INTO gateway_keys (name, key_prefix, fingerprint, key_hash, enabled, created_at, oauth_owned) VALUES (?, ?, ?, ?, 1, ?, ?)`,
+		name, prefix, fp, hash, now, owned,
 	)
 	if err != nil {
 		return "", DisplayKey{}, fmt.Errorf("insert gateway_keys: %w", err)
@@ -75,6 +99,7 @@ func (s *Service) Create(name string) (raw string, display DisplayKey, err error
 		Fingerprint: fp,
 		Enabled:     true,
 		CreatedAt:   now,
+		OAuthOwned:  oauthOwned,
 	}, nil
 }
 
@@ -107,20 +132,20 @@ func (s *Service) List() ([]DisplayKey, error) {
 	return out, rows.Err()
 }
 
-// Verify checks a raw bearer key. On success updates last_used_at and returns the key record.
+// Lookup checks a raw bearer key without updating last_used_at.
 // Returns (nil, nil) for unknown keys; (nil, ErrNotAuthorized) for disabled or revoked.
-func (s *Service) Verify(raw string) (*DisplayKey, error) {
+func (s *Service) Lookup(raw string) (*DisplayKey, error) {
 	if raw == "" || !rawKeyRe.MatchString(raw) {
 		return nil, nil
 	}
 	hash := hashKey(raw)
 	var d DisplayKey
-	var enabled int
+	var enabled, oauthOwned int
 	var lastUsed, revoked sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, name, key_prefix, fingerprint, enabled, created_at, last_used_at, revoked_at
+		SELECT id, name, key_prefix, fingerprint, enabled, created_at, last_used_at, revoked_at, oauth_owned
 		FROM gateway_keys WHERE key_hash = ?`, hash,
-	).Scan(&d.ID, &d.Name, &d.Prefix, &d.Fingerprint, &enabled, &d.CreatedAt, &lastUsed, &revoked)
+	).Scan(&d.ID, &d.Name, &d.Prefix, &d.Fingerprint, &enabled, &d.CreatedAt, &lastUsed, &revoked, &oauthOwned)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -128,6 +153,7 @@ func (s *Service) Verify(raw string) (*DisplayKey, error) {
 		return nil, fmt.Errorf("select gateway_keys: %w", err)
 	}
 	d.Enabled = enabled != 0
+	d.OAuthOwned = oauthOwned != 0
 	if lastUsed.Valid {
 		d.LastUsedAt = &lastUsed.String
 	}
@@ -137,17 +163,46 @@ func (s *Service) Verify(raw string) (*DisplayKey, error) {
 	if !d.Enabled || d.RevokedAt != nil {
 		return nil, ErrNotAuthorized
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := s.db.Exec(`UPDATE gateway_keys SET last_used_at = ? WHERE id = ?`, now, d.ID); err != nil {
-		return nil, fmt.Errorf("update last_used_at: %w", err)
-	}
-	d.LastUsedAt = &now
 	return &d, nil
+}
+
+// Touch records last_used_at after the caller accepts the key.
+func (s *Service) Touch(id int64) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.db.Exec(`UPDATE gateway_keys SET last_used_at = ? WHERE id = ?`, now, id); err != nil {
+		return fmt.Errorf("update last_used_at: %w", err)
+	}
+	return nil
+}
+
+// Verify checks a raw bearer key. On success updates last_used_at and returns the key record.
+// Returns (nil, nil) for unknown keys; (nil, ErrNotAuthorized) for disabled or revoked.
+func (s *Service) Verify(raw string) (*DisplayKey, error) {
+	d, err := s.Lookup(raw)
+	if d == nil || err != nil {
+		return d, err
+	}
+	if err := s.Touch(d.ID); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	d.LastUsedAt = &now
+	return d, nil
+}
+
+// HashRaw is the SHA-256 hex digest used for stored bearer secrets.
+func HashRaw(raw string) string {
+	return hashKey(raw)
 }
 
 // Disable sets enabled=false.
 func (s *Service) Disable(id int64) error {
-	_, err := s.db.Exec(`UPDATE gateway_keys SET enabled = 0 WHERE id = ?`, id)
+	return DisableTx(s.db, id)
+}
+
+// DisableTx sets enabled=0 using the provided tx or db execer.
+func DisableTx(execer queryExecer, id int64) error {
+	_, err := execer.Exec(`UPDATE gateway_keys SET enabled = 0 WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("disable gateway_keys: %w", err)
 	}

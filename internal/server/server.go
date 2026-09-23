@@ -15,6 +15,7 @@ import (
 	"code-guda-gateway/internal/audit"
 	"code-guda-gateway/internal/config"
 	"code-guda-gateway/internal/gatewaykeys"
+	"code-guda-gateway/internal/mcpoauth"
 	"code-guda-gateway/internal/providers"
 	"code-guda-gateway/internal/proxy"
 	"code-guda-gateway/internal/usage"
@@ -27,6 +28,8 @@ type Server struct {
 	usage         *usage.UsageRepo
 	admin         http.Handler
 	internalToken string
+	db            *sql.DB
+	oauthServer   *mcpoauth.Server
 }
 
 // New builds the HTTP handler. Runtime routes require a valid DB-backed gateway key via gatewayKeys.
@@ -67,6 +70,10 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 			MasterKey:    masterKey,
 		},
 	})
+	var oauthServer *mcpoauth.Server
+	if cfg.OAuthIssuer != "" && cfg.OAuthPasswordHash != "" {
+		oauthServer = mcpoauth.NewServer(cfg.OAuthIssuer, cfg.OAuthPasswordHash, db)
+	}
 	return &Server{
 		proxy:         px,
 		gatewayKeys:   gatewayKeys,
@@ -74,6 +81,8 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 		usage:         usage.NewUsageRepo(db),
 		admin:         adminH,
 		internalToken: cfg.InternalToken,
+		db:            db,
+		oauthServer:   oauthServer,
 	}
 }
 
@@ -88,6 +97,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/internal/keys/verify" {
 		s.handleInternalKeysVerify(w, r)
+		return
+	}
+
+	if s.oauthServer != nil && s.oauthServer.IsOAuthRoute(r) {
+		s.oauthServer.ServeHTTP(w, r)
 		return
 	}
 
@@ -163,7 +177,7 @@ func (s *Server) handleInternalKeysVerify(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	key, err := s.gatewayKeys.Verify(req.Token)
+	key, err := s.gatewayKeys.Lookup(req.Token)
 	if err != nil {
 		if errors.Is(err, gatewaykeys.ErrNotAuthorized) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -174,6 +188,22 @@ func (s *Server) handleInternalKeysVerify(w http.ResponseWriter, r *http.Request
 	}
 	if key == nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if key.OAuthOwned {
+		decision, err := mcpoauth.CheckOAuthGrant(s.db, key.ID)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if decision != mcpoauth.AuthDecisionOAuthValid {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+	if err := s.gatewayKeys.Touch(key.ID); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
@@ -229,11 +259,20 @@ func (s *Server) authorized(r *http.Request) (*gatewaykeys.DisplayKey, error) {
 		return nil, nil
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
-	rec, err := s.gatewayKeys.Verify(token)
+	rec, err := s.gatewayKeys.Lookup(token)
 	if err != nil {
 		if errors.Is(err, gatewaykeys.ErrNotAuthorized) {
 			return nil, nil
 		}
+		return nil, err
+	}
+	if rec == nil {
+		return nil, nil
+	}
+	if rec.OAuthOwned {
+		return nil, nil
+	}
+	if err := s.gatewayKeys.Touch(rec.ID); err != nil {
 		return nil, err
 	}
 	return rec, nil

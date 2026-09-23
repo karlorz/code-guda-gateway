@@ -48,6 +48,10 @@ var migrations = []migration{
 		id:  "0009",
 		sql: migration0009,
 	},
+	{
+		id:  "0010",
+		sql: migration0010,
+	},
 }
 
 const migration0002 = `
@@ -183,6 +187,36 @@ UPDATE provider_keys SET
     WHEN 'firecrawl' THEN 'firecrawl_credit_usage'
     ELSE ''
   END;
+`
+
+const migration0010 = `
+CREATE TABLE IF NOT EXISTS oauth_clients (
+  client_id TEXT PRIMARY KEY,
+  client_name TEXT,
+  redirect_uris TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_codes (
+  code_hash TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL,
+  redirect_uri TEXT NOT NULL,
+  code_challenge TEXT NOT NULL,
+  code_challenge_method TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_grants (
+  refresh_hash TEXT PRIMARY KEY,
+  gateway_key_id INTEGER NOT NULL UNIQUE,
+  client_id TEXT NOT NULL,
+  access_expires_at TEXT NOT NULL,
+  refresh_expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+ALTER TABLE gateway_keys ADD COLUMN oauth_owned INTEGER NOT NULL DEFAULT 0;
 `
 
 const migration0001 = `
