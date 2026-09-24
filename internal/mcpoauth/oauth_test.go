@@ -288,6 +288,9 @@ func TestConsentPageRendering(t *testing.T) {
 		srv.ServeHTTP(rec, req)
 
 		body := rec.Body.String()
+		if !strings.Contains(body, "This operator password is set at /admin after admin sign-in and is not the admin token.") {
+			t.Fatalf("expected consent form guidance sentence, got: %s", body)
+		}
 		if !strings.Contains(body, "this client") {
 			t.Fatalf("expected 'this client' for empty name, got: %s", body)
 		}
@@ -311,7 +314,7 @@ func TestAuthorizePostWrongPasswordAndSuccess(t *testing.T) {
 	pwd := "correct-operator-password"
 	hash, _ := mcpoauth.HashPassword(pwd)
 
-	srv, _, _ := setupTestServer(t, config.Config{
+	srv, db, _ := setupTestServer(t, config.Config{
 		OAuthIssuer:       issuer,
 		OAuthPasswordHash: hash,
 	})
@@ -349,7 +352,7 @@ func TestAuthorizePostWrongPasswordAndSuccess(t *testing.T) {
 		}
 	}
 
-	// POST /authorize correct password -> 302 with code and state
+	// POST /authorize with no settings row -> env password works
 	{
 		form := url.Values{
 			"client_id":             {clientID},
@@ -365,7 +368,7 @@ func TestAuthorizePostWrongPasswordAndSuccess(t *testing.T) {
 		srv.ServeHTTP(rec, req)
 
 		if rec.Code != http.StatusFound {
-			t.Fatalf("correct password status = %d, want 302", rec.Code)
+			t.Fatalf("correct env password status = %d, want 302", rec.Code)
 		}
 		loc := rec.Header().Get("Location")
 		u, err := url.Parse(loc)
@@ -380,6 +383,78 @@ func TestAuthorizePostWrongPasswordAndSuccess(t *testing.T) {
 		}
 		if u.Query().Get("code") == "" {
 			t.Fatal("missing code in redirect URL")
+		}
+	}
+
+	// Dynamic override in settings:
+	// After saving a new password hash to settings row, POST /authorize accepts new password and rejects previous env password
+	newPwd := "new-dynamic-operator-password"
+	newHash, err := mcpoauth.HashPassword(newPwd)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT INTO settings (key, value, updated_at) VALUES ('oauth_operator_password_hash', ?, ?)`, newHash, now); err != nil {
+		t.Fatalf("insert settings row: %v", err)
+	}
+
+	// Old env password is now rejected
+	{
+		form := url.Values{
+			"client_id":             {clientID},
+			"redirect_uri":          {"https://example.com/callback"},
+			"state":                 {"random-state-2"},
+			"code_challenge":        {challenge},
+			"code_challenge_method": {"S256"},
+			"password":              {pwd},
+		}
+		req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("old env password after rotate status = %d, want 401", rec.Code)
+		}
+	}
+
+	// New password is accepted without restart
+	{
+		form := url.Values{
+			"client_id":             {clientID},
+			"redirect_uri":          {"https://example.com/callback"},
+			"state":                 {"random-state-2"},
+			"code_challenge":        {challenge},
+			"code_challenge_method": {"S256"},
+			"password":              {newPwd},
+		}
+		req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusFound {
+			t.Fatalf("new password status = %d, want 302", rec.Code)
+		}
+	}
+
+	// Malformed settings value falls back to env password
+	if _, err := db.Exec(`UPDATE settings SET value = 'not-a-valid-scrypt-hash' WHERE key = 'oauth_operator_password_hash'`); err != nil {
+		t.Fatalf("update settings row malformed: %v", err)
+	}
+	{
+		form := url.Values{
+			"client_id":             {clientID},
+			"redirect_uri":          {"https://example.com/callback"},
+			"state":                 {"random-state-3"},
+			"code_challenge":        {challenge},
+			"code_challenge_method": {"S256"},
+			"password":              {pwd},
+		}
+		req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusFound {
+			t.Fatalf("env password on malformed settings status = %d, want 302", rec.Code)
 		}
 	}
 }

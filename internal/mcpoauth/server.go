@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"code-guda-gateway/internal/gatewaykeys"
+	"code-guda-gateway/internal/providers"
 )
 
 type Server struct {
@@ -115,6 +116,26 @@ func (s *Server) handleAuthServerMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+const settingOAuthOperatorPasswordHash = providers.SettingOAuthOperatorPasswordHash
+
+func (s *Server) effectivePasswordHash() (string, error) {
+	if s.db == nil {
+		return s.passwordHash, nil
+	}
+	var stored string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, settingOAuthOperatorPasswordHash).Scan(&stored)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return s.passwordHash, nil
+		}
+		return "", err
+	}
+	if err := ValidatePasswordHash(stored); err != nil {
+		return s.passwordHash, nil
+	}
+	return stored, nil
 }
 
 type registerRequest struct {
@@ -249,6 +270,7 @@ button:hover { background: #2563eb; }
 <div class="card">
   <h1>Authorize %s</h1>
   <p>Authorize <strong>%s</strong> to access Model Context Protocol tools via this gateway.</p>
+  <p>This operator password is set at /admin after admin sign-in and is not the admin token.</p>
   %s
   <form method="POST" action="/authorize">
     <input type="hidden" name="client_id" value="%s">
@@ -357,7 +379,13 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !VerifyPassword(password, s.passwordHash) {
+	expectedHash, err := s.effectivePasswordHash()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if !VerifyPassword(password, expectedHash) {
 		s.renderAuthorizeForm(w, http.StatusUnauthorized, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, "Invalid operator password. Please try again.")
 		return
 	}

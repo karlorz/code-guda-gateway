@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"code-guda-gateway/internal/audit"
 	"code-guda-gateway/internal/config"
 	"code-guda-gateway/internal/gatewaykeys"
+	"code-guda-gateway/internal/mcpoauth"
 	"code-guda-gateway/internal/providers"
 	"code-guda-gateway/internal/proxy"
 	"code-guda-gateway/internal/secrets"
@@ -2201,5 +2203,192 @@ func TestLegacyGrokQuotaSettings_RemainAvailableThroughCompatibilityRoutes(t *te
 	if strings.Contains(createRec.Body.String(), "legacy-admin-key-not-in-http") ||
 		strings.Contains(getRec.Body.String(), "legacy-admin-key-not-in-http") {
 		t.Fatal("HTTP response leaked global admin key")
+	}
+}
+
+func TestOperatorPassword_NoSessionReturns401(t *testing.T) {
+	app, _, _, _, _, _ := openAdminApp(t)
+	body := `{"password":"new-password-16-chars","confirm":"new-password-16-chars"}`
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/operator-password", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", "some-csrf")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no session status = %d, want 401", rec.Code)
+	}
+}
+
+func TestOperatorPassword_BadCSRFReturns403(t *testing.T) {
+	app, auth, _, _, _, _ := openAdminApp(t)
+	c := loginSession(t, app, initToken(t, auth))
+
+	// JSON request with bad header
+	{
+		body := `{"password":"new-password-16-chars","confirm":"new-password-16-chars"}`
+		req := httptest.NewRequest(http.MethodPost, "/admin/api/operator-password", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-CSRF-Token", "invalid-csrf-token")
+		req.AddCookie(c)
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("bad csrf status = %d, want 403", rec.Code)
+		}
+	}
+
+	// Form request with missing or bad form field
+	{
+		form := url.Values{
+			"password":   {"new-password-16-chars"},
+			"confirm":    {"new-password-16-chars"},
+			"csrf_token": {"invalid-csrf-token"},
+		}
+		req := httptest.NewRequest(http.MethodPost, "/admin/api/operator-password", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(c)
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("bad csrf form field status = %d, want 403", rec.Code)
+		}
+	}
+}
+
+func TestOperatorPassword_Validation(t *testing.T) {
+	app, auth, _, _, st, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+
+	// Mismatch -> 400 and does not change settings
+	{
+		body := `{"password":"first-password-16-chars","confirm":"second-password-16-chars"}`
+		rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/operator-password", body, csrf, c)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("mismatch status = %d, want 400", rec.Code)
+		}
+		var val string
+		err := st.DB().QueryRow(`SELECT value FROM settings WHERE key = 'oauth_operator_password_hash'`).Scan(&val)
+		if err != sql.ErrNoRows {
+			t.Fatalf("settings row should not exist after mismatch: %v", err)
+		}
+	}
+
+	// Short password (< 16 runes) -> 400 and does not change settings
+	{
+		body := `{"password":"short-15-chars!","confirm":"short-15-chars!"}`
+		rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/operator-password", body, csrf, c)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("short password status = %d, want 400", rec.Code)
+		}
+		var val string
+		err := st.DB().QueryRow(`SELECT value FROM settings WHERE key = 'oauth_operator_password_hash'`).Scan(&val)
+		if err != sql.ErrNoRows {
+			t.Fatalf("settings row should not exist after short password: %v", err)
+		}
+	}
+}
+
+func TestOperatorPassword_SuccessAndNoLeakage(t *testing.T) {
+	app, auth, _, _, st, _ := openAdminApp(t)
+	c, csrf := authenticatedAdminSession(t, app, auth)
+
+	secretPass := "correct-operator-password-16-long"
+	body := `{"password":"` + secretPass + `","confirm":"` + secretPass + `"}`
+	rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/operator-password", body, csrf, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	respBody := rec.Body.String()
+	if !strings.Contains(respBody, `{"status":"ok"}`) {
+		t.Fatalf("unexpected JSON response: %s", respBody)
+	}
+
+	// Check stored setting
+	var storedHash string
+	if err := st.DB().QueryRow(`SELECT value FROM settings WHERE key = 'oauth_operator_password_hash'`).Scan(&storedHash); err != nil {
+		t.Fatalf("select setting: %v", err)
+	}
+	if err := mcpoauth.ValidatePasswordHash(storedHash); err != nil {
+		t.Fatalf("stored hash is invalid: %v", err)
+	}
+	if !mcpoauth.VerifyPassword(secretPass, storedHash) {
+		t.Fatal("VerifyPassword failed for stored hash")
+	}
+
+	// Response body must not contain password or hash
+	if strings.Contains(respBody, secretPass) {
+		t.Fatal("response body contains password")
+	}
+	if strings.Contains(respBody, storedHash) {
+		t.Fatal("response body contains password hash")
+	}
+
+	// Check audit event
+	var action, detail, actorKind string
+	err := st.DB().QueryRow(`SELECT action, detail_redacted, actor_kind FROM audit_events WHERE action = 'oauth.operator_password.rotate'`).Scan(&action, &detail, &actorKind)
+	if err != nil {
+		t.Fatalf("select audit event: %v", err)
+	}
+	if action != "oauth.operator_password.rotate" {
+		t.Fatalf("audit action = %q, want oauth.operator_password.rotate", action)
+	}
+	if detail != "result=ok" {
+		t.Fatalf("audit detail = %q, want result=ok", detail)
+	}
+	if actorKind != "admin_web" {
+		t.Fatalf("audit actor_kind = %q, want admin_web", actorKind)
+	}
+
+	// Audit detail must not contain password or hash
+	if strings.Contains(detail, secretPass) || strings.Contains(detail, storedHash) {
+		t.Fatal("audit detail leaked password or hash")
+	}
+
+	// Test HTML form submission with csrf_token in form body (redirects to /admin)
+	formPass := "another-new-password-16-chars-long"
+	form := url.Values{
+		"csrf_token": {csrf},
+		"password":   {formPass},
+		"confirm":    {formPass},
+	}
+	formReq := httptest.NewRequest(http.MethodPost, "/admin/api/operator-password", strings.NewReader(form.Encode()))
+	formReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	formReq.AddCookie(c)
+	formRec := httptest.NewRecorder()
+	app.ServeHTTP(formRec, formReq)
+
+	if formRec.Code != http.StatusFound {
+		t.Fatalf("form submit status = %d, want 302", formRec.Code)
+	}
+	if formRec.Header().Get("Location") != "/admin" {
+		t.Fatalf("form redirect location = %q, want /admin", formRec.Header().Get("Location"))
+	}
+	if strings.Contains(formRec.Body.String(), formPass) {
+		t.Fatal("form response body contains password")
+	}
+
+	// Verify RenderDashboardHTML includes csrf_token in hidden field and template content
+	dashReq := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	dashReq.AddCookie(c)
+	dashRec := httptest.NewRecorder()
+	h, ok := app.(*adminweb.Handler)
+	if !ok {
+		t.Fatal("app is not *Handler")
+	}
+	if err := h.RenderDashboardHTML(dashRec, dashReq); err != nil {
+		t.Fatalf("RenderDashboardHTML: %v", err)
+	}
+	dashHTML := dashRec.Body.String()
+	if !strings.Contains(dashHTML, `name="csrf_token" value="`+csrf+`"`) {
+		t.Fatalf("dashboard HTML missing CSRF token field: %s", dashHTML)
+	}
+	if !strings.Contains(dashHTML, "MCP connector consent") {
+		t.Fatalf("dashboard HTML missing MCP connector consent section")
+	}
+	if !strings.Contains(dashHTML, "This password is what ChatGPT, Doubao, and Cursor type on /authorize. It is not the admin token and not a gsk_ gateway key.") {
+		t.Fatalf("dashboard HTML missing consent explanation")
 	}
 }

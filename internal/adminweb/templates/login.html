@@ -13,6 +13,7 @@
     <p class="notice">Admin token not initialized. Use the CLI: <code>guda-gateway-admin token init</code></p>
     {{else}}
     <form method="post" action="/admin/api/login" id="login-form">
+      <p class="hint">This admin token does not authorize ChatGPT, Doubao, or Cursor.</p>
       <label for="token">Admin token</label>
       <input type="password" id="token" name="token" autocomplete="current-password" required>
       <button type="submit">Sign in</button>

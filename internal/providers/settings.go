@@ -70,12 +70,13 @@ func (r *SettingsRepo) SetBaseURL(provider, baseURL string) error {
 }
 
 const (
-	settingCooldownRateLimit  = "cooldown_rate_limit_seconds"
-	settingCooldownTransient  = "cooldown_transient_seconds"
-	settingCooldownCredential = "cooldown_credential_seconds"
-	settingMaxRetries         = "max_retries"
-	settingProxyDebugAttempts = "proxy_debug_attempts"
-	settingDisplayTimezone    = "display_timezone"
+	settingCooldownRateLimit         = "cooldown_rate_limit_seconds"
+	settingCooldownTransient         = "cooldown_transient_seconds"
+	settingCooldownCredential        = "cooldown_credential_seconds"
+	settingMaxRetries                = "max_retries"
+	settingProxyDebugAttempts        = "proxy_debug_attempts"
+	settingDisplayTimezone           = "display_timezone"
+	SettingOAuthOperatorPasswordHash = "oauth_operator_password_hash"
 )
 
 // DisplayTimezone is the effective admin display zone.

@@ -96,6 +96,18 @@
         </tbody>
       </table>
     </section>
+    <section>
+      <h2>MCP connector consent</h2>
+      <p>This password is what ChatGPT, Doubao, and Cursor type on /authorize. It is not the admin token and not a gsk_ gateway key.</p>
+      <form method="post" action="/admin/api/operator-password">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required minlength="16">
+        <label for="confirm">Confirm</label>
+        <input type="password" id="confirm" name="confirm" required minlength="16">
+        <button type="submit">Set Operator Password</button>
+      </form>
+    </section>
   </main>
 </body>
 </html>

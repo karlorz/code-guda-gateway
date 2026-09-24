@@ -14,6 +14,7 @@ import (
 	"code-guda-gateway/internal/adminauth"
 	"code-guda-gateway/internal/audit"
 	"code-guda-gateway/internal/gatewaykeys"
+	"code-guda-gateway/internal/mcpoauth"
 	"code-guda-gateway/internal/providers"
 	"code-guda-gateway/internal/proxy"
 	"code-guda-gateway/internal/usage"
@@ -130,6 +131,11 @@ func (h *Handler) renderDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	if sid := adminauth.SessionIDFromRequest(r); sid != "" {
+		if token, err := h.deps.Auth.CSRFToken(sid); err == nil {
+			data["CSRFToken"] = token
+		}
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = h.templates.ExecuteTemplate(w, "dashboard", data)
 }
@@ -187,7 +193,11 @@ func (h *Handler) buildDashboardData() (map[string]any, error) {
 func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	if requiresCSRF(r) {
-		ok, err := h.deps.Auth.ValidateCSRF(adminauth.SessionIDFromRequest(r), r.Header.Get("X-CSRF-Token"))
+		token := r.Header.Get("X-CSRF-Token")
+		if token == "" && (r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete) {
+			token = r.PostFormValue("csrf_token")
+		}
+		ok, err := h.deps.Auth.ValidateCSRF(adminauth.SessionIDFromRequest(r), token)
 		if err != nil {
 			if errors.Is(err, adminauth.ErrSessionInvalid) {
 				http.Error(w, "forbidden", http.StatusForbidden)
@@ -300,6 +310,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 		h.handleAuditList(w, r)
 	case path == "/admin/api/usage-daily" && r.Method == http.MethodGet:
 		h.handleUsageDaily(w, r)
+	case path == "/admin/api/operator-password" && r.Method == http.MethodPost:
+		h.handleOperatorPassword(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -360,6 +372,63 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, cookie)
+	if wantsHTMLResponse(r) {
+		http.Redirect(w, r, "/admin", http.StatusFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) handleOperatorPassword(w http.ResponseWriter, r *http.Request) {
+	var password, confirm string
+	ct := r.Header.Get("Content-Type")
+	if strings.Contains(ct, "application/json") {
+		var body struct {
+			Password string `json:"password"`
+			Confirm  string `json:"confirm"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+			return
+		}
+		password = strings.TrimSpace(body.Password)
+		confirm = strings.TrimSpace(body.Confirm)
+	} else {
+		if err := r.ParseForm(); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+			return
+		}
+		password = strings.TrimSpace(r.FormValue("password"))
+		confirm = strings.TrimSpace(r.FormValue("confirm"))
+	}
+
+	if password != confirm {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "passwords do not match")
+		return
+	}
+	if len([]rune(password)) < 16 {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "password must be at least 16 characters")
+		return
+	}
+
+	hash, err := mcpoauth.HashPassword(password)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := h.deps.Settings.SetCooldownSetting(providers.SettingOAuthOperatorPasswordHash, hash); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	_ = h.deps.Audit.Record(audit.AuditEvent{
+		ActorKind: "admin_web",
+		Action:    "oauth.operator_password.rotate",
+		Detail:    "result=ok",
+		ClientIP:  r.RemoteAddr,
+	})
+
 	if wantsHTMLResponse(r) {
 		http.Redirect(w, r, "/admin", http.StatusFound)
 		return
@@ -1402,6 +1471,11 @@ func (h *Handler) RenderDashboardHTML(w http.ResponseWriter, r *http.Request) er
 	data, err := h.buildDashboardData()
 	if err != nil {
 		return err
+	}
+	if sid := adminauth.SessionIDFromRequest(r); sid != "" {
+		if token, err := h.deps.Auth.CSRFToken(sid); err == nil {
+			data["CSRFToken"] = token
+		}
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	return h.templates.ExecuteTemplate(w, "dashboard", data)
