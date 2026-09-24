@@ -406,8 +406,8 @@ func (h *Handler) handleOperatorPassword(w http.ResponseWriter, r *http.Request)
 		writeAPIError(w, http.StatusBadRequest, "bad_request", "passwords do not match")
 		return
 	}
-	if len([]rune(password)) < 16 {
-		writeAPIError(w, http.StatusBadRequest, "bad_request", "password must be at least 16 characters")
+	if password == "" {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "password must be at least 1 character")
 		return
 	}
 

@@ -102,9 +102,9 @@
       <form method="post" action="/admin/api/operator-password">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <label for="password">Password</label>
-        <input type="password" id="password" name="password" required minlength="16">
+        <input type="password" id="password" name="password" required>
         <label for="confirm">Confirm</label>
-        <input type="password" id="confirm" name="confirm" required minlength="16">
+        <input type="password" id="confirm" name="confirm" required>
         <button type="submit">Set Operator Password</button>
       </form>
     </section>

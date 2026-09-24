@@ -2276,17 +2276,17 @@ func TestOperatorPassword_Validation(t *testing.T) {
 		}
 	}
 
-	// Short password (< 16 runes) -> 400 and does not change settings
+	// Empty password -> 400 and does not change settings
 	{
-		body := `{"password":"short-15-chars!","confirm":"short-15-chars!"}`
+		body := `{"password":"","confirm":""}`
 		rec := serveMutatingAdmin(app, http.MethodPost, "/admin/api/operator-password", body, csrf, c)
 		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("short password status = %d, want 400", rec.Code)
+			t.Fatalf("empty password status = %d, want 400", rec.Code)
 		}
 		var val string
 		err := st.DB().QueryRow(`SELECT value FROM settings WHERE key = 'oauth_operator_password_hash'`).Scan(&val)
 		if err != sql.ErrNoRows {
-			t.Fatalf("settings row should not exist after short password: %v", err)
+			t.Fatalf("settings row should not exist after empty password: %v", err)
 		}
 	}
 }
