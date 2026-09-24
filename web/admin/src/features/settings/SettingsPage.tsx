@@ -27,13 +27,77 @@ export function SettingsPage() {
 
   const source = tzQuery.data?.source ?? 'host';
   const errorMsg = (patch.error as Error | undefined)?.message || '';
+  const [operatorPassword, setOperatorPassword] = useState('');
+  const [operatorConfirm, setOperatorConfirm] = useState('');
+  const [operatorSaved, setOperatorSaved] = useState(false);
+  const operator = useMutation({
+    mutationFn: () =>
+      apiFetch<{ status: string }>('/admin/api/operator-password', {
+        method: 'POST',
+        body: JSON.stringify({ password: operatorPassword, confirm: operatorConfirm }),
+      }),
+    onSuccess: () => {
+      setOperatorPassword('');
+      setOperatorConfirm('');
+      setOperatorSaved(true);
+    },
+  });
+  const operatorError = (operator.error as Error | undefined)?.message || '';
 
   return (
     <div>
       <PageHeader
-        description="Runtime information, display timezone, and guidance for endpoint creation defaults."
+        description="Runtime information, display timezone, connector consent, and guidance for endpoint creation defaults."
         title="Settings"
       />
+      <Panel title="MCP connector consent">
+        <p className="mb-3 max-w-3xl text-sm text-zinc-600">
+          This password is what ChatGPT, Doubao, and Cursor type on /authorize. It is not the admin token and not a gsk_ gateway key. The old value cannot be shown. Saving replaces it for the next consent check.
+        </p>
+        <div className="grid max-w-xl gap-3">
+          <label className="grid gap-1 text-sm" htmlFor="operator-password">
+            <span className="font-medium text-zinc-900">New operator password</span>
+            <input
+              autoComplete="new-password"
+              className="rounded border border-zinc-300 px-3 py-2"
+              id="operator-password"
+              minLength={16}
+              onChange={(e) => {
+                setOperatorSaved(false);
+                setOperatorPassword(e.target.value);
+              }}
+              type="password"
+              value={operatorPassword}
+            />
+          </label>
+          <label className="grid gap-1 text-sm" htmlFor="operator-confirm">
+            <span className="font-medium text-zinc-900">Confirm</span>
+            <input
+              autoComplete="new-password"
+              className="rounded border border-zinc-300 px-3 py-2"
+              id="operator-confirm"
+              minLength={16}
+              onChange={(e) => {
+                setOperatorSaved(false);
+                setOperatorConfirm(e.target.value);
+              }}
+              type="password"
+              value={operatorConfirm}
+            />
+          </label>
+        </div>
+        {operatorError ? <p className="mt-2 text-sm text-red-600">{operatorError}</p> : null}
+        {operatorSaved ? <p className="mt-2 text-sm text-zinc-700">Saved. Use this password on the connector consent page.</p> : null}
+        <div className="mt-3">
+          <Button
+            disabled={operator.isPending || operatorPassword.length < 16 || operatorPassword !== operatorConfirm}
+            onClick={() => operator.mutate()}
+            type="button"
+          >
+            Set operator password
+          </Button>
+        </div>
+      </Panel>
       <Panel title="Runtime">
         <dl className="grid gap-3 text-sm text-zinc-700">
           <div className="grid gap-1 border-t border-zinc-200 py-3 md:grid-cols-[180px_1fr]">

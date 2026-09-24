@@ -38,7 +38,7 @@ export function LoginPage() {
           <h1 className="text-lg font-semibold">GuDa Gateway Admin</h1>
         </div>
         <p className="text-sm font-normal text-zinc-600">
-          Sign in with any username plus the admin token as the password. Browsers can save this pair for autofill.
+          Sign in with any username plus the admin token as the password. This admin token does not authorize ChatGPT, Doubao, or Cursor. After sign-in, set that connector password under Settings.
         </p>
         <Field
           autoComplete="username"
