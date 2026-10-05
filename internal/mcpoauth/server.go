@@ -119,6 +119,23 @@ func (s *Server) handleAuthServerMeta(w http.ResponseWriter, r *http.Request) {
 }
 
 const settingOAuthOperatorPasswordHash = providers.SettingOAuthOperatorPasswordHash
+const settingPublicIssuance = "public_issuance"
+
+func (s *Server) publicIssuanceMode() string {
+	if s.db == nil {
+		return "off"
+	}
+	var mode string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, settingPublicIssuance).Scan(&mode)
+	if err != nil {
+		return "off"
+	}
+	mode = strings.TrimSpace(mode)
+	if mode == "open" || mode == "ref_code" {
+		return mode
+	}
+	return "off"
+}
 
 func (s *Server) effectivePasswordHash() (string, error) {
 	if s.db == nil {
@@ -228,7 +245,7 @@ func (s *Server) lookupClient(clientID string) (*oauthClient, error) {
 	return &c, nil
 }
 
-func (s *Server) renderAuthorizeForm(w http.ResponseWriter, status int, client *oauthClient, redirectURI, state, codeChallenge, codeChallengeMethod, scope, errMsg string) {
+func (s *Server) renderAuthorizeForm(w http.ResponseWriter, status int, client *oauthClient, redirectURI, state, codeChallenge, codeChallengeMethod, scope, agentLabel, inviteCode, errMsg string) {
 	displayName := "this client"
 	if client != nil && strings.TrimSpace(client.ClientName) != "" {
 		displayName = strings.TrimSpace(client.ClientName)
@@ -243,10 +260,47 @@ func (s *Server) renderAuthorizeForm(w http.ResponseWriter, status int, client *
 		escapedClientID = html.EscapeString(client.ClientID)
 	}
 	escapedScope := html.EscapeString(scope)
+	escapedAgentLabel := html.EscapeString(agentLabel)
+	escapedInviteCode := html.EscapeString(inviteCode)
 
 	errorSection := ""
 	if errMsg != "" {
 		errorSection = fmt.Sprintf(`<p style="color:#d93025;margin-bottom:1rem;font-weight:500;">%s</p>`, html.EscapeString(errMsg))
+	}
+
+	mode := s.publicIssuanceMode()
+
+	var fieldsHTML string
+	switch mode {
+	case "open":
+		// Mode is open: password input is hidden from primary flow, but operator can expand/fill or submit without password.
+		// "Hide password input when mode is open (still allow POST password for operator)."
+		fieldsHTML = fmt.Sprintf(`
+    <p style="font-size:0.875rem;color:#38bdf8;margin-bottom:1rem;">Public access is open for this gateway.</p>
+    <details style="margin-bottom:1.25rem;">
+      <summary style="font-size:0.825rem;color:#94a3b8;cursor:pointer;">Operator sign-in (optional)</summary>
+      <div style="margin-top:0.5rem;">
+        <label for="password">Operator Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password">
+      </div>
+    </details>`)
+	case "ref_code":
+		// When ref_code, show invite input. If invite= query prefilled, value is set. Operator password still shown.
+		inviteReq := "required"
+		fieldsHTML = fmt.Sprintf(`
+    <label for="invite">Invite Code</label>
+    <input type="text" id="invite" name="invite" value="%s" %s placeholder="inv_..." style="width:100%%;box-sizing:border-box;padding:0.625rem;border-radius:6px;border:1px solid #475569;background:#0f172a;color:#fff;font-size:1rem;margin-bottom:1rem;">
+    <details style="margin-bottom:1.25rem;">
+      <summary style="font-size:0.825rem;color:#94a3b8;cursor:pointer;">Operator override</summary>
+      <div style="margin-top:0.5rem;">
+        <label for="password">Operator Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password">
+      </div>
+    </details>`, escapedInviteCode, inviteReq)
+	default: // "off"
+		fieldsHTML = `
+    <label for="password">Operator Password</label>
+    <input type="password" id="password" name="password" required autofocus autocomplete="current-password">`
 	}
 
 	doc := fmt.Sprintf(`<!DOCTYPE html>
@@ -261,7 +315,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helve
 h1 { font-size: 1.25rem; margin-top: 0; margin-bottom: 1rem; color: #f1f5f9; }
 p { font-size: 0.925rem; color: #94a3b8; line-height: 1.5; margin-top: 0; }
 label { display: block; font-size: 0.875rem; margin-bottom: 0.5rem; color: #cbd5e1; font-weight: 500; }
-input[type="password"] { width: 100%%; box-sizing: border-box; padding: 0.625rem; border-radius: 6px; border: 1px solid #475569; background: #0f172a; color: #fff; font-size: 1rem; margin-bottom: 1.25rem; }
+input[type="password"], input[type="text"] { width: 100%%; box-sizing: border-box; padding: 0.625rem; border-radius: 6px; border: 1px solid #475569; background: #0f172a; color: #fff; font-size: 1rem; margin-bottom: 1.25rem; }
 button { width: 100%%; padding: 0.625rem; border-radius: 6px; border: none; background: #3b82f6; color: #fff; font-size: 1rem; font-weight: 500; cursor: pointer; }
 button:hover { background: #2563eb; }
 </style>
@@ -279,13 +333,13 @@ button:hover { background: #2563eb; }
     <input type="hidden" name="code_challenge" value="%s">
     <input type="hidden" name="code_challenge_method" value="%s">
     <input type="hidden" name="scope" value="%s">
-    <label for="password">Operator Password</label>
-    <input type="password" id="password" name="password" required autofocus autocomplete="current-password">
+    <input type="hidden" name="agent_label" value="%s">
+    %s
     <button type="submit">Approve Access</button>
   </form>
 </div>
 </body>
-</html>`, escapedDisplayName, escapedDisplayName, errorSection, escapedClientID, escapedRedirectURI, escapedState, escapedCodeChallenge, escapedCodeChallengeMethod, escapedScope)
+</html>`, escapedDisplayName, escapedDisplayName, errorSection, escapedClientID, escapedRedirectURI, escapedState, escapedCodeChallenge, escapedCodeChallengeMethod, escapedScope, escapedAgentLabel, fieldsHTML)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -303,6 +357,8 @@ func (s *Server) handleAuthorizeGet(w http.ResponseWriter, r *http.Request) {
 	codeChallengeMethod := q.Get("code_challenge_method")
 	state := q.Get("state")
 	scope := q.Get("scope")
+	inviteCode := q.Get("invite")
+	agentLabel := q.Get("agent_label")
 
 	client, err := s.lookupClient(clientID)
 	if err != nil {
@@ -312,6 +368,10 @@ func (s *Server) handleAuthorizeGet(w http.ResponseWriter, r *http.Request) {
 	if client == nil {
 		http.Error(w, "invalid client_id", http.StatusBadRequest)
 		return
+	}
+
+	if agentLabel == "" && client.ClientName != "" {
+		agentLabel = strings.TrimSpace(client.ClientName)
 	}
 
 	validRedirect := false
@@ -335,7 +395,7 @@ func (s *Server) handleAuthorizeGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.renderAuthorizeForm(w, http.StatusOK, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, "")
+	s.renderAuthorizeForm(w, http.StatusOK, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, agentLabel, inviteCode, "")
 }
 
 // POST /authorize
@@ -351,6 +411,8 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 	codeChallengeMethod := r.FormValue("code_challenge_method")
 	scope := r.FormValue("scope")
 	password := r.FormValue("password")
+	agentLabel := strings.TrimSpace(r.FormValue("agent_label"))
+	inviteCode := strings.TrimSpace(r.FormValue("invite"))
 
 	client, err := s.lookupClient(clientID)
 	if err != nil {
@@ -360,6 +422,10 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 	if client == nil {
 		http.Error(w, "invalid client_id", http.StatusBadRequest)
 		return
+	}
+
+	if agentLabel == "" && client.ClientName != "" {
+		agentLabel = strings.TrimSpace(client.ClientName)
 	}
 
 	validRedirect := false
@@ -385,8 +451,52 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !VerifyPassword(password, expectedHash) {
-		s.renderAuthorizeForm(w, http.StatusUnauthorized, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, "Invalid operator password. Please try again.")
+	mode := s.publicIssuanceMode()
+
+	var issuedVia string
+	var refCodeID *int64
+
+	// Mint decision logic:
+	// 1. If operator password verifies -> issued_via=operator (even when public is open/ref_code).
+	// 2. Else if public_issuance=open -> issued_via=open_register (password may be empty).
+	// 3. Else if public_issuance=ref_code -> require invite form/query; atomic redeem.
+	//    If bind nonempty, redeeming agent_label must match bind. issued_via=ref_code, store ref_code_id on oauth_codes.
+	// 4. Else invalid password as today.
+
+	if password != "" && VerifyPassword(password, expectedHash) {
+		issuedVia = "operator"
+	} else if mode == "open" {
+		issuedVia = "open_register"
+	} else if mode == "ref_code" {
+		if inviteCode == "" {
+			s.renderAuthorizeForm(w, http.StatusUnauthorized, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, agentLabel, inviteCode, "Invite code required.")
+			return
+		}
+		redeemed, err := gatewaykeys.RedeemTx(s.db, inviteCode, agentLabel)
+		if err != nil {
+			var msg string
+			switch {
+			case errors.Is(err, gatewaykeys.ErrInviteNotFound):
+				msg = "Invalid invite code."
+			case errors.Is(err, gatewaykeys.ErrInviteRevoked):
+				msg = "This invite code has been revoked."
+			case errors.Is(err, gatewaykeys.ErrInviteExpired):
+				msg = "This invite code has expired."
+			case errors.Is(err, gatewaykeys.ErrInviteExhausted):
+				msg = "This invite code has reached its maximum redemptions."
+			case errors.Is(err, gatewaykeys.ErrInviteLabelBound):
+				msg = fmt.Sprintf("Invite code is bound to agent label %q.", redeemedBindHint(s.db, inviteCode))
+			default:
+				msg = "Failed to redeem invite code."
+			}
+			s.renderAuthorizeForm(w, http.StatusUnauthorized, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, agentLabel, inviteCode, msg)
+			return
+		}
+		issuedVia = "ref_code"
+		refCodeID = &redeemed.ID
+	} else {
+		// Public issuance is off or operator password incorrect
+		s.renderAuthorizeForm(w, http.StatusUnauthorized, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, agentLabel, inviteCode, "Invalid operator password. Please try again.")
 		return
 	}
 
@@ -404,9 +514,9 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 	expiresAt := now.Add(5 * time.Minute).Format(time.RFC3339Nano)
 
 	_, err = s.db.Exec(`
-		INSERT INTO oauth_codes (code_hash, client_id, redirect_uri, code_challenge, code_challenge_method, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		codeHash, clientID, redirectURI, codeChallenge, codeChallengeMethod, expiresAt, createdAt,
+		INSERT INTO oauth_codes (code_hash, client_id, redirect_uri, code_challenge, code_challenge_method, expires_at, created_at, issued_via, agent_label, ref_code_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		codeHash, clientID, redirectURI, codeChallenge, codeChallengeMethod, expiresAt, createdAt, issuedVia, agentLabel, refCodeID,
 	)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -427,6 +537,12 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Cache-Control", "no-store")
 	http.Redirect(w, r, u.String(), http.StatusFound)
+}
+
+func redeemedBindHint(db *sql.DB, code string) string {
+	var bind string
+	_ = db.QueryRow(`SELECT agent_label_bind FROM invite_codes WHERE code = ?`, code).Scan(&bind)
+	return bind
 }
 
 func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
@@ -467,10 +583,12 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rowClientID, rowRedirectURI, rowCodeChallenge, rowCodeChallengeMethod, rowExpiresAt string
+	var rowIssuedVia, rowAgentLabel string
+	var rowRefCodeID sql.NullInt64
 	err = txCode.QueryRow(`
-		SELECT client_id, redirect_uri, code_challenge, code_challenge_method, expires_at
+		SELECT client_id, redirect_uri, code_challenge, code_challenge_method, expires_at, issued_via, agent_label, ref_code_id
 		FROM oauth_codes WHERE code_hash = ?`, codeHash,
-	).Scan(&rowClientID, &rowRedirectURI, &rowCodeChallenge, &rowCodeChallengeMethod, &rowExpiresAt)
+	).Scan(&rowClientID, &rowRedirectURI, &rowCodeChallenge, &rowCodeChallengeMethod, &rowExpiresAt, &rowIssuedVia, &rowAgentLabel, &rowRefCodeID)
 	if errors.Is(err, sql.ErrNoRows) {
 		_ = txCode.Rollback()
 		s.jsonOAuthError(w, http.StatusBadRequest, "invalid_grant", "invalid or expired code")
@@ -530,8 +648,23 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		keyName = "oauth:" + strings.TrimSpace(clientName.String)
 	}
 
+	if rowAgentLabel == "" {
+		if clientName.Valid && strings.TrimSpace(clientName.String) != "" {
+			rowAgentLabel = strings.TrimSpace(clientName.String)
+		} else {
+			rowAgentLabel = clientID
+		}
+	}
+	if rowIssuedVia == "" {
+		rowIssuedVia = "operator"
+	}
+	var refCodeIDPtr *int64
+	if rowRefCodeID.Valid {
+		refCodeIDPtr = &rowRefCodeID.Int64
+	}
+
 	// Mint gateway key inside tx
-	rawKey, displayKey, err := gatewaykeys.CreateOAuthTx(tx, keyName)
+	rawKey, displayKey, err := gatewaykeys.CreateOAuthTxWithIssuance(tx, keyName, rowIssuedVia, rowAgentLabel, refCodeIDPtr)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -641,10 +774,12 @@ func (s *Server) handleTokenRefreshToken(w http.ResponseWriter, r *http.Request)
 	var keyName string
 	var enabled int
 	var revokedAt sql.NullString
+	var oldIssuedVia, oldAgentLabel sql.NullString
+	var oldRefCodeID sql.NullInt64
 	err = tx.QueryRow(`
-		SELECT name, enabled, revoked_at
+		SELECT name, enabled, revoked_at, issued_via, agent_label, ref_code_id
 		FROM gateway_keys WHERE id = ?`, oldKeyID,
-	).Scan(&keyName, &enabled, &revokedAt)
+	).Scan(&keyName, &enabled, &revokedAt, &oldIssuedVia, &oldAgentLabel, &oldRefCodeID)
 	if errors.Is(err, sql.ErrNoRows) || enabled == 0 || revokedAt.Valid {
 		s.jsonOAuthError(w, http.StatusBadRequest, "invalid_grant", "gateway key revoked or disabled")
 		return
@@ -660,8 +795,21 @@ func (s *Server) handleTokenRefreshToken(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Mint successor key
-	rawSuccessorKey, displaySuccessorKey, err := gatewaykeys.CreateOAuthTx(tx, keyName)
+	succIssuedVia := "operator"
+	if oldIssuedVia.Valid && oldIssuedVia.String != "" {
+		succIssuedVia = oldIssuedVia.String
+	}
+	succAgentLabel := keyName
+	if oldAgentLabel.Valid && oldAgentLabel.String != "" {
+		succAgentLabel = oldAgentLabel.String
+	}
+	var succRefCodeID *int64
+	if oldRefCodeID.Valid {
+		succRefCodeID = &oldRefCodeID.Int64
+	}
+
+	// Mint successor key preserving issuance metadata
+	rawSuccessorKey, displaySuccessorKey, err := gatewaykeys.CreateOAuthTxWithIssuance(tx, keyName, succIssuedVia, succAgentLabel, succRefCodeID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

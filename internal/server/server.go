@@ -55,6 +55,7 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 	adminH := adminweb.New(adminweb.Deps{
 		Auth:         auth,
 		GatewayKeys:  gatewayKeys,
+		InviteCodes:  gatewaykeys.NewInviteService(db),
 		ProviderKeys: keyRepo,
 		Settings:     settingsRepo,
 		Audit:        audit.NewAuditRepo(db),

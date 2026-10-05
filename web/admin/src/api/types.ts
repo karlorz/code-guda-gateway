@@ -19,6 +19,28 @@ export type GatewayKey = {
   last_used_at?: string;
   RevokedAt?: string;
   revoked_at?: string;
+  OAuthOwned?: boolean;
+  oauth_owned?: boolean;
+  AgentLabel?: string;
+  agent_label?: string;
+  IssuedVia?: string;
+  issued_via?: string;
+  RefCodeID?: number | null;
+  ref_code_id?: number | null;
+};
+
+export type PublicIssuanceMode = 'off' | 'open' | 'ref_code';
+export type PublicIssuanceSetting = { value: PublicIssuanceMode };
+
+export type InviteCode = {
+  id: number;
+  code: string;
+  agent_label_bind: string;
+  max_redemptions: number;
+  redemption_count: number;
+  expires_at: string;
+  revoked_at?: string | null;
+  created_at: string;
 };
 
 export type GatewayKeyCreateResponse = { key: GatewayKey; raw_key: string };

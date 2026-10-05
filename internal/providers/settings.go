@@ -268,6 +268,10 @@ func (r *SettingsRepo) getSettingInt(key string, fallback int) (int, error) {
 	return n, nil
 }
 
+func (r *SettingsRepo) GetSetting(key, fallback string) (string, error) {
+	return r.getSettingString(key, fallback)
+}
+
 func (r *SettingsRepo) getSettingString(key string, fallback string) (string, error) {
 	var val string
 	err := r.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&val)

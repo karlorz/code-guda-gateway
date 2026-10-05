@@ -48,6 +48,7 @@ func openAdminApp(t *testing.T) (http.Handler, *adminauth.Service, *gatewaykeys.
 	app := adminweb.New(adminweb.Deps{
 		Auth:         auth,
 		GatewayKeys:  gk,
+		InviteCodes:  gatewaykeys.NewInviteService(st.DB()),
 		ProviderKeys: keyRepo,
 		Settings:     providers.NewSettingsRepo(st.DB()),
 		Audit:        audit.NewAuditRepo(st.DB()),
@@ -74,6 +75,7 @@ func openAdminAppWithRefresher(t *testing.T, refresher *providers.QuotaRefresher
 	app := adminweb.New(adminweb.Deps{
 		Auth:           auth,
 		GatewayKeys:    gk,
+		InviteCodes:    gatewaykeys.NewInviteService(st.DB()),
 		ProviderKeys:   keyRepo,
 		Settings:       settingsRepo,
 		Audit:          audit.NewAuditRepo(st.DB()),

@@ -43,15 +43,18 @@ func NewService(db *sql.DB) *Service {
 
 // DisplayKey is the public view of a gateway key (no raw key or full hash).
 type DisplayKey struct {
-	ID          int64
-	Name        string
-	Prefix      string
-	Fingerprint string
-	Enabled     bool
-	CreatedAt   string
-	LastUsedAt  *string
-	RevokedAt   *string
-	OAuthOwned  bool
+	ID          int64   `json:"id"`
+	Name        string  `json:"name"`
+	Prefix      string  `json:"prefix"`
+	Fingerprint string  `json:"fingerprint"`
+	Enabled     bool    `json:"enabled"`
+	CreatedAt   string  `json:"created_at"`
+	LastUsedAt  *string `json:"last_used_at"`
+	RevokedAt   *string `json:"revoked_at"`
+	OAuthOwned  bool    `json:"oauth_owned"`
+	AgentLabel  string  `json:"agent_label"`
+	IssuedVia   string  `json:"issued_via"`
+	RefCodeID   *int64  `json:"ref_code_id"`
 }
 
 // Create generates a new enabled key. raw is returned once; only hash is stored.
@@ -66,7 +69,12 @@ type queryExecer interface {
 // CreateOAuthTx generates an enabled key marked oauth_owned so a later
 // re-enable cannot turn a connector key into a manual proxy key.
 func CreateOAuthTx(execer queryExecer, name string) (raw string, display DisplayKey, err error) {
-	return insertKey(execer, name, true)
+	return insertKeyDetails(execer, name, true, "operator", name, nil)
+}
+
+// CreateOAuthTxWithIssuance generates an enabled OAuth key with specific issuance metadata.
+func CreateOAuthTxWithIssuance(execer queryExecer, name string, issuedVia, agentLabel string, refCodeID *int64) (raw string, display DisplayKey, err error) {
+	return insertKeyDetails(execer, name, true, issuedVia, agentLabel, refCodeID)
 }
 
 // CreateTx generates a new enabled manual key using the provided tx or db execer.
@@ -75,6 +83,10 @@ func CreateTx(execer queryExecer, name string) (raw string, display DisplayKey, 
 }
 
 func insertKey(execer queryExecer, name string, oauthOwned bool) (raw string, display DisplayKey, err error) {
+	return insertKeyDetails(execer, name, oauthOwned, "operator", name, nil)
+}
+
+func insertKeyDetails(execer queryExecer, name string, oauthOwned bool, issuedVia, agentLabel string, refCodeID *int64) (raw string, display DisplayKey, err error) {
 	raw, hash, prefix, fp, err := generateKeyMaterial()
 	if err != nil {
 		return "", DisplayKey{}, err
@@ -83,10 +95,16 @@ func insertKey(execer queryExecer, name string, oauthOwned bool) (raw string, di
 	if oauthOwned {
 		owned = 1
 	}
+	if issuedVia == "" {
+		issuedVia = "operator"
+	}
+	if agentLabel == "" {
+		agentLabel = name
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	res, err := execer.Exec(
-		`INSERT INTO gateway_keys (name, key_prefix, fingerprint, key_hash, enabled, created_at, oauth_owned) VALUES (?, ?, ?, ?, 1, ?, ?)`,
-		name, prefix, fp, hash, now, owned,
+		`INSERT INTO gateway_keys (name, key_prefix, fingerprint, key_hash, enabled, created_at, oauth_owned, agent_label, issued_via, ref_code_id) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+		name, prefix, fp, hash, now, owned, agentLabel, issuedVia, refCodeID,
 	)
 	if err != nil {
 		return "", DisplayKey{}, fmt.Errorf("insert gateway_keys: %w", err)
@@ -100,13 +118,16 @@ func insertKey(execer queryExecer, name string, oauthOwned bool) (raw string, di
 		Enabled:     true,
 		CreatedAt:   now,
 		OAuthOwned:  oauthOwned,
+		AgentLabel:  agentLabel,
+		IssuedVia:   issuedVia,
+		RefCodeID:   refCodeID,
 	}, nil
 }
 
 // List returns display fields for all gateway keys.
 func (s *Service) List() ([]DisplayKey, error) {
 	rows, err := s.db.Query(`
-		SELECT id, name, key_prefix, fingerprint, enabled, created_at, last_used_at, revoked_at
+		SELECT id, name, key_prefix, fingerprint, enabled, created_at, last_used_at, revoked_at, oauth_owned, agent_label, issued_via, ref_code_id
 		FROM gateway_keys ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("list gateway_keys: %w", err)
@@ -115,17 +136,31 @@ func (s *Service) List() ([]DisplayKey, error) {
 	var out []DisplayKey
 	for rows.Next() {
 		var d DisplayKey
-		var enabled int
+		var enabled, oauthOwned int
 		var lastUsed, revoked sql.NullString
-		if err := rows.Scan(&d.ID, &d.Name, &d.Prefix, &d.Fingerprint, &enabled, &d.CreatedAt, &lastUsed, &revoked); err != nil {
+		var agentLabel, issuedVia sql.NullString
+		var refCodeID sql.NullInt64
+		if err := rows.Scan(&d.ID, &d.Name, &d.Prefix, &d.Fingerprint, &enabled, &d.CreatedAt, &lastUsed, &revoked, &oauthOwned, &agentLabel, &issuedVia, &refCodeID); err != nil {
 			return nil, err
 		}
 		d.Enabled = enabled != 0
+		d.OAuthOwned = oauthOwned != 0
 		if lastUsed.Valid {
 			d.LastUsedAt = &lastUsed.String
 		}
 		if revoked.Valid {
 			d.RevokedAt = &revoked.String
+		}
+		if agentLabel.Valid {
+			d.AgentLabel = agentLabel.String
+		}
+		if issuedVia.Valid {
+			d.IssuedVia = issuedVia.String
+		} else {
+			d.IssuedVia = "operator"
+		}
+		if refCodeID.Valid {
+			d.RefCodeID = &refCodeID.Int64
 		}
 		out = append(out, d)
 	}
@@ -142,10 +177,12 @@ func (s *Service) Lookup(raw string) (*DisplayKey, error) {
 	var d DisplayKey
 	var enabled, oauthOwned int
 	var lastUsed, revoked sql.NullString
+	var agentLabel, issuedVia sql.NullString
+	var refCodeID sql.NullInt64
 	err := s.db.QueryRow(`
-		SELECT id, name, key_prefix, fingerprint, enabled, created_at, last_used_at, revoked_at, oauth_owned
+		SELECT id, name, key_prefix, fingerprint, enabled, created_at, last_used_at, revoked_at, oauth_owned, agent_label, issued_via, ref_code_id
 		FROM gateway_keys WHERE key_hash = ?`, hash,
-	).Scan(&d.ID, &d.Name, &d.Prefix, &d.Fingerprint, &enabled, &d.CreatedAt, &lastUsed, &revoked, &oauthOwned)
+	).Scan(&d.ID, &d.Name, &d.Prefix, &d.Fingerprint, &enabled, &d.CreatedAt, &lastUsed, &revoked, &oauthOwned, &agentLabel, &issuedVia, &refCodeID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -159,6 +196,17 @@ func (s *Service) Lookup(raw string) (*DisplayKey, error) {
 	}
 	if revoked.Valid {
 		d.RevokedAt = &revoked.String
+	}
+	if agentLabel.Valid {
+		d.AgentLabel = agentLabel.String
+	}
+	if issuedVia.Valid {
+		d.IssuedVia = issuedVia.String
+	} else {
+		d.IssuedVia = "operator"
+	}
+	if refCodeID.Valid {
+		d.RefCodeID = &refCodeID.Int64
 	}
 	if !d.Enabled || d.RevokedAt != nil {
 		return nil, ErrNotAuthorized
@@ -226,6 +274,30 @@ func (s *Service) Revoke(id int64) error {
 		return fmt.Errorf("revoke gateway_keys: %w", err)
 	}
 	return nil
+}
+
+// RevokeUnused revokes enabled keys that were created older than days ago AND
+// (last_used_at is NULL or last_used_at is older than days ago).
+// Keys used recently are never revoked.
+func (s *Service) RevokeUnused(days int) (int64, error) {
+	if days <= 0 {
+		return 0, fmt.Errorf("days must be positive, got %d", days)
+	}
+	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339Nano)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.db.Exec(`
+		UPDATE gateway_keys
+		SET enabled = 0, revoked_at = ?
+		WHERE enabled = 1
+		  AND revoked_at IS NULL
+		  AND created_at < ?
+		  AND (last_used_at IS NULL OR last_used_at < ?)`,
+		now, cutoff, cutoff,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("revoke unused gateway_keys: %w", err)
+	}
+	return res.RowsAffected()
 }
 
 // Delete removes a gateway key row.

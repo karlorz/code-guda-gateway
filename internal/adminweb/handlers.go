@@ -30,6 +30,7 @@ var staticFS embed.FS
 type Deps struct {
 	Auth           *adminauth.Service
 	GatewayKeys    *gatewaykeys.Service
+	InviteCodes    *gatewaykeys.InviteService
 	ProviderKeys   *providers.KeyRepo
 	Settings       *providers.SettingsRepo
 	Audit          *audit.AuditRepo
@@ -312,6 +313,18 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 		h.handleUsageDaily(w, r)
 	case path == "/admin/api/operator-password" && r.Method == http.MethodPost:
 		h.handleOperatorPassword(w, r)
+	case path == "/admin/api/public-issuance" && r.Method == http.MethodGet:
+		h.handlePublicIssuanceGet(w, r)
+	case path == "/admin/api/public-issuance" && r.Method == http.MethodPatch:
+		h.handlePublicIssuancePatch(w, r)
+	case path == "/admin/api/invite-codes" && r.Method == http.MethodGet:
+		h.handleInviteCodesGet(w, r)
+	case path == "/admin/api/invite-codes" && r.Method == http.MethodPost:
+		h.handleInviteCodesPost(w, r)
+	case strings.HasPrefix(path, "/admin/api/invite-codes/") && strings.HasSuffix(path, "/revoke") && r.Method == http.MethodPost:
+		h.handleInviteCodesRevoke(w, r)
+	case path == "/admin/api/gateway-keys/revoke-unused" && r.Method == http.MethodPost:
+		h.handleGatewayKeysRevokeUnused(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -433,6 +446,121 @@ func (h *Handler) handleOperatorPassword(w http.ResponseWriter, r *http.Request)
 		http.Redirect(w, r, "/admin", http.StatusFound)
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+const settingPublicIssuance = "public_issuance"
+
+func (h *Handler) handlePublicIssuanceGet(w http.ResponseWriter, r *http.Request) {
+	val, err := h.deps.Settings.GetSetting(settingPublicIssuance, "off")
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if val == "" {
+		val = "off"
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"value": val})
+}
+
+func (h *Handler) handlePublicIssuancePatch(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "invalid json")
+		return
+	}
+	val := strings.TrimSpace(body.Value)
+	if val != "off" && val != "open" && val != "ref_code" {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "value must be one of: off, open, ref_code")
+		return
+	}
+	if err := h.deps.Settings.SetCooldownSetting(settingPublicIssuance, val); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	_ = h.deps.Audit.Record(audit.AuditEvent{
+		ActorKind: "admin_web",
+		Action:    "settings.public_issuance.update",
+		Detail:    "value=" + val,
+		ClientIP:  r.RemoteAddr,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"value": val})
+}
+
+func (h *Handler) handleInviteCodesGet(w http.ResponseWriter, r *http.Request) {
+	if h.deps.InviteCodes == nil {
+		writeJSON(w, http.StatusOK, listResponse[gatewaykeys.InviteCode]{Items: []gatewaykeys.InviteCode{}})
+		return
+	}
+	items, err := h.deps.InviteCodes.List()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, listResponse[gatewaykeys.InviteCode]{Items: items})
+}
+
+func (h *Handler) handleInviteCodesPost(w http.ResponseWriter, r *http.Request) {
+	if h.deps.InviteCodes == nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	var body struct {
+		AgentLabelBind string `json:"agent_label_bind"`
+		MaxRedemptions int    `json:"max_redemptions"`
+		ExpiresAt      string `json:"expires_at"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "invalid json")
+		return
+	}
+	if body.MaxRedemptions <= 0 {
+		body.MaxRedemptions = 1
+	}
+	if strings.TrimSpace(body.ExpiresAt) == "" {
+		// Default 30 days
+		body.ExpiresAt = time.Now().UTC().AddDate(0, 0, 30).Format(time.RFC3339Nano)
+	}
+	item, err := h.deps.InviteCodes.Create(body.AgentLabelBind, body.MaxRedemptions, body.ExpiresAt)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	_ = h.deps.Audit.Record(audit.AuditEvent{
+		ActorKind: "admin_web",
+		Action:    "invite_code.create",
+		Detail:    "code=" + item.Code + ";bind=" + item.AgentLabelBind + ";max=" + strconv.Itoa(item.MaxRedemptions),
+		ClientIP:  r.RemoteAddr,
+	})
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (h *Handler) handleInviteCodesRevoke(w http.ResponseWriter, r *http.Request) {
+	if h.deps.InviteCodes == nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	id, err := parseActionID(r.URL.Path, "/admin/api/invite-codes/", "/revoke")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "bad request")
+		return
+	}
+	if err := h.deps.InviteCodes.Revoke(id); err != nil {
+		if errors.Is(err, gatewaykeys.ErrInviteNotFound) {
+			writeAPIError(w, http.StatusNotFound, "not_found", "invite code not found")
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	_ = h.deps.Audit.Record(audit.AuditEvent{
+		ActorKind: "admin_web",
+		Action:    "invite_code.revoke",
+		Detail:    "id=" + strconv.FormatInt(id, 10),
+		ClientIP:  r.RemoteAddr,
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -562,6 +690,33 @@ func (h *Handler) handleGatewayKeysRevoke(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) handleGatewayKeysRevokeUnused(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Days int `json:"days"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		body.Days = 30
+	}
+	if body.Days <= 0 {
+		body.Days = 30
+	}
+	count, err := h.deps.GatewayKeys.RevokeUnused(body.Days)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	_ = h.deps.Audit.Record(audit.AuditEvent{
+		ActorKind: "admin_web",
+		Action:    "gateway_keys.revoke_unused",
+		Detail:    "days=" + strconv.Itoa(body.Days) + ";revoked_count=" + strconv.FormatInt(count, 10),
+		ClientIP:  r.RemoteAddr,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "ok",
+		"revoked_count": count,
+	})
 }
 
 func (h *Handler) handleGatewayKeysDelete(w http.ResponseWriter, r *http.Request) {

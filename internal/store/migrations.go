@@ -52,6 +52,10 @@ var migrations = []migration{
 		id:  "0010",
 		sql: migration0010,
 	},
+	{
+		id:  "0011",
+		sql: migration0011,
+	},
 }
 
 const migration0002 = `
@@ -217,6 +221,57 @@ CREATE TABLE IF NOT EXISTS oauth_grants (
 );
 
 ALTER TABLE gateway_keys ADD COLUMN oauth_owned INTEGER NOT NULL DEFAULT 0;
+`
+
+const migration0011 = `
+ALTER TABLE gateway_keys ADD COLUMN agent_label TEXT NOT NULL DEFAULT '';
+ALTER TABLE gateway_keys ADD COLUMN issued_via TEXT NOT NULL DEFAULT 'operator';
+ALTER TABLE gateway_keys ADD COLUMN ref_code_id INTEGER;
+
+CREATE TABLE IF NOT EXISTS invite_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  agent_label_bind TEXT NOT NULL DEFAULT '',
+  max_redemptions INTEGER NOT NULL,
+  redemption_count INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_codes (
+  code_hash TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL,
+  redirect_uri TEXT NOT NULL,
+  code_challenge TEXT NOT NULL,
+  code_challenge_method TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  issued_via TEXT NOT NULL DEFAULT 'operator',
+  agent_label TEXT NOT NULL DEFAULT '',
+  ref_code_id INTEGER
+);
+
+ALTER TABLE oauth_codes ADD COLUMN issued_via TEXT NOT NULL DEFAULT 'operator';
+ALTER TABLE oauth_codes ADD COLUMN agent_label TEXT NOT NULL DEFAULT '';
+ALTER TABLE oauth_codes ADD COLUMN ref_code_id INTEGER;
+
+UPDATE gateway_keys
+SET issued_via = 'operator',
+    agent_label = CASE
+      WHEN name LIKE 'oauth:%' THEN SUBSTR(name, 7)
+      ELSE name
+    END
+WHERE agent_label = '' OR issued_via = '';
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT NOT NULL PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO settings (key, value, updated_at)
+VALUES ('public_issuance', 'off', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 `
 
 const migration0001 = `
