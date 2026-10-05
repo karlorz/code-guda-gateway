@@ -69,8 +69,8 @@ describe('GatewayKeysPage mutations', () => {
       throw new Error(`unexpected ${path}`);
     });
     renderWithClient(<GatewayKeysPage />);
-    await screen.findByRole('button', { name: /Enable/i });
-    fireEvent.click(screen.getByRole('button', { name: /Enable/i }));
+    await screen.findByText('ops');
+    fireEvent.click(screen.getByRole('button', { name: 'Enable' }));
     await waitFor(() => {
       expect(vi.mocked(client.apiFetch)).toHaveBeenCalledWith('/admin/api/gateway-keys/7', {
         method: 'PATCH',
