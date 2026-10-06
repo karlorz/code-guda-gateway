@@ -58,13 +58,13 @@ export function GatewayKeysPage() {
   // Filter logic
   const filteredRows = allRows.filter((row) => {
     const record = row as Record<string, unknown>;
+    const enabled = valueOf<boolean>(record, 'Enabled', 'enabled', false);
     const revoked = valueOf<string | undefined>(record, 'RevokedAt', 'revoked_at', undefined);
     const issuedVia = valueOf<string>(record, 'IssuedVia', 'issued_via', 'operator');
 
     switch (filter) {
       case 'Enabled':
-        // Default: hide revoked stale keys; disabled-but-live keys stay visible.
-        return !revoked;
+        return enabled && !revoked;
       case 'Revoked':
         return Boolean(revoked);
       case 'All':

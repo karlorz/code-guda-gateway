@@ -7,7 +7,7 @@ RUN bun install --frozen-lockfile
 COPY web/admin/ ./
 RUN bun run build
 
-FROM golang:1.25-bookworm AS go-builder
+FROM golang:1.26-bookworm AS go-builder
 WORKDIR /src
 ARG VERSION=dev
 ARG COMMIT=none

@@ -17,7 +17,7 @@ SKIP_SERVICE_RESTART="${SKIP_SERVICE_RESTART:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 PRINT_PRIVILEGE_MODE=0
 TEST_MODE="${CODE_GUDA_GATEWAY_TEST_MODE:-0}"
-GO_VERSION="${GO_VERSION:-1.25.0}"
+GO_VERSION="${GO_VERSION:-1.26.0}"
 INSTALL_PREREQS="${INSTALL_PREREQS:-1}"
 APT_UPDATED=0
 ARTIFACT_BASE="${ARTIFACT_BASE:-}"
@@ -59,7 +59,7 @@ Environment:
   CODE_GUDA_GATEWAY_FAKE_EUID
                              Test-only override for --print-privilege-mode.
   INSTALL_PREREQS=0          Verify prerequisites only; do not install missing tools.
-  GO_VERSION=1.25.0          Go version installed from go.dev when go is missing.
+  GO_VERSION=1.26.0          Go version installed from go.dev when go is missing.
 USAGE
 }
 

@@ -69,6 +69,7 @@ describe('GatewayKeysPage mutations', () => {
       throw new Error(`unexpected ${path}`);
     });
     renderWithClient(<GatewayKeysPage />);
+    fireEvent.click(screen.getByRole('button', { name: 'All' }));
     await screen.findByText('ops');
     fireEvent.click(screen.getByRole('button', { name: 'Enable' }));
     await waitFor(() => {
@@ -77,5 +78,25 @@ describe('GatewayKeysPage mutations', () => {
         body: JSON.stringify({ enabled: true }),
       });
     });
+  });
+
+  it('Enabled chip hides disabled rows until All is selected', async () => {
+    vi.mocked(client.apiFetch).mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/admin/api/gateway-keys' && !init?.method) {
+        return {
+          items: [
+            listItem,
+            { ...listItem, ID: 8, Name: 'idle', Enabled: false },
+          ],
+          page: { limit: 25, offset: 0 },
+        };
+      }
+      throw new Error(`unexpected ${path}`);
+    });
+    renderWithClient(<GatewayKeysPage />);
+    await screen.findByText('ops');
+    expect(screen.queryByText('idle')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'All' }));
+    expect(await screen.findByText('idle')).toBeInTheDocument();
   });
 });
