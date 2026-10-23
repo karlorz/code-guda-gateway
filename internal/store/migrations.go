@@ -56,6 +56,7 @@ var migrations = []migration{
 		id:  "0011",
 		sql: migration0011,
 	},
+	{id: "0012", sql: migration0012},
 }
 
 const migration0002 = `
@@ -272,6 +273,26 @@ CREATE TABLE IF NOT EXISTS settings (
 
 INSERT OR IGNORE INTO settings (key, value, updated_at)
 VALUES ('public_issuance', 'off', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+`
+
+// Existing OAuth grants are service-specific opaque keys, not portable JWTs.
+// NewServer binds only those preexisting rows to the configured canonical MCP
+// resource once; runtime verification never treats a missing audience as valid.
+const migration0012 = `
+ALTER TABLE oauth_codes ADD COLUMN resource TEXT NOT NULL DEFAULT '';
+ALTER TABLE oauth_codes ADD COLUMN scope TEXT NOT NULL DEFAULT 'mcp offline_access';
+ALTER TABLE oauth_grants ADD COLUMN resource TEXT NOT NULL DEFAULT '';
+ALTER TABLE oauth_grants ADD COLUMN scope TEXT NOT NULL DEFAULT 'mcp offline_access';
+ALTER TABLE oauth_grants ADD COLUMN family_id TEXT NOT NULL DEFAULT '';
+UPDATE oauth_grants SET family_id = 'legacy-' || gateway_key_id WHERE family_id = '';
+CREATE TABLE oauth_refresh_history (
+  refresh_hash TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL,
+  gateway_key_id INTEGER NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX idx_oauth_refresh_history_family ON oauth_refresh_history(family_id);
+INSERT INTO oauth_refresh_history SELECT refresh_hash, family_id, gateway_key_id, refresh_expires_at FROM oauth_grants;
 `
 
 const migration0001 = `

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"code-guda-gateway/internal/gatewaykeys"
@@ -21,9 +22,13 @@ import (
 )
 
 type Server struct {
-	issuer       string
-	passwordHash string
-	db           *sql.DB
+	issuer             string
+	passwordHash       string
+	db                 *sql.DB
+	metadataClient     *http.Client
+	registrationMu     sync.Mutex
+	registrationWindow time.Time
+	registrations      int
 }
 
 // NewServer returns an OAuth Server if both issuer and passwordHash are well-formed.
@@ -33,13 +38,22 @@ func NewServer(issuer, passwordHash string, db *sql.DB) *Server {
 	if !ok {
 		return nil
 	}
+	if db == nil {
+		return nil
+	}
 	if err := ValidatePasswordHash(passwordHash); err != nil {
 		return nil
 	}
+	// Bind only existing service-owned grants/codes during startup. Opaque
+	// OAuth keys are already distinguished from provider/host credentials.
+	if err := bindLegacyGrants(db, cleanIssuer+"/mcp"); err != nil {
+		return nil
+	}
 	return &Server{
-		issuer:       cleanIssuer,
-		passwordHash: passwordHash,
-		db:           db,
+		metadataClient: newMetadataClient(),
+		issuer:         cleanIssuer,
+		passwordHash:   passwordHash,
+		db:             db,
 	}
 }
 
@@ -95,7 +109,7 @@ func (s *Server) handleProtectedResource(w http.ResponseWriter, r *http.Request)
 		"resource":                 s.issuer + "/mcp",
 		"authorization_servers":    []string{s.issuer},
 		"bearer_methods_supported": []string{"header"},
-		"scopes_supported":         []string{"mcp", "offline_access"},
+		"scopes_supported":         []string{"mcp", "offline_access", "config:write"},
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
@@ -108,10 +122,11 @@ func (s *Server) handleAuthServerMeta(w http.ResponseWriter, r *http.Request) {
 		"authorization_endpoint":                s.issuer + "/authorize",
 		"token_endpoint":                        s.issuer + "/token",
 		"registration_endpoint":                 s.issuer + "/register",
+		"client_id_metadata_document_supported": true,
 		"code_challenge_methods_supported":      []string{"S256"},
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"response_types_supported":              []string{"code"},
-		"scopes_supported":                      []string{"mcp", "offline_access"},
+		"scopes_supported":                      []string{"mcp", "offline_access", "config:write"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -168,12 +183,17 @@ type registerResponse struct {
 
 // POST /register
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRegistration() {
+		w.Header().Set("Retry-After", "60")
+		s.jsonOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable", "registration rate limit")
+		return
+	}
 	var req registerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384)).Decode(&req); err != nil {
 		s.jsonOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid json body")
 		return
 	}
-	if len(req.RedirectURIs) == 0 {
+	if len(req.RedirectURIs) == 0 || len(req.RedirectURIs) > 16 || len(req.ClientName) > 256 {
 		s.jsonOAuthError(w, http.StatusBadRequest, "invalid_redirect_uri", "redirect_uris required")
 		return
 	}
@@ -224,6 +244,9 @@ type oauthClient struct {
 }
 
 func (s *Server) lookupClient(clientID string) (*oauthClient, error) {
+	if strings.HasPrefix(clientID, "https://") {
+		return s.fetchMetadataClient(clientID)
+	}
 	var c oauthClient
 	var urisJSON string
 	var name sql.NullString
@@ -245,7 +268,7 @@ func (s *Server) lookupClient(clientID string) (*oauthClient, error) {
 	return &c, nil
 }
 
-func (s *Server) renderAuthorizeForm(w http.ResponseWriter, status int, client *oauthClient, redirectURI, state, codeChallenge, codeChallengeMethod, scope, agentLabel, inviteCode, errMsg string) {
+func (s *Server) renderAuthorizeForm(w http.ResponseWriter, status int, client *oauthClient, redirectURI, state, codeChallenge, codeChallengeMethod, scope, resource, agentLabel, inviteCode, errMsg string) {
 	displayName := "this client"
 	if client != nil && strings.TrimSpace(client.ClientName) != "" {
 		displayName = strings.TrimSpace(client.ClientName)
@@ -260,6 +283,7 @@ func (s *Server) renderAuthorizeForm(w http.ResponseWriter, status int, client *
 		escapedClientID = html.EscapeString(client.ClientID)
 	}
 	escapedScope := html.EscapeString(scope)
+	escapedResource := html.EscapeString(resource)
 	escapedAgentLabel := html.EscapeString(agentLabel)
 	escapedInviteCode := html.EscapeString(inviteCode)
 
@@ -324,6 +348,8 @@ button:hover { background: #2563eb; }
 <div class="card">
   <h1>Authorize %s</h1>
   <p>Authorize <strong>%s</strong> to access Model Context Protocol tools via this gateway.</p>
+  <p>Client identity: <strong>%s</strong></p>
+  <p>Requested permissions: <strong>%s</strong></p>
   <p>This operator password is set at /admin after admin sign-in and is not the admin token.</p>
   %s
   <form method="POST" action="/authorize">
@@ -333,13 +359,14 @@ button:hover { background: #2563eb; }
     <input type="hidden" name="code_challenge" value="%s">
     <input type="hidden" name="code_challenge_method" value="%s">
     <input type="hidden" name="scope" value="%s">
+    <input type="hidden" name="resource" value="%s">
     <input type="hidden" name="agent_label" value="%s">
     %s
     <button type="submit">Approve Access</button>
   </form>
 </div>
 </body>
-</html>`, escapedDisplayName, escapedDisplayName, errorSection, escapedClientID, escapedRedirectURI, escapedState, escapedCodeChallenge, escapedCodeChallengeMethod, escapedScope, escapedAgentLabel, fieldsHTML)
+</html>`, escapedDisplayName, escapedDisplayName, escapedClientID, escapedScope, errorSection, escapedClientID, escapedRedirectURI, escapedState, escapedCodeChallenge, escapedCodeChallengeMethod, escapedScope, escapedResource, escapedAgentLabel, fieldsHTML)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -356,7 +383,16 @@ func (s *Server) handleAuthorizeGet(w http.ResponseWriter, r *http.Request) {
 	codeChallenge := q.Get("code_challenge")
 	codeChallengeMethod := q.Get("code_challenge_method")
 	state := q.Get("state")
-	scope := q.Get("scope")
+	scope, ok := normalizeScope(q.Get("scope"))
+	resource := s.issuer + "/mcp"
+	if !ok {
+		s.jsonOAuthError(w, 400, "invalid_scope", "unsupported scope")
+		return
+	}
+	if !s.validResource(q["resource"]) {
+		s.jsonOAuthError(w, 400, "invalid_target", "invalid resource")
+		return
+	}
 	inviteCode := q.Get("invite")
 	agentLabel := q.Get("agent_label")
 
@@ -376,7 +412,7 @@ func (s *Server) handleAuthorizeGet(w http.ResponseWriter, r *http.Request) {
 
 	validRedirect := false
 	for _, u := range client.RedirectURIs {
-		if u == redirectURI {
+		if redirectMatches(u, redirectURI) {
 			validRedirect = true
 			break
 		}
@@ -395,11 +431,12 @@ func (s *Server) handleAuthorizeGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.renderAuthorizeForm(w, http.StatusOK, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, agentLabel, inviteCode, "")
+	s.renderAuthorizeForm(w, http.StatusOK, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, resource, agentLabel, inviteCode, "")
 }
 
 // POST /authorize
 func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16384)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form data", http.StatusBadRequest)
 		return
@@ -409,7 +446,16 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 	state := r.FormValue("state")
 	codeChallenge := r.FormValue("code_challenge")
 	codeChallengeMethod := r.FormValue("code_challenge_method")
-	scope := r.FormValue("scope")
+	scope, ok := normalizeScope(r.FormValue("scope"))
+	resource := s.issuer + "/mcp"
+	if !ok {
+		s.jsonOAuthError(w, 400, "invalid_scope", "unsupported scope")
+		return
+	}
+	if !s.validResource(r.Form["resource"]) {
+		s.jsonOAuthError(w, 400, "invalid_target", "invalid resource")
+		return
+	}
 	password := r.FormValue("password")
 	agentLabel := strings.TrimSpace(r.FormValue("agent_label"))
 	inviteCode := strings.TrimSpace(r.FormValue("invite"))
@@ -430,7 +476,7 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 
 	validRedirect := false
 	for _, u := range client.RedirectURIs {
-		if u == redirectURI {
+		if redirectMatches(u, redirectURI) {
 			validRedirect = true
 			break
 		}
@@ -451,6 +497,11 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	operatorApproved := password != "" && VerifyPassword(password, expectedHash)
+	if hasScope(scope, "config:write") && !operatorApproved {
+		s.jsonOAuthError(w, http.StatusBadRequest, "invalid_scope", "configuration permission requires operator consent")
+		return
+	}
 	mode := s.publicIssuanceMode()
 
 	var issuedVia string
@@ -463,13 +514,13 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 	//    If bind nonempty, redeeming agent_label must match bind. issued_via=ref_code, store ref_code_id on oauth_codes.
 	// 4. Else invalid password as today.
 
-	if password != "" && VerifyPassword(password, expectedHash) {
+	if operatorApproved {
 		issuedVia = "operator"
 	} else if mode == "open" {
 		issuedVia = "open_register"
 	} else if mode == "ref_code" {
 		if inviteCode == "" {
-			s.renderAuthorizeForm(w, http.StatusUnauthorized, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, agentLabel, inviteCode, "Invite code required.")
+			s.renderAuthorizeForm(w, http.StatusUnauthorized, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, resource, agentLabel, inviteCode, "Invite code required.")
 			return
 		}
 		redeemed, err := gatewaykeys.RedeemTx(s.db, inviteCode, agentLabel)
@@ -489,14 +540,14 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 			default:
 				msg = "Failed to redeem invite code."
 			}
-			s.renderAuthorizeForm(w, http.StatusUnauthorized, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, agentLabel, inviteCode, msg)
+			s.renderAuthorizeForm(w, http.StatusUnauthorized, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, resource, agentLabel, inviteCode, msg)
 			return
 		}
 		issuedVia = "ref_code"
 		refCodeID = &redeemed.ID
 	} else {
 		// Public issuance is off or operator password incorrect
-		s.renderAuthorizeForm(w, http.StatusUnauthorized, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, agentLabel, inviteCode, "Invalid operator password. Please try again.")
+		s.renderAuthorizeForm(w, http.StatusUnauthorized, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, resource, agentLabel, inviteCode, "Invalid operator password. Please try again.")
 		return
 	}
 
@@ -514,9 +565,9 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 	expiresAt := now.Add(5 * time.Minute).Format(time.RFC3339Nano)
 
 	_, err = s.db.Exec(`
-		INSERT INTO oauth_codes (code_hash, client_id, redirect_uri, code_challenge, code_challenge_method, expires_at, created_at, issued_via, agent_label, ref_code_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		codeHash, clientID, redirectURI, codeChallenge, codeChallengeMethod, expiresAt, createdAt, issuedVia, agentLabel, refCodeID,
+		INSERT INTO oauth_codes (code_hash, client_id, redirect_uri, code_challenge, code_challenge_method, expires_at, created_at, issued_via, agent_label, ref_code_id, resource, scope)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		codeHash, clientID, redirectURI, codeChallenge, codeChallengeMethod, expiresAt, createdAt, issuedVia, agentLabel, refCodeID, resource, scope,
 	)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -546,8 +597,13 @@ func redeemedBindHint(db *sql.DB, code string) string {
 }
 
 func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16384)
 	if err := r.ParseForm(); err != nil {
 		s.jsonOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid form data")
+		return
+	}
+	if !s.validResource(r.Form["resource"]) {
+		s.jsonOAuthError(w, 400, "invalid_target", "resource must identify this MCP server")
 		return
 	}
 	grantType := r.FormValue("grant_type")
@@ -583,12 +639,12 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rowClientID, rowRedirectURI, rowCodeChallenge, rowCodeChallengeMethod, rowExpiresAt string
-	var rowIssuedVia, rowAgentLabel string
+	var rowIssuedVia, rowAgentLabel, resource, scope string
 	var rowRefCodeID sql.NullInt64
 	err = txCode.QueryRow(`
-		SELECT client_id, redirect_uri, code_challenge, code_challenge_method, expires_at, issued_via, agent_label, ref_code_id
+		SELECT client_id, redirect_uri, code_challenge, code_challenge_method, expires_at, issued_via, agent_label, ref_code_id, resource, scope
 		FROM oauth_codes WHERE code_hash = ?`, codeHash,
-	).Scan(&rowClientID, &rowRedirectURI, &rowCodeChallenge, &rowCodeChallengeMethod, &rowExpiresAt, &rowIssuedVia, &rowAgentLabel, &rowRefCodeID)
+	).Scan(&rowClientID, &rowRedirectURI, &rowCodeChallenge, &rowCodeChallengeMethod, &rowExpiresAt, &rowIssuedVia, &rowAgentLabel, &rowRefCodeID, &resource, &scope)
 	if errors.Is(err, sql.ErrNoRows) {
 		_ = txCode.Rollback()
 		s.jsonOAuthError(w, http.StatusBadRequest, "invalid_grant", "invalid or expired code")
@@ -615,7 +671,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if rowClientID != clientID || rowRedirectURI != redirectURI {
+	if resource != s.issuer+"/mcp" || rowClientID != clientID || rowRedirectURI != redirectURI {
 		s.jsonOAuthError(w, http.StatusBadRequest, "invalid_grant", "client_id or redirect_uri mismatch")
 		return
 	}
@@ -643,7 +699,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	// Get client details for key name
 	var clientName sql.NullString
 	_ = tx.QueryRow(`SELECT client_name FROM oauth_clients WHERE client_id = ?`, clientID).Scan(&clientName)
-	keyName := "oauth:" + clientID
+	keyName := "oauth:" + rowAgentLabel
 	if clientName.Valid && strings.TrimSpace(clientName.String) != "" {
 		keyName = "oauth:" + strings.TrimSpace(clientName.String)
 	}
@@ -683,17 +739,22 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	accessExpiresAt := now.Add(2 * time.Hour).Format(time.RFC3339Nano)
 	refreshExpiresAt := now.Add(14 * 24 * time.Hour).Format(time.RFC3339Nano)
 	createdAt := now.Format(time.RFC3339Nano)
+	familyID := refreshHash
 
 	_, err = tx.Exec(`
-		INSERT INTO oauth_grants (refresh_hash, gateway_key_id, client_id, access_expires_at, refresh_expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		refreshHash, displayKey.ID, clientID, accessExpiresAt, refreshExpiresAt, createdAt,
+		INSERT INTO oauth_grants (refresh_hash, gateway_key_id, client_id, access_expires_at, refresh_expires_at, created_at, resource, scope, family_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		refreshHash, displayKey.ID, clientID, accessExpiresAt, refreshExpiresAt, createdAt, resource, scope, familyID,
 	)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
+	if _, err := tx.Exec(`INSERT INTO oauth_refresh_history VALUES (?, ?, ?, ?)`, refreshHash, familyID, displayKey.ID, refreshExpiresAt); err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -704,7 +765,10 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		"token_type":    "Bearer",
 		"expires_in":    7200,
 		"refresh_token": rawRefreshToken,
-		"scope":         "mcp offline_access",
+		"scope":         scope,
+	}
+	if !hasScope(scope, "offline_access") {
+		delete(resp, "refresh_token")
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -732,12 +796,31 @@ func (s *Server) handleTokenRefreshToken(w http.ResponseWriter, r *http.Request)
 
 	// Single atomic check and delete of old refresh grant
 	var oldKeyID int64
-	var grantClientID, refreshExpiresAtStr string
+	var grantClientID, refreshExpiresAtStr, resource, scope, familyID string
 	err = tx.QueryRow(`
-		SELECT gateway_key_id, client_id, refresh_expires_at
+		SELECT gateway_key_id, client_id, refresh_expires_at, resource, scope, family_id
 		FROM oauth_grants WHERE refresh_hash = ?`, refreshHash,
-	).Scan(&oldKeyID, &grantClientID, &refreshExpiresAtStr)
+	).Scan(&oldKeyID, &grantClientID, &refreshExpiresAtStr, &resource, &scope, &familyID)
 	if errors.Is(err, sql.ErrNoRows) {
+		// Retained hashes make a replay revoke every successor, not just fail
+		// lookup. Never retain or log raw refresh credentials.
+		var reusedFamily, expires string
+		if tx.QueryRow(`SELECT family_id, expires_at FROM oauth_refresh_history WHERE refresh_hash = ?`, refreshHash).Scan(&reusedFamily, &expires) == nil {
+			if exp, e := time.Parse(time.RFC3339Nano, expires); e == nil && time.Now().UTC().Before(exp) {
+				if _, e = tx.Exec(`UPDATE gateway_keys SET enabled = 0 WHERE id IN (SELECT gateway_key_id FROM oauth_refresh_history WHERE family_id = ?)`, reusedFamily); e != nil {
+					http.Error(w, "internal error", 500)
+					return
+				}
+				if _, e = tx.Exec(`DELETE FROM oauth_grants WHERE family_id = ?`, reusedFamily); e != nil {
+					http.Error(w, "internal error", 500)
+					return
+				}
+				if e = tx.Commit(); e != nil {
+					http.Error(w, "internal error", 500)
+					return
+				}
+			}
+		}
 		s.jsonOAuthError(w, http.StatusBadRequest, "invalid_grant", "invalid refresh token")
 		return
 	}
@@ -746,7 +829,7 @@ func (s *Server) handleTokenRefreshToken(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if clientID != "" && grantClientID != clientID {
+	if resource != s.issuer+"/mcp" || !hasScope(scope, "offline_access") || (clientID != "" && grantClientID != clientID) {
 		s.jsonOAuthError(w, http.StatusBadRequest, "invalid_grant", "client_id mismatch")
 		return
 	}
@@ -826,19 +909,23 @@ func (s *Server) handleTokenRefreshToken(w http.ResponseWriter, r *http.Request)
 
 	now := time.Now().UTC()
 	accessExpiresAt := now.Add(2 * time.Hour).Format(time.RFC3339Nano)
-	newRefreshExpiresAt := now.Add(14 * 24 * time.Hour).Format(time.RFC3339Nano)
+	newRefreshExpiresAt := refreshExpiresAtStr // absolute family lifetime, not a sliding expiry
 	createdAt := now.Format(time.RFC3339Nano)
 
 	_, err = tx.Exec(`
-		INSERT INTO oauth_grants (refresh_hash, gateway_key_id, client_id, access_expires_at, refresh_expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		newRefreshHash, displaySuccessorKey.ID, grantClientID, accessExpiresAt, newRefreshExpiresAt, createdAt,
+		INSERT INTO oauth_grants (refresh_hash, gateway_key_id, client_id, access_expires_at, refresh_expires_at, created_at, resource, scope, family_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		newRefreshHash, displaySuccessorKey.ID, grantClientID, accessExpiresAt, newRefreshExpiresAt, createdAt, resource, scope, familyID,
 	)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
+	if _, err := tx.Exec(`INSERT INTO oauth_refresh_history VALUES (?, ?, ?, ?)`, newRefreshHash, familyID, displaySuccessorKey.ID, newRefreshExpiresAt); err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		s.jsonOAuthError(w, http.StatusBadRequest, "invalid_grant", "concurrent update conflict")
 		return
@@ -849,7 +936,10 @@ func (s *Server) handleTokenRefreshToken(w http.ResponseWriter, r *http.Request)
 		"token_type":    "Bearer",
 		"expires_in":    7200,
 		"refresh_token": newRawRefreshToken,
-		"scope":         "mcp offline_access",
+		"scope":         scope,
+	}
+	if !hasScope(scope, "offline_access") {
+		delete(resp, "refresh_token")
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -864,4 +954,60 @@ func (s *Server) jsonOAuthError(w http.ResponseWriter, status int, errCode, errD
 		"error":             errCode,
 		"error_description": errDesc,
 	})
+}
+
+// Missing resource remains compatible for older single-resource clients. An
+// explicit target must match exactly; every persisted grant has a target.
+func (s *Server) validResource(values []string) bool {
+	return len(values) == 0 || (len(values) == 1 && values[0] == s.issuer+"/mcp")
+}
+
+func hasScope(scope, want string) bool {
+	for _, v := range strings.Fields(scope) {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeScope(raw string) (string, bool) {
+	if raw == "" {
+		return "mcp offline_access", true
+	} // existing client default
+	seen := map[string]bool{}
+	for _, v := range strings.Fields(raw) {
+		if v != "mcp" && v != "offline_access" && v != "config:write" {
+			return "", false
+		}
+		seen[v] = true
+	}
+	if !seen["mcp"] {
+		return "", false
+	}
+	out := []string{"mcp"}
+	for _, v := range []string{"offline_access", "config:write"} {
+		if seen[v] {
+			out = append(out, v)
+		}
+	}
+	return strings.Join(out, " "), true
+}
+
+func (s *Server) ResourceURL() string { return s.issuer + "/mcp" }
+
+// A global bound is intentional: Caddy is the only peer on the production
+// listener, and untrusted forwarding headers must not bypass registration limits.
+func (s *Server) allowRegistration() bool {
+	s.registrationMu.Lock()
+	defer s.registrationMu.Unlock()
+	if time.Since(s.registrationWindow) >= time.Minute {
+		s.registrationWindow = time.Now()
+		s.registrations = 0
+	}
+	if s.registrations >= 60 {
+		return false
+	}
+	s.registrations++
+	return true
 }

@@ -26,7 +26,7 @@ func ValidateIssuer(raw string) (string, bool) {
 	if u.Path != "" && u.Path != "/" {
 		return "", false
 	}
-	if u.Host == "" {
+	if u.Host == "" || u.User != nil || u.Fragment != "" || strings.Contains(u.Host, "*") {
 		return "", false
 	}
 
@@ -57,7 +57,7 @@ func ValidateRedirectURI(raw string) bool {
 	if err != nil {
 		return false
 	}
-	if u.Host == "" {
+	if u.Host == "" || u.User != nil || u.Fragment != "" || strings.Contains(u.Host, "*") {
 		return false
 	}
 	hostname := u.Hostname()
@@ -74,4 +74,20 @@ func ValidateRedirectURI(raw string) bool {
 func isLoopbackHost(host string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	return host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]"
+}
+
+// RFC 8252 permits a varying port for a registered IP-literal loopback
+// redirect, while scheme, IP, path and query still match exactly.
+func redirectMatches(registered, actual string) bool {
+	if registered == actual {
+		return true
+	}
+	a, e1 := url.Parse(registered)
+	b, e2 := url.Parse(actual)
+	if e1 != nil || e2 != nil || !ValidateRedirectURI(actual) {
+		return false
+	}
+	return a.Scheme == "http" && b.Scheme == "http" &&
+		(a.Hostname() == "127.0.0.1" || a.Hostname() == "::1") &&
+		a.Hostname() == b.Hostname() && a.EscapedPath() == b.EscapedPath() && a.RawQuery == b.RawQuery
 }
