@@ -39,7 +39,7 @@ retain their previously issued `mcp offline_access` permissions.
 
 Supported scopes are `mcp`, `offline_access`, and `config:write`. Omitting scopes
 retains the legacy `mcp offline_access` default. A request with only `mcp` does
-not receive a refresh token. Only operator-password consent may grant
+not receive a refresh token. Only authenticated operator consent (password or an allowed GitHub account) may grant
 `config:write`; public/invite issuance cannot obtain it. GrokSearch checks this
 permission before `switch_model` and mutating `toggle_builtin_tools` calls.
 Existing manually issued host credentials and local stdio keep their operator
@@ -69,3 +69,62 @@ refresh replay/family invalidation, redirect validation, and real HTTP MCP calls
 with read-only, configuration, manual-host and static-host credentials. Run
 `go test -race ./...` plus the installer tests. GrokSearch's pytest suite supplies
 the resource-server regression coverage.
+
+## GitHub operator sign-in
+
+Settings → **GitHub operator sign-in** optionally adds GitHub alongside the
+existing operator password on `/authorize`. It authenticates the operator only;
+it does not sign into the admin console, change existing grants, or approve an
+MCP client automatically. After GitHub sign-in the operator must review the
+original client identity and requested permissions and click **Approve Access**.
+An allowed GitHub operator can explicitly approve `config:write`, just as an
+operator using the password can. Public/invite grants remain unable to do so.
+
+Create a dedicated GitHub **OAuth App** with homepage set to the gateway origin.
+Set its authorization callback URL to the value shown in Settings, for example:
+
+```text
+https://search.karldigi.dev/authorize/github/callback
+```
+
+While signed into the gateway admin console, enter the app's client ID and
+client secret and an explicit list of allowed **numeric GitHub user IDs**, then
+enable sign-in. An account's public `id` is available from
+`https://api.github.com/users/USERNAME`; usernames and email addresses are not
+access-control identities because they may change or be reassigned. No account
+is implicitly allowed. A new OAuth App needs no repository or email scopes for
+this identity check. Use a dedicated app to avoid previously granted broader
+scopes from other integrations. Complete GitHub login and any consent in the
+operator's own browser; agents never need the operator password or GitHub token.
+
+The app secret is encrypted in SQLite with the existing master key. Settings
+reads expose only `secret_configured`; leaving the secret blank preserves it
+for the same client ID. Changing the client ID requires that app's secret.
+The authenticated, CSRF-protected settings endpoint is
+`GET|PATCH /admin/api/settings/github-operator`. Changing or disabling these
+settings invalidates outstanding GitHub login/consent proofs, without revoking
+already issued MCP grants. Password login remains available.
+
+GitHub uses an expiring, browser-bound, one-use state and PKCE S256. The fixed
+callback is derived from the configured issuer, never an inbound Host header or
+user-supplied return URL. Token exchange and identity lookup are fixed-host,
+verified-TLS requests with no redirects or ambient proxy, bounded time and
+64 KiB response limits. GitHub access tokens are used only for the identity
+lookup and are never stored or returned. The resulting one-use consent proof
+binds the browser, client, redirect, original MCP state/PKCE, resource, scope,
+agent label and invite value. It cannot approve another client or altered
+permissions. Outstanding flows expire after ten minutes per phase; only hashed
+proofs/browser bindings and encrypted transient payloads are persisted.
+
+Migration 0013 adds only `operator_login_flows`; it does not rewrite existing
+credentials. Production rollout must suppress access logging for both
+`/authorize` and `/authorize/*` (including the GitHub callback), as well as token
+and CLI callback paths. Use the reviewed gateway template or update the
+stack-owned Caddy template before enabling GitHub. Keep app secrets, codes,
+state/proof values and cookie values out of logs and diagnostic output.
+
+Automated tests mock GitHub's fixed endpoints to exercise success, denied IDs,
+state/cookie mismatches, expiry, replay, permission tampering, settings rotation,
+concurrent use, response limits and secret redaction. Live GitHub acceptance
+requires a configured OAuth App and an operator browser login; passing mocked
+tests alone does not prove that external setup is correct.

@@ -1,4 +1,7 @@
 {{DOMAIN}} {
+	# OAuth callback codes and consent parameters must not enter access logs.
+	@sensitive path /authorize /authorize/* /token /auth/cli/*
+	log_skip @sensitive
 	handle /internal* {
 		respond 404
 	}

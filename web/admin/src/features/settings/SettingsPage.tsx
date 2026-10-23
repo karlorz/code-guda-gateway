@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '../../api/client';
 import type { DisplayTimezoneSetting, InviteCode, ListResponse, PublicIssuanceMode, PublicIssuanceSetting } from '../../api/types';
 import { Badge, Button, PageHeader, Panel } from '../../components/ui';
+import { GitHubOperatorPanel } from './GitHubOperatorPanel';
 import { displayTimezoneQueryKey, useDisplayTimezone } from '../../lib/useDisplayTimezone';
 
 export function SettingsPage() {
@@ -117,7 +118,7 @@ export function SettingsPage() {
       />
       <Panel title="MCP connector consent">
         <p className="mb-3 max-w-3xl text-sm text-zinc-600">
-          This password is what ChatGPT, Doubao, and Cursor type on /authorize. It is not the admin token and not a gsk_ gateway key. The old value cannot be shown. Saving replaces it for the next consent check.
+          Use this password to approve MCP connections, or configure GitHub sign-in below. Enter it yourself on the consent page; never share it with an agent. It is separate from the admin token and gateway keys. Saving replaces the password for the next consent check.
         </p>
         <div className="grid max-w-xl gap-3">
           <label className="grid gap-1 text-sm" htmlFor="operator-password">
@@ -161,9 +162,10 @@ export function SettingsPage() {
           </Button>
         </div>
       </Panel>
+      <GitHubOperatorPanel />
       <Panel title="Public issuance">
         <p className="mb-3 max-w-3xl text-sm text-zinc-600">
-          Control how agents mint MCP gateway keys. When off, only operator password mints. When open, any agent can authorize without a password. When ref_code, an invite code is required unless an operator password is supplied.
+          Control how agents mint MCP gateway keys. When off, only signed-in operators can approve access. When open, any agent can authorize without a password. When ref_code, an invite code is required unless the operator signs in.
         </p>
         <div className="flex flex-wrap gap-4 text-sm">
           <label className="flex items-center gap-2 cursor-pointer">
@@ -177,7 +179,7 @@ export function SettingsPage() {
                 setIssuanceMode('off');
               }}
             />
-            <span className="font-medium text-zinc-900">Off (operator password only)</span>
+            <span className="font-medium text-zinc-900">Off (operators only)</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer">
             <input

@@ -15,6 +15,7 @@ import (
 	"code-guda-gateway/internal/audit"
 	"code-guda-gateway/internal/gatewaykeys"
 	"code-guda-gateway/internal/mcpoauth"
+	"code-guda-gateway/internal/operatorlogin"
 	"code-guda-gateway/internal/providers"
 	"code-guda-gateway/internal/proxy"
 	"code-guda-gateway/internal/usage"
@@ -28,6 +29,7 @@ var staticFS embed.FS
 
 // Deps wires admin UI to backing services.
 type Deps struct {
+	GitHub         *operatorlogin.Service
 	Auth           *adminauth.Service
 	GatewayKeys    *gatewaykeys.Service
 	InviteCodes    *gatewaykeys.InviteService
@@ -311,6 +313,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 		h.handleAuditList(w, r)
 	case path == "/admin/api/usage-daily" && r.Method == http.MethodGet:
 		h.handleUsageDaily(w, r)
+	case path == "/admin/api/settings/github-operator" && (r.Method == http.MethodGet || r.Method == http.MethodPatch):
+		h.handleGitHubOperator(w, r)
 	case path == "/admin/api/operator-password" && r.Method == http.MethodPost:
 		h.handleOperatorPassword(w, r)
 	case path == "/admin/api/public-issuance" && r.Method == http.MethodGet:
@@ -1634,4 +1638,36 @@ func (h *Handler) RenderDashboardHTML(w http.ResponseWriter, r *http.Request) er
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	return h.templates.ExecuteTemplate(w, "dashboard", data)
+}
+
+func (h *Handler) handleGitHubOperator(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if h.deps.GitHub == nil {
+		writeAPIError(w, 503, "unavailable", "GitHub operator setup is unavailable on this instance.")
+		return
+	}
+	if r.Method == http.MethodPatch {
+		var update operatorlogin.Update
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&update) != nil {
+			writeAPIError(w, 400, "bad_request", "Invalid GitHub operator settings.")
+			return
+		}
+		if err := h.deps.GitHub.Save(update); err != nil {
+			if errors.Is(err, operatorlogin.ErrConfig) {
+				writeAPIError(w, 400, "bad_request", err.Error())
+			} else {
+				writeAPIError(w, 500, "save_failed", "Could not save GitHub operator settings.")
+			}
+			return
+		}
+		_ = h.deps.Audit.Record(audit.AuditEvent{ActorKind: "admin_web", Action: "oauth.github_operator.update", Detail: "result=ok", ClientIP: r.RemoteAddr})
+	}
+	status, err := h.deps.GitHub.Status()
+	if err != nil {
+		writeAPIError(w, 500, "read_failed", "Could not read GitHub operator settings.")
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
 }

@@ -57,7 +57,20 @@ var migrations = []migration{
 		sql: migration0011,
 	},
 	{id: "0012", sql: migration0012},
+	{id: "0013", sql: migration0013},
 }
+
+const migration0013 = `
+CREATE TABLE operator_login_flows (
+  token_hash TEXT PRIMARY KEY,
+  browser_hash TEXT NOT NULL,
+  revision TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX operator_login_flows_expiry ON operator_login_flows(expires_at);
+`
 
 const migration0002 = `
 ALTER TABLE admin_tokens ADD COLUMN key_prefix TEXT NOT NULL DEFAULT '';

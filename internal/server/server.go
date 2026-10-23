@@ -16,6 +16,7 @@ import (
 	"code-guda-gateway/internal/config"
 	"code-guda-gateway/internal/gatewaykeys"
 	"code-guda-gateway/internal/mcpoauth"
+	"code-guda-gateway/internal/operatorlogin"
 	"code-guda-gateway/internal/providers"
 	"code-guda-gateway/internal/proxy"
 	"code-guda-gateway/internal/usage"
@@ -52,8 +53,19 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 	}
 	auth := adminauth.NewServiceWithOptions(db, 24*time.Hour, adminauth.Options{CookieSecure: cfg.AdminCookieSecure})
 	quotaRepo := providers.NewQuotaRepo(db)
+	var oauthServer *mcpoauth.Server
+	if cfg.OAuthIssuer != "" && cfg.OAuthPasswordHash != "" {
+		oauthServer = mcpoauth.NewServer(cfg.OAuthIssuer, cfg.OAuthPasswordHash, db)
+	}
+	issuer := ""
+	if oauthServer != nil {
+		issuer = oauthServer.ResourceURL()
+		issuer = strings.TrimSuffix(issuer, "/mcp")
+	}
+	github := operatorlogin.New(db, masterKey, issuer)
 	adminH := adminweb.New(adminweb.Deps{
 		Auth:         auth,
+		GitHub:       github,
 		GatewayKeys:  gatewayKeys,
 		InviteCodes:  gatewaykeys.NewInviteService(db),
 		ProviderKeys: keyRepo,
@@ -71,9 +83,8 @@ func New(cfg config.Config, gatewayKeys *gatewaykeys.Service, db *sql.DB, master
 			MasterKey:    masterKey,
 		},
 	})
-	var oauthServer *mcpoauth.Server
-	if cfg.OAuthIssuer != "" && cfg.OAuthPasswordHash != "" {
-		oauthServer = mcpoauth.NewServer(cfg.OAuthIssuer, cfg.OAuthPasswordHash, db)
+	if oauthServer != nil {
+		oauthServer.GitHub = github
 	}
 	return &Server{
 		proxy:         px,

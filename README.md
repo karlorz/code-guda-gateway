@@ -888,3 +888,7 @@ go build ./cmd/guda-gateway-admin
 CGO_ENABLED=0 go build ./cmd/guda-gateway
 CGO_ENABLED=0 go build ./cmd/guda-gateway-admin
 ```
+
+### MCP consent: password or GitHub
+
+Admin Settings supports optional **GitHub operator sign-in** alongside the operator password. Configure a dedicated GitHub OAuth app and an explicit numeric account-ID allowlist; the secret stays encrypted and sign-in still requires a separate MCP approval. See [MCP authorization](docs/mcp-authorization.md#github-operator-sign-in) for callback setup, permissions, expiry and rollout.
