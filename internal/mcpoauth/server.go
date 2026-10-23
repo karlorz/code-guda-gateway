@@ -18,10 +18,12 @@ import (
 	"time"
 
 	"code-guda-gateway/internal/gatewaykeys"
+	"code-guda-gateway/internal/operatorlogin"
 	"code-guda-gateway/internal/providers"
 )
 
 type Server struct {
+	GitHub             *operatorlogin.Service
 	issuer             string
 	passwordHash       string
 	db                 *sql.DB
@@ -68,6 +70,9 @@ func (s *Server) IsOAuthRoute(r *http.Request) bool {
 		path == "/.well-known/oauth-authorization-server" {
 		return true
 	}
+	if r.Method == http.MethodGet && path == operatorlogin.CallbackPath {
+		return true
+	}
 	if r.Method == http.MethodPost && path == "/register" {
 		return true
 	}
@@ -84,6 +89,8 @@ func (s *Server) IsOAuthRoute(r *http.Request) bool {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	switch {
+	case r.Method == http.MethodGet && path == operatorlogin.CallbackPath:
+		s.handleGitHubCallback(w, r)
 	case (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
 		(path == "/.well-known/oauth-protected-resource" || path == "/.well-known/oauth-protected-resource/mcp"):
 		s.handleProtectedResource(w, r)
@@ -268,7 +275,7 @@ func (s *Server) lookupClient(clientID string) (*oauthClient, error) {
 	return &c, nil
 }
 
-func (s *Server) renderAuthorizeForm(w http.ResponseWriter, status int, client *oauthClient, redirectURI, state, codeChallenge, codeChallengeMethod, scope, resource, agentLabel, inviteCode, errMsg string) {
+func (s *Server) renderAuthorizeForm(w http.ResponseWriter, status int, client *oauthClient, redirectURI, state, codeChallenge, codeChallengeMethod, scope, resource, agentLabel, inviteCode, errMsg string, signed ...string) {
 	displayName := "this client"
 	if client != nil && strings.TrimSpace(client.ClientName) != "" {
 		displayName = strings.TrimSpace(client.ClientName)
@@ -327,6 +334,20 @@ func (s *Server) renderAuthorizeForm(w http.ResponseWriter, status int, client *
     <input type="password" id="password" name="password" required autofocus autocomplete="current-password">`
 	}
 
+	githubHTML := ""
+	if s.GitHub != nil {
+		if status, err := s.GitHub.Status(); err == nil && status.Enabled && status.Available {
+			githubHTML = `<p style="margin-top:1rem;">Or use your allowed GitHub account:</p><button type="submit" name="operator_login" value="github" formnovalidate style="background:#334155;">Sign in with GitHub</button>`
+		}
+	}
+	if len(signed) == 2 {
+		fieldsHTML = fmt.Sprintf(`<input type="hidden" name="github_consent" value="%s"><input type="hidden" name="invite" value="%s"><p>Signed in with GitHub as <strong>%s</strong>. Review this client and its requested permissions, then approve access.</p>`, html.EscapeString(signed[0]), escapedInviteCode, html.EscapeString(signed[1]))
+		githubHTML = ""
+	}
+	w.Header().Set("Referrer-Policy", "same-origin")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
+
 	doc := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -363,10 +384,11 @@ button:hover { background: #2563eb; }
     <input type="hidden" name="agent_label" value="%s">
     %s
     <button type="submit">Approve Access</button>
+    %s
   </form>
 </div>
 </body>
-</html>`, escapedDisplayName, escapedDisplayName, escapedClientID, escapedScope, errorSection, escapedClientID, escapedRedirectURI, escapedState, escapedCodeChallenge, escapedCodeChallengeMethod, escapedScope, escapedResource, escapedAgentLabel, fieldsHTML)
+</html>`, escapedDisplayName, escapedDisplayName, escapedClientID, escapedScope, errorSection, escapedClientID, escapedRedirectURI, escapedState, escapedCodeChallenge, escapedCodeChallengeMethod, escapedScope, escapedResource, escapedAgentLabel, fieldsHTML, githubHTML)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -375,7 +397,7 @@ button:hover { background: #2563eb; }
 }
 
 // GET /authorize
-func (s *Server) handleAuthorizeGet(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleAuthorizeGet(w http.ResponseWriter, r *http.Request, signed ...string) {
 	q := r.URL.Query()
 	clientID := q.Get("client_id")
 	redirectURI := q.Get("redirect_uri")
@@ -431,7 +453,7 @@ func (s *Server) handleAuthorizeGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.renderAuthorizeForm(w, http.StatusOK, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, resource, agentLabel, inviteCode, "")
+	s.renderAuthorizeForm(w, http.StatusOK, client, redirectURI, state, codeChallenge, codeChallengeMethod, scope, resource, agentLabel, inviteCode, "", signed...)
 }
 
 // POST /authorize
@@ -491,13 +513,29 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	boundForm := consentValues(clientID, redirectURI, state, codeChallenge, codeChallengeMethod, scope, resource, agentLabel, inviteCode)
+	if r.PostForm.Get("operator_login") == "github" {
+		if s.GitHub == nil || s.GitHub.Start(w, r, boundForm) != nil {
+			http.Error(w, operatorlogin.ErrDenied.Error(), http.StatusForbidden)
+		}
+		return
+	}
+	githubApproved := false
+	if proof := r.PostForm.Get("github_consent"); proof != "" {
+		if s.GitHub == nil || s.GitHub.Consume(r, proof, boundForm) != nil {
+			http.Error(w, operatorlogin.ErrDenied.Error(), http.StatusForbidden)
+			return
+		}
+		githubApproved = true
+	}
+
 	expectedHash, err := s.effectivePasswordHash()
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	operatorApproved := password != "" && VerifyPassword(password, expectedHash)
+	operatorApproved := githubApproved || (password != "" && VerifyPassword(password, expectedHash))
 	if hasScope(scope, "config:write") && !operatorApproved {
 		s.jsonOAuthError(w, http.StatusBadRequest, "invalid_scope", "configuration permission requires operator consent")
 		return
@@ -508,7 +546,7 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 	var refCodeID *int64
 
 	// Mint decision logic:
-	// 1. If operator password verifies -> issued_via=operator (even when public is open/ref_code).
+	// 1. If operator password or bound GitHub consent verifies -> issued_via=operator (even when public is open/ref_code).
 	// 2. Else if public_issuance=open -> issued_via=open_register (password may be empty).
 	// 3. Else if public_issuance=ref_code -> require invite form/query; atomic redeem.
 	//    If bind nonempty, redeeming agent_label must match bind. issued_via=ref_code, store ref_code_id on oauth_codes.
@@ -1010,4 +1048,27 @@ func (s *Server) allowRegistration() bool {
 	}
 	s.registrations++
 	return true
+}
+
+// consentValues is the complete, normalized authorization request bound to GitHub login.
+func consentValues(clientID, redirectURI, state, challenge, method, scope, resource, label, invite string) url.Values {
+	return url.Values{"client_id": {clientID}, "redirect_uri": {redirectURI}, "response_type": {"code"}, "state": {state}, "code_challenge": {challenge}, "code_challenge_method": {method}, "scope": {scope}, "resource": {resource}, "agent_label": {label}, "invite": {invite}}
+}
+
+func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	if s.GitHub == nil {
+		http.NotFound(w, r)
+		return
+	}
+	form, proof, login, err := s.GitHub.Finish(r)
+	if err != nil {
+		http.Error(w, operatorlogin.ErrDenied.Error(), http.StatusForbidden)
+		return
+	}
+	// Validate the original client/redirect again before displaying final consent.
+	r2 := r.Clone(r.Context())
+	r2.URL.RawQuery = form.Encode()
+	s.handleAuthorizeGet(w, r2, proof, login)
 }
