@@ -1,6 +1,7 @@
 package mcpoauth
 
 import (
+	"code-guda-gateway/internal/gatewaykeys"
 	"code-guda-gateway/internal/store"
 	"crypto/sha256"
 	"encoding/base64"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type metadataTransport func(*http.Request) (*http.Response, error)
@@ -114,5 +116,44 @@ func TestMetadataClientCompletesPKCEWithoutRegistration(t *testing.T) {
 	form.Set("redirect_uri", "http://127.0.0.1:45678/different-path")
 	if post("/authorize", form).Code != 400 {
 		t.Fatal("loopback matching ignored callback path")
+	}
+}
+
+func TestLegacyGrantIssuedBetweenMigrationAndRestart(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "legacy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	_, key, err := gatewaykeys.CreateOAuthTx(st.DB(), "legacy-client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	_, err = st.DB().Exec(`INSERT INTO oauth_grants(refresh_hash,gateway_key_id,client_id,access_expires_at,refresh_expires_at,created_at) VALUES(?,?,?,?,?,?)`, "old-hash", key.ID, "old-client", now.Add(time.Hour).Format(time.RFC3339Nano), now.Add(24*time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, _ := HashPassword("test-password")
+	if NewServer("https://search.example", hash, st.DB()) == nil {
+		t.Fatal("startup failed")
+	}
+	var resource, family, scope string
+	if err := st.DB().QueryRow(`SELECT resource,family_id,scope FROM oauth_grants WHERE gateway_key_id=?`, key.ID).Scan(&resource, &family, &scope); err != nil {
+		t.Fatal(err)
+	}
+	if resource != "https://search.example/mcp" || family == "" || scope != "mcp offline_access" {
+		t.Fatal("legacy grant was not reconciled")
+	}
+	var histories int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM oauth_refresh_history WHERE refresh_hash='old-hash' AND family_id=?`, family).Scan(&histories); err != nil || histories != 1 {
+		t.Fatal("legacy refresh history missing")
+	}
+	// A later issuer change cannot turn an already-bound grant into another service's token.
+	if NewServer("https://other.example", hash, st.DB()) == nil {
+		t.Fatal("second startup failed")
+	}
+	if err := st.DB().QueryRow(`SELECT resource FROM oauth_grants WHERE gateway_key_id=?`, key.ID).Scan(&resource); err != nil || resource != "https://search.example/mcp" {
+		t.Fatal("existing resource was silently rebound")
 	}
 }

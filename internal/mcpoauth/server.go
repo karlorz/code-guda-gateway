@@ -46,10 +46,7 @@ func NewServer(issuer, passwordHash string, db *sql.DB) *Server {
 	}
 	// Bind only existing service-owned grants/codes during startup. Opaque
 	// OAuth keys are already distinguished from provider/host credentials.
-	if _, err := db.Exec(`UPDATE oauth_grants SET resource = ? WHERE resource = ''`, cleanIssuer+"/mcp"); err != nil {
-		return nil
-	}
-	if _, err := db.Exec(`UPDATE oauth_codes SET resource = ? WHERE resource = ''`, cleanIssuer+"/mcp"); err != nil {
+	if err := bindLegacyGrants(db, cleanIssuer+"/mcp"); err != nil {
 		return nil
 	}
 	return &Server{
