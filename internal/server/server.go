@@ -138,7 +138,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type internalVerifyRequest struct {
-	Token string `json:"token"`
+	Token    string `json:"token"`
+	Resource string `json:"resource"`
 }
 
 type internalVerifyResponse struct {
@@ -147,6 +148,8 @@ type internalVerifyResponse struct {
 	Fingerprint string   `json:"fingerprint"`
 	ClientID    string   `json:"client_id"`
 	Scopes      []string `json:"scopes"`
+	OAuthOwned  bool     `json:"oauth_owned"`
+	Resource    string   `json:"resource,omitempty"`
 }
 
 func (s *Server) handleInternalKeysVerify(w http.ResponseWriter, r *http.Request) {
@@ -192,7 +195,24 @@ func (s *Server) handleInternalKeysVerify(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	resource := ""
+	scopes := []string{"mcp"}
+	grantClientID := ""
 	if key.OAuthOwned {
+		if s.oauthServer == nil {
+			http.Error(w, "unauthorized", 401)
+			return
+		}
+		var scope string
+		if err := s.db.QueryRow(`SELECT resource, scope, client_id FROM oauth_grants WHERE gateway_key_id = ?`, key.ID).Scan(&resource, &scope, &grantClientID); err != nil {
+			http.Error(w, "unauthorized", 401)
+			return
+		}
+		scopes = strings.Fields(scope)
+		if resource != s.oauthServer.ResourceURL() || (req.Resource != "" && req.Resource != resource) {
+			http.Error(w, "unauthorized", 401)
+			return
+		}
 		decision, err := mcpoauth.CheckOAuthGrant(s.db, key.ID)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -213,12 +233,17 @@ func (s *Server) handleInternalKeysVerify(w http.ResponseWriter, r *http.Request
 		clientID = key.Prefix
 	}
 
+	if key.OAuthOwned {
+		clientID = grantClientID
+	}
 	resp := internalVerifyResponse{
 		Name:        key.Name,
 		Prefix:      key.Prefix,
 		Fingerprint: key.Fingerprint,
 		ClientID:    clientID,
-		Scopes:      []string{"mcp"},
+		Scopes:      scopes,
+		OAuthOwned:  key.OAuthOwned,
+		Resource:    resource,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
