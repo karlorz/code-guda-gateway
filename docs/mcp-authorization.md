@@ -11,8 +11,12 @@ Existing dynamic registration at `/register` remains available. Requests are
 limited to 16 KiB, 16 callback URIs, and 60 registrations per minute per process.
 Clients may instead use an HTTPS client metadata-document URL as `client_id`,
 without registering. Documents must identify their own URL, name the client,
-and supply valid callback URIs. Metadata fetches use verified TLS, no ambient
-proxy/cookies, a five-second timeout, a 64 KiB limit, and no redirects. DNS
+and supply valid callback URIs. `token_endpoint_auth_method` may be `none` or
+`private_key_jwt` (ChatGPT CIMD); token exchange remains PKCE S256.
+Confidential methods such as `client_secret_basic` are rejected. Invalid
+metadata is an unknown client (HTTP 400), not an internal error. Metadata
+fetches use verified TLS, no ambient proxy/cookies, a five-second timeout, a
+64 KiB limit, and no redirects. DNS
 addresses are checked and pinned at dial time; private, loopback, link-local,
 mapped-private, and reserved destinations are rejected. Metadata is revalidated
 for each authorization step rather than stored as a permanent registration.
