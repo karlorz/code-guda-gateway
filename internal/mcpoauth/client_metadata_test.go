@@ -49,6 +49,8 @@ func TestClientMetadataValidation(t *testing.T) {
 		valid             bool
 	}{
 		{"valid", `{"client_id":"` + id + `","client_name":"Client","redirect_uris":["https://client.example/callback"]}`, "application/json", 200, true},
+		{"chatgpt cimd", `{"client_id":"` + id + `","client_name":"ChatGPT","redirect_uris":["https://chatgpt.com/connector/oauth/aEKZChZ4XEqQ"],"token_endpoint_auth_method":"private_key_jwt","token_endpoint_auth_methods_supported":["none","private_key_jwt"],"jwks_uri":"https://chatgpt.com/oauth/jwks.json"}`, "application/json", 200, true},
+		{"confidential secret", `{"client_id":"` + id + `","client_name":"Client","redirect_uris":["https://client.example/callback"],"token_endpoint_auth_method":"client_secret_basic"}`, "application/json", 200, false},
 		{"wrong identity", `{"client_id":"https://other.example/meta","client_name":"Client","redirect_uris":["https://client.example/cb"]}`, "application/json", 200, false},
 		{"bad redirect", `{"client_id":"` + id + `","client_name":"Client","redirect_uris":["http://client.example/cb"]}`, "application/json", 200, false},
 		{"oversize", strings.Repeat(" ", 65537), "application/json", 200, false},
@@ -67,6 +69,46 @@ func TestClientMetadataValidation(t *testing.T) {
 				t.Fatal("invalid metadata accepted")
 			}
 		})
+	}
+}
+
+func TestChatGPTCIMDAuthorizeGetDoesNot500(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "chatgpt-cimd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	hash, _ := HashPassword("test-password")
+	s := NewServer("https://search.example", hash, st.DB())
+	id := "https://chatgpt.com/oauth/aEKZChZ4XEqQ/client.json"
+	s.metadataClient = &http.Client{Transport: metadataTransport(func(r *http.Request) (*http.Response, error) {
+		body := `{"client_id":"` + id + `","client_uri":"https://chatgpt.com/","redirect_uris":["https://chatgpt.com/connector/oauth/aEKZChZ4XEqQ"],"token_endpoint_auth_method":"private_key_jwt","token_endpoint_auth_methods_supported":["none","private_key_jwt"],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"client_name":"ChatGPT","jwks_uri":"https://chatgpt.com/oauth/jwks.json"}`
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	verifier := strings.Repeat("a", 43)
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	q := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {id},
+		"redirect_uri":          {"https://chatgpt.com/connector/oauth/aEKZChZ4XEqQ"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"scope":                 {"mcp offline_access config:write"},
+		"resource":              {"https://search.example/mcp"},
+		"state":                 {"oauth_s_test"},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/authorize?"+q.Encode(), nil)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /authorize status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "internal error") {
+		t.Fatal("ChatGPT CIMD authorize returned internal error")
+	}
+	if !strings.Contains(w.Body.String(), "Authorize ChatGPT") {
+		t.Fatalf("form missing ChatGPT client name: %s", w.Body.String())
 	}
 }
 

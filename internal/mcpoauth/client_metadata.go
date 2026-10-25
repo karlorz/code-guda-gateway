@@ -88,28 +88,41 @@ func (s *Server) fetchMetadataClient(clientID string) (*oauthClient, error) {
 	defer resp.Body.Close()
 	media, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if resp.StatusCode != http.StatusOK || (media != "application/json" && !strings.HasSuffix(media, "+json")) {
-		return nil, errors.New("invalid metadata response")
+		return nil, nil
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 65537))
 	if err != nil || len(body) > 65536 {
-		return nil, errors.New("metadata exceeds size limit")
+		return nil, nil
 	}
 	var doc struct {
 		ClientID     string   `json:"client_id"`
 		ClientName   string   `json:"client_name"`
 		RedirectURIs []string `json:"redirect_uris"`
 		AuthMethod   string   `json:"token_endpoint_auth_method"`
+		AuthMethods  []string `json:"token_endpoint_auth_methods_supported"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, err
+		return nil, nil
 	}
-	if doc.ClientID != clientID || strings.TrimSpace(doc.ClientName) == "" || len(doc.ClientName) > 256 || len(doc.RedirectURIs) == 0 || len(doc.RedirectURIs) > 16 || (doc.AuthMethod != "" && doc.AuthMethod != "none") {
-		return nil, errors.New("invalid client metadata")
+	if doc.ClientID != clientID || strings.TrimSpace(doc.ClientName) == "" || len(doc.ClientName) > 256 || len(doc.RedirectURIs) == 0 || len(doc.RedirectURIs) > 16 || !metadataAuthMethodAllowed(doc.AuthMethod, doc.AuthMethods) {
+		return nil, nil
 	}
 	for _, uri := range doc.RedirectURIs {
 		if !ValidateRedirectURI(uri) {
-			return nil, errors.New("invalid metadata redirect")
+			return nil, nil
 		}
 	}
 	return &oauthClient{ClientID: clientID, ClientName: doc.ClientName, RedirectURIs: doc.RedirectURIs}, nil
+}
+
+// ChatGPT CIMD documents prefer private_key_jwt and also advertise none.
+// Token exchange still uses PKCE (code_verifier). Reject confidential-client
+// methods this gateway does not implement.
+func metadataAuthMethodAllowed(method string, _ []string) bool {
+	switch strings.TrimSpace(method) {
+	case "", "none", "private_key_jwt":
+		return true
+	default:
+		return false
+	}
 }
